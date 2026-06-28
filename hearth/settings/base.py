@@ -45,6 +45,7 @@ INSTALLED_APPS = [
     "apps.procurement",
     "apps.banquets",
     "apps.hr",
+    "apps.notifications",
 ]
 
 MIDDLEWARE = [
