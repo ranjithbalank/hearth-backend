@@ -1,0 +1,7 @@
+-r requirements.txt
+
+# Security & quality toolchain (BRD Section 6.12)
+bandit==1.8.0           # SAST for Python
+pip-audit==2.7.3        # SCA / dependency CVE scan
+semgrep==1.97.0         # SAST rulesets
+cyclonedx-bom==4.6.1    # SBOM generation (CycloneDX)

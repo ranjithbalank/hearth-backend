@@ -29,6 +29,7 @@ def get_property():
 class HearthTokenView(TokenObtainPairView):
     serializer_class = HearthTokenSerializer
     permission_classes = [AllowAny]
+    throttle_scope = "auth"  # anti-brute-force (BRD SR-045)
 
     def post(self, request, *args, **kwargs):
         resp = super().post(request, *args, **kwargs)

@@ -98,6 +98,15 @@ class AuditLog(models.Model):
     def __str__(self):
         return f"{self.action} by {self.user} @ {self.created_at:%Y-%m-%d %H:%M}"
 
+    def save(self, *args, **kwargs):
+        # Append-only: once written, an audit row cannot be modified (SR-090, NFR-006).
+        if self.pk is not None:
+            raise PermissionError("Audit log entries are immutable.")
+        return super().save(*args, **kwargs)
+
+    def delete(self, *args, **kwargs):
+        raise PermissionError("Audit log entries cannot be deleted.")
+
 
 def log_action(user, action, entity="", entity_id="", before=None, after=None, note=""):
     """Convenience helper used across the domain apps."""
