@@ -1,4 +1,7 @@
+from decimal import Decimal
+
 from django.db import models
+from django.db.models import Sum
 
 from apps.reservations.models import Reservation
 from apps.rooms.models import Room
@@ -30,11 +33,13 @@ class Folio(models.Model):
 
     @property
     def charges_total(self):
-        return sum((l.total for l in self.lines.all()), start=0)
+        # Aggregate hits the DB every time, so it stays correct even when the
+        # related rows were prefetched (and thus cached) before a new charge/payment.
+        return self.lines.aggregate(s=Sum("total"))["s"] or Decimal("0")
 
     @property
     def paid_total(self):
-        return sum((s.amount for s in self.settlements.all()), start=0)
+        return self.settlements.aggregate(s=Sum("amount"))["s"] or Decimal("0")
 
     @property
     def balance(self):
