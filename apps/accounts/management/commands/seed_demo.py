@@ -17,9 +17,14 @@ from apps.accounts.constants import (
     ROLE_MD,
 )
 from apps.accounts.models import Entitlement, Property, User
+from apps.banquets.models import Event, FunctionSpace
 from apps.channel.models import Channel, ChannelRate
 from apps.crm.models import Customer
+from apps.hr.models import Employee
+from apps.inventory.models import Ingredient
 from apps.pos.models import Category, MenuItem, Table
+from apps.procurement.models import PurchaseOrder, PurchaseOrderLine, Supplier
+from apps.recipes.models import Recipe, RecipeLine
 from apps.reservations.models import Reservation
 from apps.revenue.models import RateRecommendation
 from apps.rooms.models import RatePlan, Room, RoomType
@@ -41,6 +46,9 @@ class Command(BaseCommand):
         self._restaurant()
         self._customers()
         self._distribution(room_types)
+        self._supply_chain()
+        self._banquets()
+        self._hr()
         self.stdout.write(self.style.SUCCESS(
             f"Done. Property '{prop.name}' [{prop.edition}]. "
             f"Logins: md / gm / frontoffice / cashier / housekeeping (pwd: {PASSWORD})"
@@ -212,3 +220,95 @@ class Command(BaseCommand):
                     room_type=room_types[code], current_rate=Decimal(cur),
                     recommended_rate=Decimal(rec), reason=reason, demand_index=idx,
                 )
+
+    def _supply_chain(self):
+        ings = [
+            ("Paneer", "kg", 12, 5, 320), ("Chicken", "kg", 18, 8, 240),
+            ("Basmati Rice", "kg", 40, 15, 95), ("Onion", "kg", 25, 10, 35),
+            ("Tomato", "kg", 20, 8, 40), ("Wheat Flour", "kg", 50, 20, 45),
+            ("Butter", "kg", 8, 4, 480), ("Milk", "l", 30, 12, 60),
+            ("Cooking Oil", "l", 35, 15, 140), ("Sugar", "kg", 22, 10, 48),
+        ]
+        ing_by_name = {}
+        for name, unit, stock, reorder, cost in ings:
+            i, _ = Ingredient.objects.get_or_create(name=name, defaults={
+                "unit": unit, "current_stock": Decimal(stock),
+                "reorder_level": Decimal(reorder), "unit_cost": Decimal(cost),
+                "category": "Kitchen",
+            })
+            ing_by_name[name] = i
+        # Drive one item below par for the low-stock demo.
+        if "Butter" in ing_by_name:
+            b = ing_by_name["Butter"]; b.current_stock = Decimal("3"); b.save()
+
+        # Recipes (BOM) for a few menu items.
+        recipes = {
+            "Paneer Tikka": [("Paneer", 0.2), ("Onion", 0.05), ("Cooking Oil", 0.02)],
+            "Butter Chicken": [("Chicken", 0.25), ("Butter", 0.05), ("Tomato", 0.1)],
+            "Dal Makhani": [("Butter", 0.03), ("Tomato", 0.05), ("Onion", 0.04)],
+            "Chicken Biryani": [("Chicken", 0.2), ("Basmati Rice", 0.18), ("Onion", 0.06)],
+            "Garlic Naan": [("Wheat Flour", 0.12), ("Butter", 0.01)],
+        }
+        for item_name, lines in recipes.items():
+            mi = MenuItem.objects.filter(name=item_name).first()
+            if not mi or hasattr(mi, "recipe"):
+                continue
+            r = Recipe.objects.create(menu_item=mi)
+            for ing_name, qty in lines:
+                if ing_name in ing_by_name:
+                    RecipeLine.objects.create(recipe=r, ingredient=ing_by_name[ing_name],
+                                              qty=Decimal(str(qty)))
+
+        # Suppliers + a pending and an approved PO.
+        suppliers = [
+            ("Fresh Farms Pvt Ltd", "29AAACF1234A1Z1", "Veg & dairy", 1, 4.6),
+            ("Metro Cash & Carry", "29AAACM5678B1Z2", "Dry goods", 2, 4.3),
+            ("Coastal Meats", "29AAACC9012C1Z3", "Poultry & meat", 1, 4.8),
+        ]
+        sup_objs = []
+        for name, gstin, terms, lead, rating in suppliers:
+            s, _ = Supplier.objects.get_or_create(name=name, defaults={
+                "gstin": gstin, "payment_terms": terms,
+                "lead_time_days": lead, "rating": Decimal(str(rating)),
+            })
+            sup_objs.append(s)
+        if not PurchaseOrder.objects.exists() and ing_by_name:
+            po1 = PurchaseOrder.objects.create(supplier=sup_objs[0], status=PurchaseOrder.PENDING)
+            PurchaseOrderLine.objects.create(purchase_order=po1, ingredient=ing_by_name["Butter"],
+                                             qty=Decimal("10"), rate=Decimal("480"))
+            PurchaseOrderLine.objects.create(purchase_order=po1, ingredient=ing_by_name["Milk"],
+                                             qty=Decimal("20"), rate=Decimal("60"))
+            po2 = PurchaseOrder.objects.create(supplier=sup_objs[2], status=PurchaseOrder.APPROVED)
+            PurchaseOrderLine.objects.create(purchase_order=po2, ingredient=ing_by_name["Chicken"],
+                                             qty=Decimal("15"), rate=Decimal("240"))
+
+    def _banquets(self):
+        spaces = [("Grand Ballroom", 400), ("Garden Lawn", 250), ("Boardroom", 40)]
+        sp = {}
+        for name, cap in spaces:
+            s, _ = FunctionSpace.objects.get_or_create(name=name, defaults={"capacity": cap})
+            sp[name] = s
+        if not Event.objects.exists():
+            from datetime import timedelta
+            today = date.today()
+            Event.objects.create(space=sp["Grand Ballroom"], title="Sharma Wedding Reception",
+                                 host="Sharma Family", event_date=today + timedelta(days=10),
+                                 covers=300, package_amount=Decimal("450000"),
+                                 deposit=Decimal("100000"), status=Event.CONFIRMED)
+            Event.objects.create(space=sp["Garden Lawn"], title="TechCorp Annual Offsite",
+                                 host="TechCorp", event_date=today + timedelta(days=20),
+                                 covers=150, package_amount=Decimal("220000"),
+                                 status=Event.TENTATIVE)
+
+    def _hr(self):
+        if Employee.objects.exists():
+            return
+        staff = [
+            ("Anil Kumar", "Front Office", "Front Office Manager", ["M","M","M","O","E","E","M"]),
+            ("Sunita Pal", "Housekeeping", "HK Supervisor", ["M","M","M","M","O","M","M"]),
+            ("Priya Nair", "F&B", "Cashier", ["E","E","O","E","E","N","N"]),
+            ("Ravi Shah", "Kitchen", "Sous Chef", ["M","O","M","M","M","M","O"]),
+            ("Deepa Iyer", "Reservations", "Reservations Exec", ["M","M","M","M","M","O","O"]),
+        ]
+        for name, dept, role, shifts in staff:
+            Employee.objects.create(name=name, department=dept, role=role, shifts=shifts)

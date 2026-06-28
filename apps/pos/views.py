@@ -95,6 +95,10 @@ class OrderViewSet(ModuleViewSetMixin, viewsets.ModelViewSet):
         pending = order.lines.filter(kot_fired=False)
         if not pending.exists():
             return Response({"detail": "nothing new to fire"}, status=400)
+        # Cross-module seam: deduct recipe ingredients for the newly fired lines
+        # before flipping kot_fired (so the deduction sees only this round).
+        from apps.recipes.services import deduct_for_newly_fired
+        deduct_for_newly_fired(order, list(pending))
         pending.update(kot_fired=True)
         if not order.kot_no:
             order.kot_no = f"KOT-{order.id:05d}"
