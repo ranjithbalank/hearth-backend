@@ -5,7 +5,7 @@ from rest_framework.response import Response
 from rest_framework.views import APIView
 from rest_framework_simplejwt.views import TokenObtainPairView
 
-from .constants import edition_entitlements
+from .constants import ALL_MODULES, ROLE_ALLOW, edition_entitlements
 from .models import Entitlement, Property, User, log_action
 from .permissions import ModuleViewSetMixin
 from .serializers import (
@@ -106,3 +106,24 @@ class UserViewSet(ModuleViewSetMixin, viewsets.ModelViewSet):
     module = "settings"
     queryset = User.objects.all().order_by("role", "username")
     serializer_class = UserSerializer
+
+
+class RoleMatrixView(APIView):
+    """Role × module permission matrix (BRD FR-USR-002 / 5.10).
+
+    Reflects the server-enforced allow-lists. Read-only here because the
+    allow-lists are code constants; editing them is a deliberate change.
+    """
+
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request):
+        roles = list(ROLE_ALLOW.keys())
+        matrix = []
+        for module in ALL_MODULES:
+            cells = []
+            for role in roles:
+                allow = ROLE_ALLOW[role]
+                cells.append(allow == "*" or module in allow)
+            matrix.append({"module": module, "cells": cells})
+        return Response({"roles": roles, "matrix": matrix})

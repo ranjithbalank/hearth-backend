@@ -6,6 +6,7 @@ from .views import (
     HearthTokenView,
     MeView,
     PropertyView,
+    RoleMatrixView,
     SetupView,
     UserViewSet,
 )
@@ -19,5 +20,6 @@ urlpatterns = [
     path("property/", PropertyView.as_view(), name="property"),
     path("setup/", SetupView.as_view(), name="setup"),
     path("entitlements/", EntitlementView.as_view(), name="entitlements"),
+    path("roles/matrix/", RoleMatrixView.as_view(), name="roles-matrix"),
     path("", include(router.urls)),
 ]
