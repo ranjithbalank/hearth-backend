@@ -17,9 +17,11 @@ from apps.accounts.constants import (
     ROLE_MD,
 )
 from apps.accounts.models import Entitlement, Property, User
+from apps.channel.models import Channel, ChannelRate
 from apps.crm.models import Customer
 from apps.pos.models import Category, MenuItem, Table
 from apps.reservations.models import Reservation
+from apps.revenue.models import RateRecommendation
 from apps.rooms.models import RatePlan, Room, RoomType
 
 PASSWORD = "hearth123"
@@ -38,6 +40,7 @@ class Command(BaseCommand):
         self._reservations(room_types)
         self._restaurant()
         self._customers()
+        self._distribution(room_types)
         self.stdout.write(self.style.SUCCESS(
             f"Done. Property '{prop.name}' [{prop.edition}]. "
             f"Logins: md / gm / frontoffice / cashier / housekeeping (pwd: {PASSWORD})"
@@ -180,3 +183,32 @@ class Command(BaseCommand):
                 "outstanding": Decimal(outstanding),
                 "gstin": "29AACCA1234R1Z9" if ctype == "corporate" else "",
             })
+
+    def _distribution(self, room_types):
+        channels = [
+            ("Booking.com", 15), ("Expedia", 18), ("Agoda", 17),
+            ("MakeMyTrip", 16), ("Airbnb", 14), ("Google", 12),
+        ]
+        chans = []
+        for name, comm in channels:
+            c, _ = Channel.objects.get_or_create(name=name, defaults={"commission_pct": comm})
+            chans.append(c)
+        # Seed ARI; introduce one deliberate parity breach on STD for the demo.
+        for code, rt in room_types.items():
+            for i, ch in enumerate(chans):
+                rate = rt.base_rate + (200 if code == "STD" and ch.name == "Expedia" else 0)
+                ChannelRate.objects.get_or_create(
+                    channel=ch, room_type=rt,
+                    defaults={"rate": rate, "availability": 4},
+                )
+        if not RateRecommendation.objects.exists():
+            recs = [
+                ("DLX", 6500, 7200, "High weekend demand; +10.8%", 78),
+                ("STE", 9500, 8800, "Soft midweek pickup; -7.4%", 38),
+                ("STD", 4500, 4900, "Competitor parity gap; +8.9%", 64),
+            ]
+            for code, cur, rec, reason, idx in recs:
+                RateRecommendation.objects.create(
+                    room_type=room_types[code], current_rate=Decimal(cur),
+                    recommended_rate=Decimal(rec), reason=reason, demand_index=idx,
+                )

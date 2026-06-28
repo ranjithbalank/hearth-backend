@@ -37,6 +37,9 @@ INSTALLED_APPS = [
     "apps.tax",
     "apps.crm",
     "apps.reports",
+    "apps.revenue",
+    "apps.channel",
+    "apps.booking",
 ]
 
 MIDDLEWARE = [
