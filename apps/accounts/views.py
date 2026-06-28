@@ -109,6 +109,48 @@ class UserViewSet(ModuleViewSetMixin, viewsets.ModelViewSet):
     serializer_class = UserSerializer
 
 
+class MfaSetupView(APIView):
+    """Begin TOTP enrolment: returns a secret + otpauth URI for the authenticator app."""
+
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request):
+        from . import mfa
+        secret = mfa.new_secret()
+        request.user.mfa_secret = secret
+        request.user.save(update_fields=["mfa_secret"])
+        return Response({
+            "secret": secret,
+            "otpauth_uri": mfa.provisioning_uri(request.user, secret),
+        })
+
+
+class MfaVerifyView(APIView):
+    """Confirm a TOTP code to enable MFA on the account."""
+
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request):
+        from . import mfa
+        if mfa.verify(request.user.mfa_secret, request.data.get("otp")):
+            request.user.mfa_enabled = True
+            request.user.save(update_fields=["mfa_enabled"])
+            log_action(request.user, "mfa_enabled", entity="User", entity_id=request.user.id)
+            return Response({"mfa_enabled": True})
+        return Response({"detail": "Invalid code"}, status=status.HTTP_400_BAD_REQUEST)
+
+
+class MfaDisableView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request):
+        request.user.mfa_enabled = False
+        request.user.mfa_secret = ""
+        request.user.save(update_fields=["mfa_enabled", "mfa_secret"])
+        log_action(request.user, "mfa_disabled", entity="User", entity_id=request.user.id)
+        return Response({"mfa_enabled": False})
+
+
 class RoleMatrixView(APIView):
     """Role × module permission matrix (BRD FR-USR-002 / 5.10).
 

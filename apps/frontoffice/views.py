@@ -64,6 +64,20 @@ class CheckInView(ModuleViewSetMixin, viewsets.ViewSet):
         if room is None:
             return Response({"detail": "no sellable room available"}, status=400)
         folio = services.check_in(resv, room, user=request.user)
+        # Capture KYC + guest-type from the multi-step wizard (BRD FR-PMS-004/012).
+        id_type = request.data.get("id_type")
+        guest_type = request.data.get("guest_type")
+        if id_type or guest_type:
+            from apps.accounts.models import log_action
+            log_action(
+                request.user, "kyc_capture", entity="Folio", entity_id=folio.id,
+                after={"id_type": id_type, "id_number_present": bool(request.data.get("id_number")),
+                       "guest_type": guest_type},
+                note="Check-in KYC captured",
+            )
+            if guest_type == "corporate":
+                folio.routing = "city_ledger"
+                folio.save(update_fields=["routing"])
         return Response(FolioSerializer(folio).data, status=status.HTTP_201_CREATED)
 
 

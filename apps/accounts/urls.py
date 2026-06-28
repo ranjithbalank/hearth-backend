@@ -5,6 +5,9 @@ from .views import (
     EntitlementView,
     HearthTokenView,
     MeView,
+    MfaDisableView,
+    MfaSetupView,
+    MfaVerifyView,
     PropertyView,
     RoleMatrixView,
     SetupView,
@@ -21,5 +24,8 @@ urlpatterns = [
     path("setup/", SetupView.as_view(), name="setup"),
     path("entitlements/", EntitlementView.as_view(), name="entitlements"),
     path("roles/matrix/", RoleMatrixView.as_view(), name="roles-matrix"),
+    path("mfa/setup/", MfaSetupView.as_view(), name="mfa-setup"),
+    path("mfa/verify/", MfaVerifyView.as_view(), name="mfa-verify"),
+    path("mfa/disable/", MfaDisableView.as_view(), name="mfa-disable"),
     path("", include(router.urls)),
 ]

@@ -1,5 +1,8 @@
+import csv
+import io
 from decimal import Decimal
 
+from django.http import HttpResponse
 from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
 from rest_framework.views import APIView
@@ -95,6 +98,68 @@ class SalesSummaryView(ModuleAPIView):
 
     def get(self, request):
         return Response({"rooms": _room_kpis(), "fnb": _fnb_kpis()})
+
+
+def _report_rows(report):
+    """Return (title, header, rows) for an exportable report."""
+    if report == "sales":
+        r, f = _room_kpis(), _fnb_kpis()
+        return ("Sales Summary", ["Metric", "Value"], [
+            ["Occupancy %", r["occupancy_pct"]],
+            ["ADR", r["adr"]],
+            ["RevPAR", r["revpar"]],
+            ["Room revenue", r["room_revenue"]],
+            ["F&B sales", f["fnb_sales"]],
+            ["F&B orders", f["order_count"]],
+        ])
+    if report == "tax":
+        from collections import defaultdict
+        agg = defaultdict(lambda: [Decimal("0")] * 4)
+        for line in FolioLine.objects.exclude(kind=FolioLine.KIND_TAX):
+            a = agg[str(line.gst_rate)]
+            a[0] += line.taxable; a[1] += line.cgst; a[2] += line.sgst; a[3] += line.total
+        rows = [[rate, v[0], v[1], v[2], v[3]] for rate, v in sorted(agg.items())]
+        return ("GST Summary", ["Rate %", "Taxable", "CGST", "SGST", "Total"], rows)
+    # occupancy / rooms
+    rows = [[r.number, r.room_type_code, r.get_status_display()]
+            for r in Room.objects.select_related("room_type")]
+    return ("Room Status", ["Room", "Type", "Status"], rows)
+
+
+class ReportExportView(ModuleAPIView):
+    module = "reports"
+
+    def get(self, request):
+        report = request.query_params.get("report", "sales")
+        # NB: avoid the query param name 'format' — DRF reserves it as a renderer override.
+        fmt = request.query_params.get("fmt", "xlsx")
+        title, header, rows = _report_rows(report)
+
+        if fmt == "csv":
+            buf = io.StringIO()
+            w = csv.writer(buf)
+            w.writerow(header)
+            for row in rows:
+                w.writerow(row)
+            resp = HttpResponse(buf.getvalue(), content_type="text/csv")
+            resp["Content-Disposition"] = f'attachment; filename="{report}.csv"'
+            return resp
+
+        from openpyxl import Workbook
+        wb = Workbook()
+        ws = wb.active
+        ws.title = title[:31]
+        ws.append(header)
+        for row in rows:
+            ws.append([str(c) for c in row])
+        out = io.BytesIO()
+        wb.save(out)
+        resp = HttpResponse(
+            out.getvalue(),
+            content_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        )
+        resp["Content-Disposition"] = f'attachment; filename="{report}.xlsx"'
+        return resp
 
 
 class CatalogueView(ModuleAPIView):

@@ -152,3 +152,7 @@ CORS_ALLOWED_ORIGINS = env.list(
 
 # Hearth domain constants
 CURRENCY = "INR"
+
+# Roles for which MFA is mandatory (BRD SR-040). Empty in dev so demo logins work;
+# production should enforce e.g. ["Managing Director", "General Manager"].
+MFA_ENFORCED_ROLES = env.list("MFA_ENFORCED_ROLES", default=[])

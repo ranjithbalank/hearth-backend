@@ -73,6 +73,9 @@ class User(AbstractUser):
     discount_cap_type = models.CharField(max_length=10, choices=CAP_CHOICES, default=CAP_NONE)
     discount_cap_value = models.DecimalField(max_digits=10, decimal_places=2, default=0)
     rights = models.JSONField(default=list, blank=True)
+    # MFA / TOTP (BRD SR-040)
+    mfa_enabled = models.BooleanField(default=False)
+    mfa_secret = models.CharField(max_length=64, blank=True)
 
     def __str__(self):
         return f"{self.get_full_name() or self.username} ({self.role})"

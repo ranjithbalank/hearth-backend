@@ -2,6 +2,7 @@ from rest_framework import viewsets
 from rest_framework.decorators import action
 from rest_framework.response import Response
 
+from apps.accounts.models import log_action
 from apps.accounts.permissions import ModuleViewSetMixin
 
 from .models import Customer
@@ -31,3 +32,36 @@ class CustomerViewSet(ModuleViewSetMixin, viewsets.ModelViewSet):
         if not cust:
             return Response({"found": False})
         return Response({"found": True, "customer": CustomerSerializer(cust).data})
+
+    @action(detail=True, methods=["get"])
+    def export(self, request, pk=None):
+        """DPDP data-subject access request: full profile + linked activity (SR-054)."""
+        cust = self.get_object()
+        orders = list(cust.orders.values("id", "mode", "status", "created_at"))
+        reservations = list(
+            cust.reservations.values("id", "checkin_date", "checkout_date", "status")
+        )
+        log_action(request.user, "dpdp_export", entity="Customer", entity_id=cust.id)
+        return Response({
+            "profile": CustomerSerializer(cust).data,
+            "orders": orders,
+            "reservations": reservations,
+        })
+
+    @action(detail=True, methods=["post"])
+    def erase(self, request, pk=None):
+        """DPDP erasure: anonymise PII while preserving financial records (SR-053/054)."""
+        cust = self.get_object()
+        before = {"name": cust.name, "mobile": cust.mobile, "email": cust.email}
+        cust.name = f"Erased Customer {cust.id}"
+        cust.mobile = f"erased-{cust.id}"
+        cust.email = ""
+        cust.address = ""
+        cust.locality = ""
+        cust.gstin = ""
+        cust.marketing_consent = False
+        cust.tags = []
+        cust.save()
+        log_action(request.user, "dpdp_erase", entity="Customer", entity_id=cust.id,
+                   before=before, after={"anonymised": True})
+        return Response({"erased": True, "customer": CustomerSerializer(cust).data})

@@ -1,6 +1,7 @@
 from rest_framework import serializers
 from rest_framework_simplejwt.serializers import TokenObtainPairSerializer
 
+from . import mfa
 from .constants import ROLE_ALLOW
 from .models import Entitlement, Property, User
 
@@ -15,6 +16,7 @@ class UserSerializer(serializers.ModelSerializer):
             "id", "username", "name", "first_name", "last_name", "email",
             "role", "user_code", "phone", "discount_cap_type",
             "discount_cap_value", "rights", "is_active", "allowed_modules",
+            "mfa_enabled",
         ]
 
     def get_name(self, obj):
@@ -52,5 +54,18 @@ class HearthTokenSerializer(TokenObtainPairSerializer):
 
     def validate(self, attrs):
         data = super().validate(attrs)
+        user = self.user
+        # Enforce MFA when the user has it enabled, or policy requires it.
+        if user.mfa_enabled or mfa.role_requires_mfa(user.role):
+            if not user.mfa_enabled:
+                raise serializers.ValidationError(
+                    {"mfa_required": True,
+                     "detail": "MFA is required for your role. Enrol a TOTP authenticator."}
+                )
+            otp = self.initial_data.get("otp")
+            if not mfa.verify(user.mfa_secret, otp):
+                raise serializers.ValidationError(
+                    {"mfa_required": True, "detail": "A valid authenticator code is required."}
+                )
         data["user"] = UserSerializer(self.user).data
         return data
