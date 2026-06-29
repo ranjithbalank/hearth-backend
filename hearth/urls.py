@@ -1,6 +1,7 @@
 from django.contrib import admin
 from django.http import JsonResponse
 from django.urls import include, path
+from drf_spectacular.views import SpectacularAPIView, SpectacularSwaggerView
 from rest_framework_simplejwt.views import TokenRefreshView
 
 
@@ -10,6 +11,8 @@ def health(_request):
 
 api_patterns = [
     path("health/", health, name="health"),
+    path("schema/", SpectacularAPIView.as_view(), name="schema"),
+    path("docs/", SpectacularSwaggerView.as_view(url_name="schema"), name="swagger-ui"),
     path("auth/", include("apps.accounts.urls")),
     path("auth/token/refresh/", TokenRefreshView.as_view(), name="token_refresh"),
     path("", include("apps.rooms.urls")),
@@ -29,6 +32,7 @@ api_patterns = [
     path("", include("apps.banquets.urls")),
     path("", include("apps.hr.urls")),
     path("", include("apps.notifications.urls")),
+    path("", include("apps.integrations.urls")),
 ]
 
 urlpatterns = [

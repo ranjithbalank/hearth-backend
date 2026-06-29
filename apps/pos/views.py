@@ -357,22 +357,35 @@ class OrderViewSet(ModuleViewSetMixin, viewsets.ModelViewSet):
 
     @action(detail=True, methods=["post"])
     def settle(self, request, pk=None):
-        """Settle by tender at the outlet (FR-PAY-001)."""
+        """Settle by tender at the outlet (FR-PAY-001).
+
+        tender 'Gateway' routes through the payment provider with a token
+        (PCI-safe — no card data touches us; FR-PAY-008 / SR-060).
+        """
         order = self.get_object()
         t = order.totals()
-        Settlement.objects.create(
-            tender=request.data.get("tender", "Cash"),
-            amount=t["total"],
-            reference=request.data.get("reference", f"POS order {order.id}"),
-        )
+        tender = request.data.get("tender", "Cash")
+        reference = request.data.get("reference", f"POS order {order.id}")
+        if tender == "Gateway":
+            from apps.integrations import services as integ
+            result = integ.charge_card(t["total"], request.data.get("token", ""), reference)
+            if result.get("status") != "approved":
+                return Response({"detail": result.get("reason", "payment declined")}, status=402)
+            reference = result["ref"]
+        Settlement.objects.create(tender=tender, amount=t["total"], reference=reference)
         self._finalize_promotions(order, t["total"])
         order.status = Order.SETTLED
         order.save(update_fields=["status"])
         if order.table:
             order.table.status = Table.FREE
             order.table.save(update_fields=["status"])
+        # Receipt notification to the customer (FR-NOT-001).
+        if order.customer:
+            from apps.integrations import services as integ
+            integ.notify("sms", order.customer.mobile,
+                         f"Thanks for dining with Hearth! Bill {reference}: ₹{t['total']}.")
         log_action(request.user, "pos_settle", entity="Order", entity_id=order.id,
-                   after={"total": str(t["total"]), "discount": str(t["discount"])})
+                   after={"total": str(t["total"]), "discount": str(t["discount"]), "tender": tender})
         return Response(OrderSerializer(order).data)
 
     @action(detail=True, methods=["post"])

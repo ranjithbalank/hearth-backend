@@ -27,6 +27,7 @@ INSTALLED_APPS = [
     # third party
     "rest_framework",
     "corsheaders",
+    "drf_spectacular",
     # local apps
     "apps.accounts",
     "apps.rooms",
@@ -46,6 +47,7 @@ INSTALLED_APPS = [
     "apps.banquets",
     "apps.hr",
     "apps.notifications",
+    "apps.integrations",
 ]
 
 MIDDLEWARE = [
@@ -128,6 +130,7 @@ REST_FRAMEWORK = {
     "DEFAULT_RENDERER_CLASSES": (
         "rest_framework.renderers.JSONRenderer",
     ),
+    "DEFAULT_SCHEMA_CLASS": "drf_spectacular.openapi.AutoSchema",
     # Anti-brute-force / anti-automation (BRD SR-023, SR-045).
     "DEFAULT_THROTTLE_CLASSES": (
         "rest_framework.throttling.ScopedRateThrottle",
@@ -150,6 +153,13 @@ CORS_ALLOWED_ORIGINS = env.list(
     "CORS_ORIGINS",
     default=["http://127.0.0.1:5173", "http://localhost:5173"],
 )
+
+SPECTACULAR_SETTINGS = {
+    "TITLE": "Hearth API",
+    "DESCRIPTION": "Hotel & Restaurant OS — REST API",
+    "VERSION": "1.0.0",
+    "SERVE_INCLUDE_SCHEMA": False,
+}
 
 # Hearth domain constants
 CURRENCY = "INR"
