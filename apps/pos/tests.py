@@ -7,7 +7,7 @@ from rest_framework.test import APIClient
 from apps.accounts.models import User
 from apps.crm.models import Customer
 
-from .models import Category, Coupon, MenuItem, Order, OrderLine
+from .models import AddOn, AddOnGroup, Category, Coupon, MenuItem, Order, OrderLine, Variant
 
 
 class DiscountLoyaltyTests(TestCase):
@@ -69,6 +69,29 @@ class DiscountLoyaltyTests(TestCase):
         r = self.client.post(reverse("order-apply-coupon", args=[o.id]),
                              {"code": "FLAT100"}, format="json")
         self.assertEqual(r.status_code, 400)
+
+    def test_variant_and_addon_pricing(self):
+        self.client.force_authenticate(self.mgr)
+        full = Variant.objects.create(menu_item=self.item, name="Full", price=Decimal("500"))
+        grp = AddOnGroup.objects.create(menu_item=self.item, name="Extras", min_select=0, max_select=2)
+        egg = AddOn.objects.create(group=grp, name="Egg", price=Decimal("25"))
+        o = Order.objects.create(mode=Order.DINEIN)
+        r = self.client.post(reverse("order-add-item", args=[o.id]),
+                             {"menu_item": self.item.id, "qty": 1,
+                              "variant": full.id, "addons": [egg.id]}, format="json")
+        self.assertEqual(r.status_code, 200)
+        line = o.lines.first()
+        self.assertEqual(line.unit_price, Decimal("525.00"))  # 500 variant + 25 add-on
+        self.assertEqual(line.addons[0]["name"], "Egg")
+
+    def test_required_addon_group_enforced(self):
+        self.client.force_authenticate(self.mgr)
+        grp = AddOnGroup.objects.create(menu_item=self.item, name="Spice", min_select=1, max_select=1)
+        AddOn.objects.create(group=grp, name="Mild", price=Decimal("0"))
+        o = Order.objects.create(mode=Order.DINEIN)
+        r = self.client.post(reverse("order-add-item", args=[o.id]),
+                             {"menu_item": self.item.id, "qty": 1}, format="json")
+        self.assertEqual(r.status_code, 400)  # required group not satisfied
 
     def test_loyalty_accrues_on_settle(self):
         cust = Customer.objects.create(name="Reg", mobile="9000000000", loyalty_points=0)

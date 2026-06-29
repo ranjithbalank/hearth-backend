@@ -67,6 +67,43 @@ class MenuItem(models.Model):
         return self.name
 
 
+class Variant(models.Model):
+    """A priced variant of an item, e.g. Half/Full, S/M/L (BRD FR-MNU-004)."""
+
+    menu_item = models.ForeignKey(MenuItem, on_delete=models.CASCADE, related_name="variants")
+    name = models.CharField(max_length=60)
+    price = models.DecimalField(max_digits=10, decimal_places=2)
+    short_code = models.CharField(max_length=20, blank=True)
+
+    def __str__(self):
+        return f"{self.menu_item.name} — {self.name}"
+
+
+class AddOnGroup(models.Model):
+    """A group of modifiers with selection rules (BRD FR-MNU-005)."""
+
+    menu_item = models.ForeignKey(MenuItem, on_delete=models.CASCADE, related_name="addon_groups")
+    name = models.CharField(max_length=60)
+    min_select = models.PositiveSmallIntegerField(default=0)
+    max_select = models.PositiveSmallIntegerField(default=1)
+
+    @property
+    def required(self):
+        return self.min_select > 0
+
+    def __str__(self):
+        return f"{self.menu_item.name} · {self.name}"
+
+
+class AddOn(models.Model):
+    group = models.ForeignKey(AddOnGroup, on_delete=models.CASCADE, related_name="options")
+    name = models.CharField(max_length=60)
+    price = models.DecimalField(max_digits=10, decimal_places=2, default=0)
+
+    def __str__(self):
+        return self.name
+
+
 class Order(models.Model):
     DINEIN = "dinein"
     TAKEAWAY = "takeaway"
@@ -187,6 +224,8 @@ class Coupon(models.Model):
 class OrderLine(models.Model):
     order = models.ForeignKey(Order, on_delete=models.CASCADE, related_name="lines")
     menu_item = models.ForeignKey(MenuItem, on_delete=models.PROTECT)
+    variant = models.ForeignKey(Variant, on_delete=models.SET_NULL, null=True, blank=True)
+    addons = models.JSONField(default=list, blank=True, help_text="[{name, price}]")
     qty = models.PositiveSmallIntegerField(default=1)
     unit_price = models.DecimalField(max_digits=10, decimal_places=2)
     note = models.CharField(max_length=120, blank=True)
@@ -194,3 +233,12 @@ class OrderLine(models.Model):
 
     def __str__(self):
         return f"{self.qty}× {self.menu_item.name}"
+
+    @property
+    def display_name(self):
+        bits = [self.menu_item.name]
+        if self.variant_id:
+            bits.append(f"({self.variant.name})")
+        if self.addons:
+            bits.append("+ " + ", ".join(a["name"] for a in self.addons))
+        return " ".join(bits)

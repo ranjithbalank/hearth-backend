@@ -10,7 +10,7 @@ from apps.accounts.permissions import ModuleViewSetMixin, active_entitlements
 from apps.frontoffice import services as fo_services
 from apps.frontoffice.models import Folio, FolioLine, Settlement
 
-from .models import Category, Coupon, MenuItem, Order, OrderLine, Table
+from .models import AddOn, Category, Coupon, MenuItem, Order, OrderLine, Table, Variant
 from .serializers import (
     CategorySerializer,
     MenuItemSerializer,
@@ -89,15 +89,45 @@ class OrderViewSet(ModuleViewSetMixin, viewsets.ModelViewSet):
         if not item:
             return Response({"detail": "menu_item not found"}, status=404)
         qty = int(request.data.get("qty", 1))
-        line = order.lines.filter(menu_item=item, kot_fired=False, note="").first()
-        if line:
-            line.qty += qty
-            line.save(update_fields=["qty"])
-        else:
-            line = OrderLine.objects.create(
-                order=order, menu_item=item, qty=qty,
-                unit_price=item.price, note=request.data.get("note", ""),
-            )
+
+        # Variant pricing (FR-MNU-004)
+        variant = None
+        base_price = item.price
+        variant_id = request.data.get("variant")
+        if variant_id:
+            variant = Variant.objects.filter(pk=variant_id, menu_item=item).first()
+            if not variant:
+                return Response({"detail": "invalid variant"}, status=400)
+            base_price = variant.price
+
+        # Add-ons + min/max validation (FR-MNU-005)
+        addon_ids = request.data.get("addons", [])
+        addons, addon_total = [], Decimal("0")
+        if addon_ids:
+            chosen = AddOn.objects.filter(id__in=addon_ids, group__menu_item=item).select_related("group")
+            for a in chosen:
+                addons.append({"name": a.name, "price": str(a.price)})
+                addon_total += a.price
+        for grp in item.addon_groups.all():
+            picked = sum(1 for a in AddOn.objects.filter(id__in=addon_ids, group=grp))
+            if picked < grp.min_select:
+                return Response({"detail": f"'{grp.name}' requires at least {grp.min_select} choice(s)"}, status=400)
+            if grp.max_select and picked > grp.max_select:
+                return Response({"detail": f"'{grp.name}' allows at most {grp.max_select}"}, status=400)
+
+        unit_price = base_price + addon_total
+        # Only merge identical simple lines (no variant/addons) to keep modifiers distinct.
+        if not variant and not addons:
+            existing = order.lines.filter(menu_item=item, variant__isnull=True,
+                                          kot_fired=False, note="").first()
+            if existing and not existing.addons:
+                existing.qty += qty
+                existing.save(update_fields=["qty"])
+                return Response(OrderSerializer(order).data)
+        OrderLine.objects.create(
+            order=order, menu_item=item, variant=variant, addons=addons,
+            qty=qty, unit_price=unit_price, note=request.data.get("note", ""),
+        )
         return Response(OrderSerializer(order).data)
 
     @action(detail=True, methods=["post"])

@@ -1,6 +1,6 @@
 from rest_framework import serializers
 
-from .models import Category, MenuItem, Order, OrderLine, Table
+from .models import AddOn, AddOnGroup, Category, MenuItem, Order, OrderLine, Table, Variant
 
 
 class TableSerializer(serializers.ModelSerializer):
@@ -17,26 +17,49 @@ class CategorySerializer(serializers.ModelSerializer):
         fields = ["id", "name", "sort_order"]
 
 
+class VariantSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = Variant
+        fields = ["id", "name", "price", "short_code"]
+
+
+class AddOnSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = AddOn
+        fields = ["id", "name", "price"]
+
+
+class AddOnGroupSerializer(serializers.ModelSerializer):
+    options = AddOnSerializer(many=True, read_only=True)
+
+    class Meta:
+        model = AddOnGroup
+        fields = ["id", "name", "min_select", "max_select", "options"]
+
+
 class MenuItemSerializer(serializers.ModelSerializer):
     category_name = serializers.CharField(source="category.name", read_only=True)
+    variants = VariantSerializer(many=True, read_only=True)
+    addon_groups = AddOnGroupSerializer(many=True, read_only=True)
 
     class Meta:
         model = MenuItem
         fields = [
             "id", "name", "short_code", "category", "category_name", "price",
-            "gst_rate", "diet", "station", "available",
+            "gst_rate", "diet", "station", "available", "variants", "addon_groups",
         ]
 
 
 class OrderLineSerializer(serializers.ModelSerializer):
-    name = serializers.CharField(source="menu_item.name", read_only=True)
+    name = serializers.CharField(source="display_name", read_only=True)
     gst_rate = serializers.DecimalField(
         source="menu_item.gst_rate", max_digits=4, decimal_places=1, read_only=True
     )
 
     class Meta:
         model = OrderLine
-        fields = ["id", "menu_item", "name", "qty", "unit_price", "note", "kot_fired", "gst_rate"]
+        fields = ["id", "menu_item", "name", "variant", "addons", "qty",
+                  "unit_price", "note", "kot_fired", "gst_rate"]
 
 
 class OrderSerializer(serializers.ModelSerializer):

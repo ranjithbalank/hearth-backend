@@ -22,7 +22,7 @@ from apps.channel.models import Channel, ChannelRate
 from apps.crm.models import Customer
 from apps.hr.models import Employee
 from apps.inventory.models import Ingredient
-from apps.pos.models import Category, Coupon, MenuItem, Table
+from apps.pos.models import AddOn, AddOnGroup, Category, Coupon, MenuItem, Table, Variant
 from apps.procurement.models import PurchaseOrder, PurchaseOrderLine, Supplier
 from apps.recipes.models import Recipe, RecipeLine
 from apps.reservations.models import Reservation
@@ -192,6 +192,20 @@ class Command(BaseCommand):
         Coupon.objects.get_or_create(code="FLAT100", defaults={
             "kind": "fixed", "value": Decimal("100"), "min_bill": Decimal("400"),
             "usage_limit": 100})
+
+        # Variants + add-ons on a couple of items (BRD 5.11).
+        biry = MenuItem.objects.filter(name="Chicken Biryani").first()
+        if biry and not biry.variants.exists():
+            Variant.objects.create(menu_item=biry, name="Half", price=Decimal("240"), short_code="H")
+            Variant.objects.create(menu_item=biry, name="Full", price=Decimal("360"), short_code="F")
+            g = AddOnGroup.objects.create(menu_item=biry, name="Add-ons", min_select=0, max_select=2)
+            AddOn.objects.create(group=g, name="Extra Raita", price=Decimal("40"))
+            AddOn.objects.create(group=g, name="Boiled Egg", price=Decimal("25"))
+        tikka = MenuItem.objects.filter(name="Paneer Tikka").first()
+        if tikka and not tikka.addon_groups.exists():
+            spice = AddOnGroup.objects.create(menu_item=tikka, name="Spice level", min_select=1, max_select=1)
+            for lvl in ["Mild", "Medium", "Spicy"]:
+                AddOn.objects.create(group=spice, name=lvl, price=Decimal("0"))
 
     def _customers(self):
         data = [
