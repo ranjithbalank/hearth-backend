@@ -93,6 +93,33 @@ class DiscountLoyaltyTests(TestCase):
                              {"menu_item": self.item.id, "qty": 1}, format="json")
         self.assertEqual(r.status_code, 400)  # required group not satisfied
 
+    def test_move_merge_split(self):
+        from .models import Table
+        self.client.force_authenticate(self.mgr)
+        t1 = Table.objects.create(name="A1", section="AC", seats=4)
+        t2 = Table.objects.create(name="A2", section="AC", seats=2)
+        o = self._order(qty=1)
+        o.table = t1; o.save()
+        OrderLine.objects.create(order=o, menu_item=self.item, qty=1, unit_price=Decimal("400"))
+        # move
+        r = self.client.post(reverse("order-move", args=[o.id]), {"table": t2.id}, format="json")
+        self.assertEqual(r.status_code, 200)
+        o.refresh_from_db(); self.assertEqual(o.table_id, t2.id)
+        # split one of the two lines
+        first_line = o.lines.first()
+        r = self.client.post(reverse("order-split", args=[o.id]), {"lines": [first_line.id]}, format="json")
+        self.assertEqual(r.status_code, 200)
+        self.assertEqual(o.lines.count(), 1)
+
+    def test_void_requires_manager_override(self):
+        self.client.force_authenticate(self.cashier)
+        o = self._order()
+        r = self.client.post(reverse("order-void", args=[o.id]), {"reason": "mistake"}, format="json")
+        self.assertEqual(r.status_code, 403)
+        r = self.client.post(reverse("order-void", args=[o.id]),
+                             {"reason": "mistake", "override": "4321"}, format="json")
+        self.assertEqual(r.status_code, 200)
+
     def test_loyalty_accrues_on_settle(self):
         cust = Customer.objects.create(name="Reg", mobile="9000000000", loyalty_points=0)
         self.client.force_authenticate(self.mgr)

@@ -144,6 +144,79 @@ class OrderViewSet(ModuleViewSetMixin, viewsets.ModelViewSet):
             line.save(update_fields=["qty"])
         return Response(OrderSerializer(order).data)
 
+    def _free_table_if_idle(self, table):
+        if table and not table.orders.filter(status__in=[Order.OPEN, Order.KOT_FIRED]).exists():
+            table.status = Table.FREE
+            table.save(update_fields=["status"])
+
+    @action(detail=True, methods=["post"])
+    def move(self, request, pk=None):
+        """Move an order to another table, preserving items + KOT history (FR-TBL-004)."""
+        order = self.get_object()
+        dest = Table.objects.filter(pk=request.data.get("table")).first()
+        if not dest:
+            return Response({"detail": "destination table not found"}, status=400)
+        old = order.table
+        order.table = dest
+        order.save(update_fields=["table"])
+        if order.status in (Order.OPEN, Order.KOT_FIRED):
+            dest.status = Table.RUNNING
+            dest.save(update_fields=["status"])
+        self._free_table_if_idle(old)
+        log_action(request.user, "table_move", entity="Order", entity_id=order.id,
+                   after={"from": old.name if old else None, "to": dest.name})
+        return Response(OrderSerializer(order).data)
+
+    @action(detail=True, methods=["post"])
+    def merge(self, request, pk=None):
+        """Merge another open order's lines into this one (FR-TBL-004)."""
+        order = self.get_object()
+        src = Order.objects.filter(pk=request.data.get("source")).first()
+        if not src or src.id == order.id:
+            return Response({"detail": "invalid source order"}, status=400)
+        with transaction.atomic():
+            src.lines.update(order=order)
+            src_table = src.table
+            src.status = Order.SETTLED  # consumed by the merge
+            src.table = None
+            src.save(update_fields=["status", "table"])
+            self._free_table_if_idle(src_table)
+        log_action(request.user, "order_merge", entity="Order", entity_id=order.id,
+                   after={"merged_from": src.id})
+        return Response(OrderSerializer(order).data)
+
+    @action(detail=True, methods=["post"])
+    def split(self, request, pk=None):
+        """Split selected lines into a new order/bill (FR-TBL-004)."""
+        order = self.get_object()
+        line_ids = request.data.get("lines", [])
+        lines = order.lines.filter(id__in=line_ids)
+        if not lines.exists() or lines.count() == order.lines.count():
+            return Response({"detail": "select a subset of lines to split"}, status=400)
+        with transaction.atomic():
+            new = Order.objects.create(mode=order.mode, table=order.table, customer=order.customer,
+                                       status=order.status, kot_no=order.kot_no)
+            lines.update(order=new)
+        log_action(request.user, "order_split", entity="Order", entity_id=order.id,
+                   after={"new_order": new.id, "lines": list(line_ids)})
+        return Response({"original": OrderSerializer(order).data, "new": OrderSerializer(new).data})
+
+    @action(detail=True, methods=["post"])
+    def void(self, request, pk=None):
+        """Void an order — always requires a manager override passcode (FR-USR-006)."""
+        order = self.get_object()
+        mgr = _valid_override(request.data.get("override"))
+        if not mgr:
+            return Response({"detail": "Manager override required to void", "override_required": True},
+                            status=403)
+        order.status = Order.SETTLED  # closed as void
+        order.discount_reason = f"VOID by {request.user.username} (override {mgr.username})"
+        order.save(update_fields=["status", "discount_reason"])
+        self._free_table_if_idle(order.table)
+        log_action(request.user, "order_void", entity="Order", entity_id=order.id,
+                   after={"override": mgr.username, "reason": request.data.get("reason", "")})
+        return Response(OrderSerializer(order).data)
+
     @action(detail=True, methods=["post"])
     def apply_discount(self, request, pk=None):
         """Order-level discount within the user's cap; over-cap needs manager override
