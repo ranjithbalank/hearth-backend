@@ -149,6 +149,53 @@ class OrderViewSet(ModuleViewSetMixin, viewsets.ModelViewSet):
             table.status = Table.FREE
             table.save(update_fields=["status"])
 
+    @action(detail=False, methods=["post"])
+    def sync(self, request):
+        """Idempotently ingest bills raised offline (FR-POS-010 / NFR-002).
+
+        Body: {orders: [{client_uuid, mode, table, lines:[{menu_item, qty, unit_price}],
+                          tender, settled}]}. Replays are safe — dedupe is by client_uuid,
+        so re-sending the same batch never creates duplicates.
+        """
+        results = []
+        for payload in request.data.get("orders", []):
+            uuid = payload.get("client_uuid")
+            if not uuid:
+                results.append({"client_uuid": None, "error": "missing client_uuid"})
+                continue
+            existing = Order.objects.filter(client_uuid=uuid).first()
+            if existing:
+                results.append({"client_uuid": uuid, "id": existing.id, "created": False})
+                continue
+            with transaction.atomic():
+                order = Order.objects.create(
+                    mode=payload.get("mode", Order.DINEIN),
+                    table_id=payload.get("table"),
+                    client_uuid=uuid, offline_origin=True,
+                    kot_no=f"KOT-{uuid[:6].upper()}",
+                )
+                for ln in payload.get("lines", []):
+                    item = MenuItem.objects.filter(pk=ln.get("menu_item")).first()
+                    if not item:
+                        continue
+                    OrderLine.objects.create(
+                        order=order, menu_item=item, qty=int(ln.get("qty", 1)),
+                        unit_price=Decimal(str(ln.get("unit_price", item.price))),
+                        kot_fired=True,
+                    )
+                if payload.get("settled"):
+                    t = order.totals()
+                    Settlement.objects.create(
+                        tender=payload.get("tender", "Cash"), amount=t["total"],
+                        reference=f"offline {uuid[:8]}",
+                    )
+                    order.status = Order.SETTLED
+                    order.save(update_fields=["status"])
+            log_action(request.user, "offline_sync", entity="Order", entity_id=order.id,
+                       after={"client_uuid": uuid})
+            results.append({"client_uuid": uuid, "id": order.id, "created": True})
+        return Response({"results": results})
+
     @action(detail=True, methods=["post"])
     def move(self, request, pk=None):
         """Move an order to another table, preserving items + KOT history (FR-TBL-004)."""

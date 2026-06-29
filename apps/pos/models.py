@@ -148,6 +148,9 @@ class Order(models.Model):
         "pos.Coupon", on_delete=models.SET_NULL, null=True, blank=True, related_name="orders"
     )
     loyalty_redeemed = models.PositiveIntegerField(default=0, help_text="points redeemed")
+    # Offline resilience (BRD FR-POS-010 / NFR-002): client-generated id for dedupe.
+    client_uuid = models.CharField(max_length=64, blank=True, default="", db_index=True)
+    offline_origin = models.BooleanField(default=False)
     created_at = models.DateTimeField(auto_now_add=True)
 
     class Meta:

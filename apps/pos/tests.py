@@ -120,6 +120,21 @@ class DiscountLoyaltyTests(TestCase):
                              {"reason": "mistake", "override": "4321"}, format="json")
         self.assertEqual(r.status_code, 200)
 
+    def test_offline_sync_is_idempotent(self):
+        self.client.force_authenticate(self.mgr)
+        batch = {"orders": [{
+            "client_uuid": "abc-123", "mode": "dinein",
+            "lines": [{"menu_item": self.item.id, "qty": 2, "unit_price": "400"}],
+            "tender": "Cash", "settled": True,
+        }]}
+        r1 = self.client.post(reverse("order-sync"), batch, format="json")
+        self.assertTrue(r1.data["results"][0]["created"])
+        # Replay the same batch — must not duplicate.
+        r2 = self.client.post(reverse("order-sync"), batch, format="json")
+        self.assertFalse(r2.data["results"][0]["created"])
+        self.assertEqual(r1.data["results"][0]["id"], r2.data["results"][0]["id"])
+        self.assertEqual(Order.objects.filter(client_uuid="abc-123").count(), 1)
+
     def test_loyalty_accrues_on_settle(self):
         cust = Customer.objects.create(name="Reg", mobile="9000000000", loyalty_points=0)
         self.client.force_authenticate(self.mgr)
