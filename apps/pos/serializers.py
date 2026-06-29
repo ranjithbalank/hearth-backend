@@ -45,11 +45,15 @@ class OrderSerializer(serializers.ModelSerializer):
     table_name = serializers.CharField(source="table.name", read_only=True, default=None)
     status_label = serializers.CharField(source="get_status_display", read_only=True)
 
+    coupon_code = serializers.CharField(source="coupon.code", read_only=True, default=None)
+
     class Meta:
         model = Order
         fields = [
             "id", "mode", "table", "table_name", "customer", "covers", "captain",
             "status", "status_label", "folio", "kot_no", "lines", "totals", "created_at",
+            "discount_kind", "discount_value", "discount_reason", "coupon_code",
+            "loyalty_redeemed",
         ]
 
     def get_totals(self, obj):

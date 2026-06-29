@@ -22,7 +22,7 @@ from apps.channel.models import Channel, ChannelRate
 from apps.crm.models import Customer
 from apps.hr.models import Employee
 from apps.inventory.models import Ingredient
-from apps.pos.models import Category, MenuItem, Table
+from apps.pos.models import Category, Coupon, MenuItem, Table
 from apps.procurement.models import PurchaseOrder, PurchaseOrderLine, Supplier
 from apps.recipes.models import Recipe, RecipeLine
 from apps.reservations.models import Reservation
@@ -77,6 +77,12 @@ class Command(BaseCommand):
             ("cashier", "Priya", "Nair", ROLE_CASHIER, False),
             ("housekeeping", "Sunita", "Pal", ROLE_HOUSEKEEPING, False),
         ]
+        # Per-user discount caps + manager passcodes (BRD FR-USR-004/006).
+        caps = {
+            "cashier": ("percent", 10),   # cashier capped at 10%
+            "frontoffice": ("percent", 15),
+        }
+        passcodes = {"md": "1234", "gm": "4321"}
         for username, first, last, role, is_staff in people:
             u, created = User.objects.get_or_create(username=username, defaults={
                 "first_name": first, "last_name": last, "role": role,
@@ -85,6 +91,10 @@ class Command(BaseCommand):
                 "email": f"{username}@hearth.example",
             })
             u.first_name, u.last_name, u.role = first, last, role
+            cap = caps.get(username)
+            if cap:
+                u.discount_cap_type, u.discount_cap_value = cap
+            u.passcode = passcodes.get(username, "")
             u.set_password(PASSWORD)
             u.save()
 
@@ -177,6 +187,11 @@ class Command(BaseCommand):
                         name=f"{sec[0]}{n}", section=sec,
                         seats=4 if n % 2 else 2,
                     )
+        Coupon.objects.get_or_create(code="WELCOME10", defaults={
+            "kind": "percent", "value": Decimal("10"), "min_bill": Decimal("500")})
+        Coupon.objects.get_or_create(code="FLAT100", defaults={
+            "kind": "fixed", "value": Decimal("100"), "min_bill": Decimal("400"),
+            "usage_limit": 100})
 
     def _customers(self):
         data = [
