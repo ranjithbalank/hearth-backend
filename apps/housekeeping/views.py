@@ -45,6 +45,29 @@ class HousekeepingViewSet(ModuleViewSetMixin, viewsets.ViewSet):
                    before={"status": before}, after={"status": nxt})
         return Response(RoomSerializer(room).data)
 
+    @action(detail=True, methods=["post"])
+    def minibar(self, request, pk=None):
+        """Post a consumed minibar item to the room's open folio (FR-HSK-005)."""
+        room = Room.objects.filter(pk=pk).first()
+        if not room:
+            return Response({"detail": "room not found"}, status=404)
+        from apps.frontoffice.models import Folio, FolioLine
+        from apps.frontoffice.services import post_charge
+        from apps.tax import service as tax
+        folio = Folio.objects.filter(room=room, status=Folio.OPEN).first()
+        if not folio:
+            return Response({"detail": "no open folio for this room"}, status=400)
+        item = request.data.get("item", "Minibar item")
+        from decimal import Decimal
+        amount = Decimal(str(request.data.get("amount", 0)))
+        if amount <= 0:
+            return Response({"detail": "amount required"}, status=400)
+        post_charge(folio, kind=FolioLine.KIND_INCIDENTAL, description=f"Minibar: {item}",
+                    amount=amount, gst_rate=tax.FNB_RATE, source="minibar", user=request.user)
+        log_action(request.user, "minibar_post", entity="Folio", entity_id=folio.id,
+                   after={"item": item, "amount": str(amount)})
+        return Response({"posted": True, "folio": folio.id})
+
     @action(detail=False, methods=["get"])
     def counters(self, request):
         rooms = Room.objects.all()

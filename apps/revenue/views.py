@@ -9,7 +9,7 @@ from apps.accounts.permissions import ModuleViewSetMixin
 from apps.channel import services as channel_services
 from apps.rooms.models import Room
 
-from .models import RateRecommendation
+from .models import RateRecommendation, RateRestriction
 
 
 class RevenueViewSet(ModuleViewSetMixin, viewsets.ViewSet):
@@ -52,6 +52,35 @@ class RevenueViewSet(ModuleViewSetMixin, viewsets.ViewSet):
         rec.status = RateRecommendation.DISMISSED
         rec.save(update_fields=["status"])
         return Response({"dismissed": True})
+
+    @action(detail=False, methods=["get", "post"])
+    def restrictions(self, request):
+        """List or set rate restrictions; setting one pushes it to the channel manager."""
+        from apps.channel.models import ChannelPush
+        if request.method == "POST":
+            code = request.data.get("room_type")
+            rt = RoomType.objects.filter(code=code).first()
+            if not rt:
+                return Response({"detail": "room_type not found"}, status=400)
+            r, _ = RateRestriction.objects.get_or_create(room_type=rt)
+            for f in ["min_los", "cta", "ctd", "stop_sell"]:
+                if f in request.data:
+                    setattr(r, f, request.data[f])
+            r.save()
+            ChannelPush.objects.create(
+                kind=ChannelPush.KIND_RMS,
+                detail=f"Restrictions {rt.code}: MLOS {r.min_los}"
+                       + (", CTA" if r.cta else "") + (", CTD" if r.ctd else "")
+                       + (", STOP-SELL" if r.stop_sell else ""),
+            )
+            log_action(request.user, "rate_restriction", entity="RateRestriction",
+                       entity_id=r.id, after={"min_los": r.min_los, "stop_sell": r.stop_sell})
+        rows = [
+            {"room_type": x.room_type.code, "name": x.room_type.name, "min_los": x.min_los,
+             "cta": x.cta, "ctd": x.ctd, "stop_sell": x.stop_sell}
+            for x in RateRestriction.objects.select_related("room_type")
+        ]
+        return Response(rows)
 
     @action(detail=False, methods=["get"])
     def forecast(self, request):

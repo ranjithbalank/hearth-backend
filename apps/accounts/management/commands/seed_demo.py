@@ -22,6 +22,7 @@ from apps.channel.models import Channel, ChannelRate
 from apps.crm.models import Customer
 from apps.hr.models import Employee
 from apps.inventory.models import Ingredient
+from apps.matreq.models import MaterialRequest, MaterialRequestLine
 from apps.pos.models import AddOn, AddOnGroup, Category, Coupon, MenuItem, Table, Variant
 from apps.procurement.models import PurchaseOrder, PurchaseOrderLine, Supplier
 from apps.recipes.models import Recipe, RecipeLine
@@ -310,6 +311,14 @@ class Command(BaseCommand):
             po2 = PurchaseOrder.objects.create(supplier=sup_objs[2], status=PurchaseOrder.APPROVED)
             PurchaseOrderLine.objects.create(purchase_order=po2, ingredient=ing_by_name["Chicken"],
                                              qty=Decimal("15"), rate=Decimal("240"))
+
+        if not MaterialRequest.objects.exists() and ing_by_name:
+            req = MaterialRequest.objects.create(department="Kitchen", requested_by="Ravi Shah")
+            MaterialRequestLine.objects.create(request=req, ingredient=ing_by_name["Onion"], qty=Decimal("5"))
+            MaterialRequestLine.objects.create(request=req, ingredient=ing_by_name["Tomato"], qty=Decimal("3"))
+            req2 = MaterialRequest.objects.create(department="Bar", requested_by="Priya Nair",
+                                                  status=MaterialRequest.APPROVED)
+            MaterialRequestLine.objects.create(request=req2, ingredient=ing_by_name["Sugar"], qty=Decimal("2"))
 
     def _banquets(self):
         spaces = [("Grand Ballroom", 400), ("Garden Lawn", 250), ("Boardroom", 40)]

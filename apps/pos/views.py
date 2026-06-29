@@ -51,6 +51,35 @@ class TableViewSet(ModuleViewSetMixin, viewsets.ModelViewSet):
     serializer_class = TableSerializer
 
 
+class KdsViewSet(ModuleViewSetMixin, viewsets.ViewSet):
+    """Kitchen Display System: live fired tickets with bump-to-ready (BRD 5.13)."""
+
+    module = "kds"
+
+    def list(self, request):
+        orders = (Order.objects.filter(kitchen_status__in=["cooking", "ready"])
+                  .prefetch_related("lines__menu_item").order_by("created_at"))
+        out = []
+        for o in orders:
+            out.append({
+                "id": o.id, "kot_no": o.kot_no, "kitchen_status": o.kitchen_status,
+                "table": o.table.name if o.table else o.get_mode_display(),
+                "created_at": o.created_at,
+                "items": [{"name": l.display_name, "qty": l.qty,
+                           "station": l.menu_item.station} for l in o.lines.all()],
+            })
+        return Response(out)
+
+    @action(detail=True, methods=["post"])
+    def bump(self, request, pk=None):
+        order = Order.objects.filter(pk=pk).first()
+        if not order:
+            return Response({"detail": "not found"}, status=404)
+        order.kitchen_status = "ready" if order.kitchen_status == "cooking" else "served"
+        order.save(update_fields=["kitchen_status"])
+        return Response({"id": order.id, "kitchen_status": order.kitchen_status})
+
+
 class CategoryViewSet(ModuleViewSetMixin, viewsets.ModelViewSet):
     module = "pos"
     queryset = Category.objects.all()
@@ -336,7 +365,8 @@ class OrderViewSet(ModuleViewSetMixin, viewsets.ModelViewSet):
         if not order.kot_no:
             order.kot_no = f"KOT-{order.id:05d}"
         order.status = Order.KOT_FIRED
-        order.save(update_fields=["kot_no", "status"])
+        order.kitchen_status = "cooking"  # appears on the KDS
+        order.save(update_fields=["kot_no", "status", "kitchen_status"])
         if order.table:
             order.table.status = Table.RUNNING
             order.table.save(update_fields=["status"])

@@ -33,6 +33,7 @@ api_patterns = [
     path("", include("apps.hr.urls")),
     path("", include("apps.notifications.urls")),
     path("", include("apps.integrations.urls")),
+    path("", include("apps.matreq.urls")),
 ]
 
 urlpatterns = [

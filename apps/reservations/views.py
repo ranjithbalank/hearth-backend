@@ -9,11 +9,47 @@ from apps.accounts.models import log_action
 from apps.accounts.permissions import ModuleViewSetMixin
 from apps.rooms.models import Room, RoomType
 
-from .models import Reservation
+from .models import GroupBlock, Reservation
 from .serializers import ReservationSerializer
 
 # Allowed oversell beyond physical inventory per room type (BRD FR-PMS-003).
 OVERBOOKING_TOLERANCE = 0
+
+
+class GroupBlockViewSet(ModuleViewSetMixin, viewsets.ViewSet):
+    """Group blocks / allotments (BRD FR-PMS-009)."""
+
+    module = "reservations"
+
+    def _dict(self, b):
+        return {"id": b.id, "name": b.name, "room_type": b.room_type.code,
+                "rooms_blocked": b.rooms_blocked, "rooms_picked": b.rooms_picked,
+                "outstanding": b.outstanding, "checkin_date": b.checkin_date,
+                "checkout_date": b.checkout_date}
+
+    def list(self, request):
+        return Response([self._dict(b) for b in GroupBlock.objects.select_related("room_type")])
+
+    def create(self, request):
+        rt = RoomType.objects.filter(code=request.data.get("room_type")).first()
+        if not rt:
+            return Response({"detail": "room_type not found"}, status=400)
+        b = GroupBlock.objects.create(
+            name=request.data.get("name", "Group"), room_type=rt,
+            rooms_blocked=int(request.data.get("rooms_blocked", 1)),
+            checkin_date=request.data["checkin_date"],
+            checkout_date=request.data["checkout_date"],
+        )
+        return Response(self._dict(b), status=201)
+
+    @action(detail=True, methods=["post"])
+    def pickup(self, request, pk=None):
+        b = GroupBlock.objects.filter(pk=pk).first()
+        if not b:
+            return Response({"detail": "not found"}, status=404)
+        b.rooms_picked = min(b.rooms_blocked, b.rooms_picked + int(request.data.get("count", 1)))
+        b.save(update_fields=["rooms_picked"])
+        return Response(self._dict(b))
 
 
 class ReservationViewSet(ModuleViewSetMixin, viewsets.ModelViewSet):
@@ -65,9 +101,14 @@ class ReservationViewSet(ModuleViewSetMixin, viewsets.ModelViewSet):
                 room_type=rt, status__in=[Reservation.BOOKED, Reservation.IN_HOUSE],
                 checkin_date__lt=co_d, checkout_date__gt=ci_d,
             ).count()
-            available = physical - held + OVERBOOKING_TOLERANCE
-            out.append({"room_type": rt.code, "name": rt.name,
-                        "physical": physical, "held": held, "available": available})
+            # Unpicked group-block rooms also hold inventory (FR-PMS-009).
+            blocked = sum(
+                b.outstanding for b in GroupBlock.objects.filter(
+                    room_type=rt, checkin_date__lt=co_d, checkout_date__gt=ci_d)
+            )
+            available = physical - held - blocked + OVERBOOKING_TOLERANCE
+            out.append({"room_type": rt.code, "name": rt.name, "physical": physical,
+                        "held": held, "blocked": blocked, "available": available})
         return Response(out)
 
     @action(detail=True, methods=["post"])

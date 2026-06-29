@@ -56,3 +56,25 @@ class Reservation(models.Model):
 
     def __str__(self):
         return f"{self.guest_name} · {self.room_type.code} · {self.checkin_date}"
+
+
+class GroupBlock(models.Model):
+    """A block/allotment that holds inventory for a group (BRD FR-PMS-009)."""
+
+    name = models.CharField(max_length=160)
+    room_type = models.ForeignKey(RoomType, on_delete=models.CASCADE, related_name="group_blocks")
+    rooms_blocked = models.PositiveSmallIntegerField(default=1)
+    rooms_picked = models.PositiveSmallIntegerField(default=0)
+    checkin_date = models.DateField()
+    checkout_date = models.DateField()
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ["checkin_date"]
+
+    @property
+    def outstanding(self):
+        return max(0, self.rooms_blocked - self.rooms_picked)
+
+    def __str__(self):
+        return f"{self.name} ({self.room_type.code} ×{self.rooms_blocked})"

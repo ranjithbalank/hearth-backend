@@ -48,6 +48,7 @@ INSTALLED_APPS = [
     "apps.hr",
     "apps.notifications",
     "apps.integrations",
+    "apps.matreq",
 ]
 
 MIDDLEWARE = [

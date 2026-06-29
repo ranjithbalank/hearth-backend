@@ -24,3 +24,18 @@ class RateRecommendation(models.Model):
 
     def __str__(self):
         return f"{self.room_type.code}: {self.current_rate}→{self.recommended_rate} ({self.status})"
+
+
+class RateRestriction(models.Model):
+    """Stay/availability restrictions per room type (BRD FR-RMS-004)."""
+
+    room_type = models.OneToOneField(RoomType, on_delete=models.CASCADE, related_name="restriction")
+    min_los = models.PositiveSmallIntegerField(default=1, help_text="minimum length of stay")
+    cta = models.BooleanField(default=False, help_text="closed to arrival")
+    ctd = models.BooleanField(default=False, help_text="closed to departure")
+    stop_sell = models.BooleanField(default=False)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    def __str__(self):
+        return f"Restrictions {self.room_type.code}"
+

@@ -137,6 +137,8 @@ class Order(models.Model):
         Folio, on_delete=models.SET_NULL, null=True, blank=True, related_name="pos_orders"
     )
     kot_no = models.CharField(max_length=20, blank=True)
+    # Kitchen Display status (BRD 5.13 / KDS): ""(none) | cooking | ready | served
+    kitchen_status = models.CharField(max_length=12, blank=True, default="")
     # Discounts / loyalty (BRD 5.15)
     DISC_NONE = "none"
     DISC_PERCENT = "percent"
