@@ -17,6 +17,7 @@ def _event_dict(e):
         "event_type": e.event_type, "space": e.space.name, "space_id": e.space_id,
         "event_date": e.event_date, "covers": e.covers, "deposit": str(e.deposit),
         "package_amount": str(e.package_amount), "status": e.status, "billed": e.billed,
+        "food_covers": e.food_covers, "food_pref": e.food_pref,
     }
 
 
@@ -52,6 +53,8 @@ class BanquetViewSet(ModuleViewSetMixin, viewsets.ViewSet):
             event_type=request.data.get("event_type", ""), event_date=event_date,
             covers=covers, package_amount=Decimal(str(request.data.get("package_amount", 0) or 0)),
             deposit=Decimal(str(request.data.get("deposit", 0) or 0)),
+            food_covers=int(request.data.get("food_covers", 0) or 0),
+            food_pref=request.data.get("food_pref", ""),
             status=Event.TENTATIVE,
         )
         log_action(request.user, "event_create", entity="Event", entity_id=e.id,

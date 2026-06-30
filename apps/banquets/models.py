@@ -26,6 +26,9 @@ class Event(models.Model):
     covers = models.PositiveSmallIntegerField(default=50)
     package_amount = models.DecimalField(max_digits=12, decimal_places=2, default=0)
     deposit = models.DecimalField(max_digits=12, decimal_places=2, default=0)
+    # Optional catering (only when the restaurant/F&B module is enabled).
+    food_covers = models.PositiveSmallIntegerField(default=0, help_text="approx. plates to cater")
+    food_pref = models.CharField(max_length=10, blank=True, help_text="veg | nonveg | both")
     status = models.CharField(max_length=12, choices=STATUS_CHOICES, default=TENTATIVE)
     billed = models.BooleanField(default=False)
 
