@@ -135,6 +135,12 @@ def _report_rows(report):
             ["Purchases", "Goods received", str(purchases)],
         ]
         return ("Accounting Export", ["Account", "Head", "Amount"], rows)
+    if report == "source":
+        from apps.reservations.models import Reservation
+        counts = {}
+        for r in Reservation.objects.all():
+            counts[r.get_source_display()] = counts.get(r.get_source_display(), 0) + 1
+        return ("Bookings by Source", ["Source", "Reservations"], [[k, v] for k, v in counts.items()])
     if report == "guests":
         # Statutory guest report (BRD FR-PMS-012): in-house/checked guests with KYC.
         from apps.frontoffice.models import Folio
@@ -183,6 +189,60 @@ class ReportExportView(ModuleAPIView):
         )
         resp["Content-Disposition"] = f'attachment; filename="{report}.xlsx"'
         return resp
+
+
+class ReportView(ModuleAPIView):
+    """In-app report viewer data: KPIs + a chartable series (FR-RPT-001/004)."""
+
+    module = "reports"
+
+    def get(self, request):
+        report = request.query_params.get("report", "sales")
+        if report == "sales":
+            r, f = _room_kpis(), _fnb_kpis()
+            return Response({
+                "title": "Sales Summary",
+                "kpis": [
+                    {"label": "Occupancy", "value": f"{r['occupancy_pct']}%"},
+                    {"label": "ADR", "value": r["adr"], "money": True},
+                    {"label": "RevPAR", "value": r["revpar"], "money": True},
+                    {"label": "F&B sales", "value": f["fnb_sales"], "money": True},
+                ],
+                "series_label": "F&B sales by channel",
+                "bars": [{"name": k.title(), "value": float(v)} for k, v in f["by_mode"].items()],
+            })
+        if report == "tax":
+            from collections import defaultdict
+            agg = defaultdict(Decimal)
+            for line in FolioLine.objects.exclude(kind=FolioLine.KIND_TAX):
+                agg[str(line.gst_rate)] += line.cgst + line.sgst
+            return Response({
+                "title": "GST by Slab",
+                "kpis": [{"label": "Total output tax", "value": str(sum(agg.values())), "money": True}],
+                "series_label": "Output tax by GST rate",
+                "bars": [{"name": f"{k}%", "value": float(v)} for k, v in sorted(agg.items())],
+            })
+        if report == "source":
+            from apps.reservations.models import Reservation
+            counts = {}
+            for r in Reservation.objects.all():
+                counts[r.get_source_display()] = counts.get(r.get_source_display(), 0) + 1
+            return Response({
+                "title": "Bookings by Source",
+                "kpis": [{"label": "Total reservations", "value": sum(counts.values())}],
+                "series_label": "Reservations by channel",
+                "bars": [{"name": k, "value": v} for k, v in counts.items()],
+            })
+        # occupancy: rooms by status
+        status_counts = {}
+        for room in Room.objects.all():
+            status_counts[room.get_status_display()] = status_counts.get(room.get_status_display(), 0) + 1
+        return Response({
+            "title": "Room Status",
+            "kpis": [{"label": "Total rooms", "value": sum(status_counts.values())}],
+            "series_label": "Rooms by status",
+            "bars": [{"name": k, "value": v} for k, v in status_counts.items()],
+        })
 
 
 class CatalogueView(ModuleAPIView):

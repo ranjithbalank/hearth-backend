@@ -5,6 +5,7 @@ from .views import (
     DashboardView,
     ExecutiveView,
     ReportExportView,
+    ReportView,
     SalesSummaryView,
 )
 
@@ -13,5 +14,6 @@ urlpatterns = [
     path("reports/executive/", ExecutiveView.as_view(), name="reports-executive"),
     path("reports/sales-summary/", SalesSummaryView.as_view(), name="reports-sales"),
     path("reports/catalogue/", CatalogueView.as_view(), name="reports-catalogue"),
+    path("reports/view/", ReportView.as_view(), name="reports-view"),
     path("reports/export/", ReportExportView.as_view(), name="reports-export"),
 ]
