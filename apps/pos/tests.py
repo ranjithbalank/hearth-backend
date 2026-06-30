@@ -188,6 +188,19 @@ class DiscountLoyaltyTests(TestCase):
         self.assertEqual(r.data["online_status"], "ready")
         self.assertEqual(r.data["kitchen_status"] if "kitchen_status" in r.data else "ready", "ready")
 
+    def test_qr_order_public(self):
+        from .models import Table
+        from rest_framework.test import APIClient
+        t = Table.objects.create(name="Q1", section="AC", qr_token="QRTEST")
+        anon = APIClient()  # no auth — guest scanning the QR
+        r = anon.post(reverse("qr-order"),
+                      {"token": "QRTEST", "items": [{"menu_item": self.item.id, "qty": 1}]},
+                      format="json")
+        self.assertEqual(r.status_code, 201)
+        self.assertEqual(r.data["table"], "Q1")
+        t.refresh_from_db()
+        self.assertEqual(t.status, Table.RUNNING)
+
     def test_offline_sync_is_idempotent(self):
         self.client.force_authenticate(self.mgr)
         batch = {"orders": [{

@@ -3,7 +3,9 @@ from decimal import Decimal
 from django.db import models, transaction
 from rest_framework import status, viewsets
 from rest_framework.decorators import action
+from rest_framework.permissions import AllowAny
 from rest_framework.response import Response
+from rest_framework.views import APIView
 
 from apps.accounts.models import log_action
 from apps.accounts.permissions import ModuleViewSetMixin, active_entitlements
@@ -49,6 +51,52 @@ class TableViewSet(ModuleViewSetMixin, viewsets.ModelViewSet):
     module = "pos"
     queryset = Table.objects.all()
     serializer_class = TableSerializer
+
+
+class QrOrderView(APIView):
+    """Public QR table ordering: a guest scans the table QR and orders to the
+    same kitchen queue (BRD FR-ONL-004). The table token is the credential."""
+
+    permission_classes = [AllowAny]
+    throttle_scope = "sensitive"
+
+    def get(self, request):
+        """Return the table's menu so the guest's QR page can render it."""
+        table = Table.objects.filter(qr_token=request.query_params.get("token", "")).first()
+        if not table:
+            return Response({"detail": "invalid table"}, status=404)
+        if not active_entitlements().get("restaurant"):
+            return Response({"detail": "ordering unavailable"}, status=403)
+        items = MenuItem.objects.filter(available=True).select_related("category")
+        return Response({
+            "table": table.name,
+            "menu": MenuItemSerializer(items, many=True).data,
+        })
+
+    def post(self, request):
+        table = Table.objects.filter(qr_token=request.data.get("token", "")).first()
+        if not table:
+            return Response({"detail": "invalid table"}, status=404)
+        if not active_entitlements().get("restaurant"):
+            return Response({"detail": "ordering unavailable"}, status=403)
+        with transaction.atomic():
+            order = Order.objects.create(mode=Order.DINEIN, table=table,
+                                         source_platform="qr", online_status="received",
+                                         status=Order.KOT_FIRED, kitchen_status="cooking",
+                                         kot_no=f"QR-{table.name}")
+            fired = []
+            for ln in request.data.get("items", []):
+                item = MenuItem.objects.filter(pk=ln.get("menu_item"), available=True).first()
+                if not item:
+                    continue
+                fired.append(OrderLine.objects.create(
+                    order=order, menu_item=item, qty=int(ln.get("qty", 1)),
+                    unit_price=item.price, kot_fired=True))
+            from apps.recipes.services import deduct_for_newly_fired
+            deduct_for_newly_fired(order, fired)
+            table.status = Table.RUNNING
+            table.save(update_fields=["status"])
+        return Response({"order": order.id, "kot": order.kot_no, "table": table.name}, status=201)
 
 
 class KdsViewSet(ModuleViewSetMixin, viewsets.ViewSet):

@@ -25,6 +25,8 @@ class Table(models.Model):
     seats = models.PositiveSmallIntegerField(default=4)
     shape = models.CharField(max_length=20, default="square")
     status = models.CharField(max_length=12, choices=STATUS_CHOICES, default=FREE)
+    qr_token = models.CharField(max_length=20, blank=True, default="", db_index=True,
+                                help_text="token embedded in the table QR for guest ordering")
 
     class Meta:
         ordering = ["section", "name"]

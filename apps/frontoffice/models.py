@@ -27,6 +27,10 @@ class Folio(models.Model):
     opened_at = models.DateTimeField(auto_now_add=True)
     settled_at = models.DateTimeField(null=True, blank=True)
     invoice_no = models.CharField(max_length=30, blank=True)
+    # KYC for statutory guest reporting (BRD FR-PMS-012)
+    id_type = models.CharField(max_length=30, blank=True)
+    id_number = models.CharField(max_length=40, blank=True)
+    guest_type = models.CharField(max_length=20, blank=True)
 
     def __str__(self):
         return f"Folio #{self.id} — {self.guest_name}"

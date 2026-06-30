@@ -135,6 +135,14 @@ def _report_rows(report):
             ["Purchases", "Goods received", str(purchases)],
         ]
         return ("Accounting Export", ["Account", "Head", "Amount"], rows)
+    if report == "guests":
+        # Statutory guest report (BRD FR-PMS-012): in-house/checked guests with KYC.
+        from apps.frontoffice.models import Folio
+        rows = []
+        for fo in Folio.objects.select_related("room").exclude(id_number=""):
+            rows.append([fo.guest_name, fo.room.number if fo.room else "—",
+                         fo.id_type, fo.id_number, fo.opened_at.strftime("%Y-%m-%d")])
+        return ("Guest Report", ["Guest", "Room", "ID type", "ID number", "Check-in"], rows)
     # occupancy / rooms
     rows = [[r.number, r.room_type_code, r.get_status_display()]
             for r in Room.objects.select_related("room_type")]

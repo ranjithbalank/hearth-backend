@@ -194,6 +194,10 @@ class Command(BaseCommand):
                         name=f"{sec[0]}{n}", section=sec,
                         seats=4 if n % 2 else 2,
                     )
+        # QR token per table (embedded in the table's QR code) for guest ordering.
+        for t in Table.objects.filter(qr_token=""):
+            t.qr_token = f"QR{t.id:04d}"
+            t.save(update_fields=["qr_token"])
         Coupon.objects.get_or_create(code="WELCOME10", defaults={
             "kind": "percent", "value": Decimal("10"), "min_bill": Decimal("500")})
         Coupon.objects.get_or_create(code="FLAT100", defaults={
