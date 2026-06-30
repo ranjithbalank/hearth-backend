@@ -100,11 +100,43 @@ def settle_folio(folio, payments, user=None, generate_invoice=True):
     return folio
 
 
+def post_stay_room_charges(folio, user=None):
+    """Ensure the stay's room nights are on the folio.
+
+    Room charges normally post at night audit; for a same-day or pre-audit
+    check-out we post any nights not yet charged so revenue is captured.
+    """
+    resv = folio.reservation
+    if not resv:
+        return Decimal("0")
+    rate = resv.rate or (resv.room_type.base_rate if resv.room_type else Decimal("0"))
+    if rate <= 0:
+        return Decimal("0")
+    nights = max(1, resv.nights or 1)
+    already = folio.lines.filter(kind=FolioLine.KIND_ROOM).count()
+    posted = Decimal("0")
+    gst_rate = tax.room_rate_for(rate)
+    for i in range(already, nights):
+        line = post_charge(
+            folio, kind=FolioLine.KIND_ROOM,
+            description=f"Room charge — night {i + 1}",
+            amount=rate, gst_rate=gst_rate,
+            source=f"stay:{folio.id}:{i + 1}", user=user,
+        )
+        posted += line.total
+    return posted
+
+
 @transaction.atomic
-def check_out(folio, payments=None, user=None):
+def check_out(folio, payments=None, tender=None, user=None):
     """Settle remaining balance, release the room to housekeeping (FR-PMS-005)."""
-    if payments:
-        settle_folio(folio, payments, user=user)
+    # Capture room charges for the stay if the night audit hasn't already (FR-PMS-008).
+    post_stay_room_charges(folio, user=user)
+    # Settle the full remaining balance (room charges may have just been added).
+    if tender is None and payments:
+        tender = payments[0].get("tender", "Cash")
+    if folio.balance > 0 and tender:
+        settle_folio(folio, [{"tender": tender, "amount": str(folio.balance)}], user=user)
     if folio.balance > 0:
         raise ValueError("Outstanding balance must be cleared before check-out")
     if folio.status != Folio.SETTLED:
