@@ -24,7 +24,7 @@ from apps.hr.models import Employee
 from apps.inventory.models import Ingredient
 from apps.matreq.models import MaterialRequest, MaterialRequestLine
 from apps.pos.models import (
-    AddOn, AddOnGroup, Category, ChannelPrice, Coupon, MenuItem, Table, Variant,
+    AddOn, AddOnGroup, Category, ChannelPrice, ComboComponent, Coupon, MenuItem, Table, Variant,
 )
 from apps.procurement.models import PurchaseOrder, PurchaseOrderLine, Supplier, Vendor
 from apps.tax.models import GstSlab
@@ -211,6 +211,19 @@ class Command(BaseCommand):
             spice = AddOnGroup.objects.create(menu_item=tikka, name="Spice level", min_select=1, max_select=1)
             for lvl in ["Mild", "Medium", "Spicy"]:
                 AddOn.objects.create(group=spice, name=lvl, price=Decimal("0"))
+
+        # Combo / meal (FR-MNU-006): bundles components at a combo price.
+        combos = MenuItem.objects.filter(name="Veg Thali Combo").first()
+        if not combos:
+            combo_cat, _ = Category.objects.get_or_create(name="Combos", defaults={"sort_order": 7})
+            combos = MenuItem.objects.create(
+                name="Veg Thali Combo", category=combo_cat, price=Decimal("420"),
+                gst_rate=Decimal("5"), diet="veg", short_code="VTC")
+            for comp_name, q in [("Dal Makhani", 1), ("Garlic Naan", 2), ("Veg Biryani", 1),
+                                 ("Gulab Jamun", 1)]:
+                comp = MenuItem.objects.filter(name=comp_name).first()
+                if comp:
+                    ComboComponent.objects.create(combo=combos, component=comp, qty=q)
 
         # Per-channel pricing (FR-MNU-003): delivery/online carry a ~12% uplift.
         for mi in MenuItem.objects.all():

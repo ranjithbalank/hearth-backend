@@ -183,6 +183,77 @@ class OrderViewSet(ModuleViewSetMixin, viewsets.ModelViewSet):
             table.save(update_fields=["status"])
 
     @action(detail=False, methods=["post"])
+    def aggregator(self, request):
+        """Ingest a delivery-aggregator order (Zomato/Swiggy) into the POS (FR-ONL-001).
+
+        Idempotent by (platform, external_id). Prepaid orders are marked paid and
+        excluded from counter collection (FR-PAY-006). A KOT fires automatically.
+        In production the webhook signature is verified (SR-030); here it's trusted.
+        """
+        platform = request.data.get("platform", "zomato")
+        ext = str(request.data.get("external_id", "")).strip()
+        if not ext:
+            return Response({"detail": "external_id required"}, status=400)
+        existing = Order.objects.filter(source_platform=platform, external_ref=ext).first()
+        if existing:
+            return Response(OrderSerializer(existing).data)  # idempotent
+        from apps.crm.models import Customer
+        cust = None
+        mobile = (request.data.get("customer") or {}).get("mobile", "")
+        if mobile:
+            cust, _ = Customer.objects.get_or_create(
+                mobile=mobile, defaults={"name": (request.data.get("customer") or {}).get("name", "Online")})
+        with transaction.atomic():
+            order = Order.objects.create(
+                mode=Order.DELIVERY, customer=cust, source_platform=platform,
+                external_ref=ext, online_status="received",
+                prepaid=bool(request.data.get("prepaid", True)),
+                kot_no=f"AGG-{ext[:6].upper()}", status=Order.KOT_FIRED, kitchen_status="cooking",
+            )
+            fired = []
+            for ln in request.data.get("items", []):
+                item = MenuItem.objects.filter(pk=ln.get("menu_item")).first()
+                if not item:
+                    continue
+                line = OrderLine.objects.create(order=order, menu_item=item,
+                                                qty=int(ln.get("qty", 1)),
+                                                unit_price=item.price, kot_fired=True)
+                fired.append(line)
+            from apps.recipes.services import deduct_for_newly_fired
+            deduct_for_newly_fired(order, fired)
+            if order.prepaid:
+                t = order.totals()
+                Settlement.objects.create(tender=f"{platform} (prepaid)", amount=t["total"],
+                                          reference=f"{platform}:{ext}")
+        log_action(request.user, "aggregator_order", entity="Order", entity_id=order.id,
+                   after={"platform": platform, "ext": ext})
+        return Response(OrderSerializer(order).data, status=status.HTTP_201_CREATED)
+
+    @action(detail=True, methods=["post"])
+    def online_status(self, request, pk=None):
+        """Update prep/dispatch status back to the customer/aggregator (FR-ONL-003)."""
+        order = self.get_object()
+        flow = ["received", "accepted", "ready", "dispatched"]
+        target = request.data.get("status")
+        if target not in flow:
+            return Response({"detail": "invalid status"}, status=400)
+        order.online_status = target
+        if target == "ready":
+            order.kitchen_status = "ready"
+        if target == "dispatched":
+            order.status = Order.SETTLED if order.prepaid else order.status
+        order.save(update_fields=["online_status", "kitchen_status", "status"])
+        return Response(OrderSerializer(order).data)
+
+    @action(detail=False, methods=["get"])
+    def online(self, request):
+        """Live online/aggregator order board (FR-ONL panels)."""
+        qs = (Order.objects.exclude(source_platform="")
+              .exclude(online_status="dispatched")
+              .prefetch_related("lines__menu_item").order_by("created_at"))
+        return Response(OrderSerializer(qs, many=True).data)
+
+    @action(detail=False, methods=["post"])
     def sync(self, request):
         """Idempotently ingest bills raised offline (FR-POS-010 / NFR-002).
 

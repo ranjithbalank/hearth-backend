@@ -12,19 +12,21 @@ def deduct_for_newly_fired(order, lines):
     """
     deductions = []
     for line in lines:
-        recipe = (
-            Recipe.objects.filter(menu_item=line.menu_item)
-            .prefetch_related("lines__ingredient")
-            .first()
-        )
-        if not recipe:
-            continue
-        for rl in recipe.lines.all():
-            consumed = rl.qty * line.qty
-            apply_movement(
-                rl.ingredient, "consumption", -consumed,
-                reason=f"{line.qty}× {line.menu_item.name}",
-                source=f"order:{order.id}",
-            )
-            deductions.append((rl.ingredient.name, consumed))
+        # A combo deducts each component's recipe (BRD FR-MNU-006); a plain item
+        # deducts its own recipe. Build the list of (menu_item, multiplier) to draw.
+        combo = list(line.menu_item.combo_components.select_related("component").all())
+        targets = ([(c.component, c.qty * line.qty) for c in combo]
+                   if combo else [(line.menu_item, line.qty)])
+        for item, mult in targets:
+            recipe = (Recipe.objects.filter(menu_item=item)
+                      .prefetch_related("lines__ingredient").first())
+            if not recipe:
+                continue
+            for rl in recipe.lines.all():
+                consumed = rl.qty * mult
+                apply_movement(
+                    rl.ingredient, "consumption", -consumed,
+                    reason=f"{mult}× {item.name}", source=f"order:{order.id}",
+                )
+                deductions.append((rl.ingredient.name, consumed))
     return deductions

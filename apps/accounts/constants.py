@@ -38,8 +38,8 @@ ROLE_ALLOW = {
         "notifications",
     ],
     ROLE_CASHIER: [
-        "dashboard", "pos", "kds", "matreq", "inventory", "procurement", "recipes",
-        "reports", "notifications",
+        "dashboard", "pos", "kds", "online", "matreq", "inventory", "procurement",
+        "recipes", "reports", "notifications",
     ],
     ROLE_HOUSEKEEPING: [
         "dashboard", "housekeeping", "livegrid", "engineering", "notifications",
@@ -59,7 +59,7 @@ MODULE_ENTITLEMENT = {
     # Banquets
     "banquets": "banquets",
     # Restaurant (restaurant)
-    "pos": "restaurant", "kds": "restaurant", "inventory": "restaurant",
+    "pos": "restaurant", "kds": "restaurant", "online": "restaurant", "inventory": "restaurant",
     "procurement": "restaurant", "pomanage": "restaurant", "matreq": "restaurant",
     "recipes": "restaurant", "tablemaster": "restaurant", "menumaster": "restaurant",
     "suppliers": "restaurant",

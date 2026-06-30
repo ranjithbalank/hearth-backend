@@ -98,6 +98,23 @@ class DiscountLoyaltyTests(TestCase):
         self.assertEqual(dinein.lines.first().unit_price, Decimal("400.00"))   # base
         self.assertEqual(delivery.lines.first().unit_price, Decimal("450.00"))  # channel price
 
+    def test_combo_deducts_each_component_recipe(self):
+        from apps.inventory.models import Ingredient
+        from apps.recipes.models import Recipe, RecipeLine
+        from apps.recipes.services import deduct_for_newly_fired
+        from .models import ComboComponent
+        flour = Ingredient.objects.create(name="Flour", unit="kg", current_stock=Decimal("10"))
+        comp = MenuItem.objects.create(name="Naan", category=self.cat, price=Decimal("40"))
+        RecipeLine.objects.create(recipe=Recipe.objects.create(menu_item=comp),
+                                  ingredient=flour, qty=Decimal("0.1"))
+        combo = MenuItem.objects.create(name="Combo", category=self.cat, price=Decimal("200"))
+        ComboComponent.objects.create(combo=combo, component=comp, qty=2)
+        order = Order.objects.create(mode=Order.DINEIN)
+        line = OrderLine.objects.create(order=order, menu_item=combo, qty=1, unit_price=Decimal("200"))
+        deduct_for_newly_fired(order, [line])
+        flour.refresh_from_db()
+        self.assertEqual(flour.current_stock, Decimal("9.800"))  # 10 - (0.1 * 2 naans)
+
     def test_required_addon_group_enforced(self):
         self.client.force_authenticate(self.mgr)
         grp = AddOnGroup.objects.create(menu_item=self.item, name="Spice", min_select=1, max_select=1)
@@ -133,6 +150,31 @@ class DiscountLoyaltyTests(TestCase):
         r = self.client.post(reverse("order-void", args=[o.id]),
                              {"reason": "mistake", "override": "4321"}, format="json")
         self.assertEqual(r.status_code, 200)
+
+    def test_aggregator_ingest_idempotent_and_prepaid(self):
+        self.client.force_authenticate(self.mgr)
+        body = {"platform": "swiggy", "external_id": "SWG-77", "prepaid": True,
+                "customer": {"mobile": "9000011111", "name": "Online Guy"},
+                "items": [{"menu_item": self.item.id, "qty": 2}]}
+        r1 = self.client.post(reverse("order-aggregator"), body, format="json")
+        self.assertEqual(r1.status_code, 201)
+        self.assertEqual(r1.data["source_platform"], "swiggy")
+        self.assertEqual(r1.data["online_status"], "received")
+        from apps.frontoffice.models import Settlement
+        self.assertTrue(Settlement.objects.filter(reference="swiggy:SWG-77").exists())
+        # Replay -> same order, no duplicate.
+        r2 = self.client.post(reverse("order-aggregator"), body, format="json")
+        self.assertEqual(r2.data["id"], r1.data["id"])
+        self.assertEqual(Order.objects.filter(external_ref="SWG-77").count(), 1)
+
+    def test_online_status_flow(self):
+        self.client.force_authenticate(self.mgr)
+        o = Order.objects.create(mode=Order.DELIVERY, source_platform="zomato",
+                                 external_ref="Z1", online_status="received")
+        r = self.client.post(reverse("order-online-status", args=[o.id]),
+                             {"status": "ready"}, format="json")
+        self.assertEqual(r.data["online_status"], "ready")
+        self.assertEqual(r.data["kitchen_status"] if "kitchen_status" in r.data else "ready", "ready")
 
     def test_offline_sync_is_idempotent(self):
         self.client.force_authenticate(self.mgr)

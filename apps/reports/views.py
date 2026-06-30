@@ -120,6 +120,21 @@ def _report_rows(report):
             a[0] += line.taxable; a[1] += line.cgst; a[2] += line.sgst; a[3] += line.total
         rows = [[rate, v[0], v[1], v[2], v[3]] for rate, v in sorted(agg.items())]
         return ("GST Summary", ["Rate %", "Taxable", "CGST", "SGST", "Total"], rows)
+    if report == "accounting":
+        # ERP-importable daybook: revenue, output tax and purchases (FR-ACC-005).
+        from apps.procurement.models import PurchaseOrder
+        r, f = _room_kpis(), _fnb_kpis()
+        tax_total = sum((l.cgst + l.sgst for l in FolioLine.objects.exclude(kind=FolioLine.KIND_TAX)),
+                        start=Decimal("0"))
+        purchases = sum((po.total for po in PurchaseOrder.objects.filter(
+            status=PurchaseOrder.RECEIVED)), start=Decimal("0"))
+        rows = [
+            ["Revenue", "Rooms", r["room_revenue"]],
+            ["Revenue", "F&B", f["fnb_sales"]],
+            ["Tax", "Output GST", str(tax_total)],
+            ["Purchases", "Goods received", str(purchases)],
+        ]
+        return ("Accounting Export", ["Account", "Head", "Amount"], rows)
     # occupancy / rooms
     rows = [[r.number, r.room_type_code, r.get_status_display()]
             for r in Room.objects.select_related("room_type")]

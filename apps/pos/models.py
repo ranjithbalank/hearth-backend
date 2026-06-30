@@ -121,6 +121,21 @@ class AddOn(models.Model):
         return self.name
 
 
+class ComboComponent(models.Model):
+    """A component of a combo/meal item (BRD FR-MNU-006).
+
+    The combo is itself a MenuItem (with its own combo price); these rows list
+    the items it bundles, so KOT prints components and stock deducts each one.
+    """
+
+    combo = models.ForeignKey(MenuItem, on_delete=models.CASCADE, related_name="combo_components")
+    component = models.ForeignKey(MenuItem, on_delete=models.PROTECT, related_name="in_combos")
+    qty = models.PositiveSmallIntegerField(default=1)
+
+    def __str__(self):
+        return f"{self.combo.name} ⊃ {self.qty}× {self.component.name}"
+
+
 class Order(models.Model):
     DINEIN = "dinein"
     TAKEAWAY = "takeaway"
@@ -156,6 +171,13 @@ class Order(models.Model):
     kot_no = models.CharField(max_length=20, blank=True)
     # Kitchen Display status (BRD 5.13 / KDS): ""(none) | cooking | ready | served
     kitchen_status = models.CharField(max_length=12, blank=True, default="")
+    # Online ordering & delivery (BRD 5.16)
+    source_platform = models.CharField(max_length=20, blank=True, default="",
+                                       help_text="zomato | swiggy | website | qr")
+    external_ref = models.CharField(max_length=64, blank=True, default="", db_index=True)
+    online_status = models.CharField(max_length=12, blank=True, default="",
+                                     help_text="received | accepted | ready | dispatched")
+    prepaid = models.BooleanField(default=False)
     # Discounts / loyalty (BRD 5.15)
     DISC_NONE = "none"
     DISC_PERCENT = "percent"
@@ -263,4 +285,7 @@ class OrderLine(models.Model):
             bits.append(f"({self.variant.name})")
         if self.addons:
             bits.append("+ " + ", ".join(a["name"] for a in self.addons))
+        combo = list(self.menu_item.combo_components.all())
+        if combo:
+            bits.append("[" + ", ".join(f"{c.qty}×{c.component.name}" for c in combo) + "]")
         return " ".join(bits)
