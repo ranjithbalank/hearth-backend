@@ -20,6 +20,8 @@ class Event(models.Model):
     space = models.ForeignKey(FunctionSpace, on_delete=models.PROTECT, related_name="events")
     title = models.CharField(max_length=160)
     host = models.CharField(max_length=160, blank=True)
+    contact = models.CharField(max_length=40, blank=True)
+    event_type = models.CharField(max_length=40, blank=True, help_text="Wedding | Corporate | Birthday …")
     event_date = models.DateField()
     covers = models.PositiveSmallIntegerField(default=50)
     package_amount = models.DecimalField(max_digits=12, decimal_places=2, default=0)
