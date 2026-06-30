@@ -36,6 +36,27 @@ class RecipeDeductionTests(TestCase):
         self.assertEqual(self.item.recipe.plate_cost, Decimal("64.000"))  # 0.2 * 320
 
 
+class SubRecipeTests(TestCase):
+    def test_sub_recipe_expands_on_deduction(self):
+        from apps.pos.models import Category, MenuItem, Order, OrderLine
+        cat = Category.objects.create(name="Main")
+        tomato = Ingredient.objects.create(name="Tomato", unit="kg", current_stock=Decimal("10"))
+        # Sub-recipe: "Gravy" prep made from tomato.
+        gravy = MenuItem.objects.create(name="Gravy", category=cat, price=Decimal("0"))
+        RecipeLine.objects.create(recipe=Recipe.objects.create(menu_item=gravy),
+                                  ingredient=tomato, qty=Decimal("0.3"))
+        # Dish consumes 2 units of the gravy sub-recipe.
+        dish = MenuItem.objects.create(name="Curry", category=cat, price=Decimal("300"))
+        RecipeLine.objects.create(recipe=Recipe.objects.create(menu_item=dish),
+                                  sub_recipe=gravy, qty=Decimal("2"))
+        order = Order.objects.create(mode=Order.DINEIN)
+        line = OrderLine.objects.create(order=order, menu_item=dish, qty=1, unit_price=Decimal("300"))
+        deduct_for_newly_fired(order, [line])
+        tomato.refresh_from_db()
+        # 10 - (0.3 tomato * 2 gravy * 1 dish) = 9.4
+        self.assertEqual(tomato.current_stock, Decimal("9.400"))
+
+
 class GoodsReceiptTests(TestCase):
     def test_grn_posts_stock(self):
         ing = Ingredient.objects.create(name="Butter", unit="kg", current_stock=Decimal("3"), unit_cost=Decimal("480"))

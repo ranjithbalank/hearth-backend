@@ -68,6 +68,32 @@ class HousekeepingViewSet(ModuleViewSetMixin, viewsets.ViewSet):
                    after={"item": item, "amount": str(amount)})
         return Response({"posted": True, "folio": folio.id})
 
+    @action(detail=False, methods=["get", "post"])
+    def lost_found(self, request):
+        """List or log lost-and-found items (FR-HSK-007)."""
+        from .models import LostFoundItem
+        if request.method == "POST":
+            LostFoundItem.objects.create(
+                description=request.data.get("description", ""),
+                location=request.data.get("location", ""),
+                handler=request.data.get("handler", ""),
+                guest_contact=request.data.get("guest_contact", ""))
+        return Response([
+            {"id": i.id, "description": i.description, "location": i.location,
+             "handler": i.handler, "status": i.status, "found_at": i.found_at}
+            for i in LostFoundItem.objects.all()[:50]
+        ])
+
+    @action(detail=True, methods=["post"])
+    def lost_found_claim(self, request, pk=None):
+        from .models import LostFoundItem
+        item = LostFoundItem.objects.filter(pk=pk).first()
+        if not item:
+            return Response({"detail": "not found"}, status=404)
+        item.status = request.data.get("status", LostFoundItem.CLAIMED)
+        item.save(update_fields=["status"])
+        return Response({"id": item.id, "status": item.status})
+
     @action(detail=False, methods=["get"])
     def counters(self, request):
         rooms = Room.objects.all()

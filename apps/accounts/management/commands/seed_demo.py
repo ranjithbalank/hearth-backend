@@ -23,8 +23,10 @@ from apps.crm.models import Customer
 from apps.hr.models import Employee
 from apps.inventory.models import Ingredient
 from apps.matreq.models import MaterialRequest, MaterialRequestLine
+from apps.housekeeping.models import LostFoundItem
 from apps.pos.models import (
-    AddOn, AddOnGroup, Category, ChannelPrice, ComboComponent, Coupon, MenuItem, Table, Variant,
+    AddOn, AddOnGroup, Category, ChannelPrice, ComboComponent, Coupon, MenuItem,
+    MenuSchedule, Table, Variant,
 )
 from apps.procurement.models import PurchaseOrder, PurchaseOrderLine, Supplier, Vendor
 from apps.tax.models import GstSlab
@@ -232,6 +234,15 @@ class Command(BaseCommand):
                     menu_item=mi, channel=chan,
                     defaults={"price": (mi.price * factor).quantize(Decimal("1"))})
 
+        # Happy-hour (FR-MNU-011): beverages cheaper 16:00–19:00.
+        from datetime import time as _t
+        for bev in ["Masala Chai", "Fresh Lime Soda"]:
+            mi = MenuItem.objects.filter(name=bev).first()
+            if mi and not mi.schedules.exists():
+                MenuSchedule.objects.create(menu_item=mi, name="Happy hour",
+                                            start_time=_t(16, 0), end_time=_t(19, 0),
+                                            price=(mi.price * Decimal("0.7")).quantize(Decimal("1")))
+
     def _customers(self):
         data = [
             ("Rahul Mehta", "9876500001", "guest", False, 0),
@@ -374,6 +385,9 @@ class Command(BaseCommand):
         ]
         for name, dept, role, shifts in staff:
             Employee.objects.create(name=name, department=dept, role=role, shifts=shifts)
+        if not LostFoundItem.objects.exists():
+            LostFoundItem.objects.create(description="Black umbrella", location="Lobby", handler="Anil Kumar")
+            LostFoundItem.objects.create(description="Phone charger", location="Room 204", handler="Sunita Pal")
 
     def _masters(self):
         vendors = [

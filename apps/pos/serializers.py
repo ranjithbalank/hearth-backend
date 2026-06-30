@@ -82,6 +82,7 @@ class OrderSerializer(serializers.ModelSerializer):
             "status", "status_label", "folio", "kot_no", "lines", "totals", "created_at",
             "discount_kind", "discount_value", "discount_reason", "coupon_code",
             "loyalty_redeemed", "source_platform", "external_ref", "online_status", "prepaid",
+            "brand",
         ]
 
     def get_totals(self, obj):

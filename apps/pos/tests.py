@@ -115,6 +115,18 @@ class DiscountLoyaltyTests(TestCase):
         flour.refresh_from_db()
         self.assertEqual(flour.current_stock, Decimal("9.800"))  # 10 - (0.1 * 2 naans)
 
+    def test_happy_hour_price_applies_when_active(self):
+        from datetime import time
+        from .models import MenuSchedule
+        MenuSchedule.objects.create(menu_item=self.item, name="HH",
+                                    start_time=time(0, 0), end_time=time(23, 59),
+                                    price=Decimal("250"))
+        self.client.force_authenticate(self.mgr)
+        o = Order.objects.create(mode=Order.DINEIN)
+        self.client.post(reverse("order-add-item", args=[o.id]),
+                         {"menu_item": self.item.id, "qty": 1}, format="json")
+        self.assertEqual(o.lines.first().unit_price, Decimal("250.00"))
+
     def test_required_addon_group_enforced(self):
         self.client.force_authenticate(self.mgr)
         grp = AddOnGroup.objects.create(menu_item=self.item, name="Spice", min_select=1, max_select=1)

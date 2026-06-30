@@ -24,8 +24,16 @@ class Recipe(models.Model):
 
 class RecipeLine(models.Model):
     recipe = models.ForeignKey(Recipe, on_delete=models.CASCADE, related_name="lines")
-    ingredient = models.ForeignKey(Ingredient, on_delete=models.PROTECT, related_name="recipe_lines")
-    qty = models.DecimalField(max_digits=10, decimal_places=3, help_text="per single dish, in ingredient unit")
+    ingredient = models.ForeignKey(
+        Ingredient, on_delete=models.PROTECT, related_name="recipe_lines", null=True, blank=True
+    )
+    # A line may instead consume a sub-recipe / semi-finished prep (BRD FR-RCP-003),
+    # which is itself a MenuItem with its own Recipe — expanded on deduction.
+    sub_recipe = models.ForeignKey(
+        "pos.MenuItem", on_delete=models.PROTECT, null=True, blank=True, related_name="used_in_recipes"
+    )
+    qty = models.DecimalField(max_digits=10, decimal_places=3, help_text="per single dish")
 
     def __str__(self):
-        return f"{self.qty} {self.ingredient.unit} {self.ingredient.name}"
+        target = self.ingredient.name if self.ingredient_id else f"sub:{self.sub_recipe}"
+        return f"{self.qty} {target}"

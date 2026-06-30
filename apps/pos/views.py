@@ -125,6 +125,11 @@ class OrderViewSet(ModuleViewSetMixin, viewsets.ModelViewSet):
         chan_price = item.channel_prices.filter(channel=order.mode).first()
         if chan_price:
             base_price = chan_price.price
+        # Happy-hour / scheduled pricing (FR-MNU-011) overrides if active now.
+        for sched in item.schedules.all():
+            if sched.active_now():
+                base_price = sched.price
+                break
         # Variant pricing (FR-MNU-004) overrides the base for that size.
         variant_id = request.data.get("variant")
         if variant_id:
@@ -208,6 +213,7 @@ class OrderViewSet(ModuleViewSetMixin, viewsets.ModelViewSet):
                 mode=Order.DELIVERY, customer=cust, source_platform=platform,
                 external_ref=ext, online_status="received",
                 prepaid=bool(request.data.get("prepaid", True)),
+                brand=request.data.get("brand", ""),
                 kot_no=f"AGG-{ext[:6].upper()}", status=Order.KOT_FIRED, kitchen_status="cooking",
             )
             fired = []

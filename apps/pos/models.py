@@ -121,6 +121,26 @@ class AddOn(models.Model):
         return self.name
 
 
+class MenuSchedule(models.Model):
+    """Time-of-day price override, e.g. happy hour (BRD FR-MNU-011)."""
+
+    menu_item = models.ForeignKey(MenuItem, on_delete=models.CASCADE, related_name="schedules")
+    name = models.CharField(max_length=60, default="Happy hour")
+    start_time = models.TimeField()
+    end_time = models.TimeField()
+    price = models.DecimalField(max_digits=10, decimal_places=2)
+
+    def active_now(self):
+        from django.utils import timezone
+        now = timezone.localtime().time()
+        if self.start_time <= self.end_time:
+            return self.start_time <= now <= self.end_time
+        return now >= self.start_time or now <= self.end_time  # window crosses midnight
+
+    def __str__(self):
+        return f"{self.menu_item.name} {self.name} {self.start_time}-{self.end_time}"
+
+
 class ComboComponent(models.Model):
     """A component of a combo/meal item (BRD FR-MNU-006).
 
@@ -178,6 +198,8 @@ class Order(models.Model):
     online_status = models.CharField(max_length=12, blank=True, default="",
                                      help_text="received | accepted | ready | dispatched")
     prepaid = models.BooleanField(default=False)
+    # Virtual outlet / cloud brand sharing the kitchen (BRD FR-ONL-005)
+    brand = models.CharField(max_length=60, blank=True, default="")
     # Discounts / loyalty (BRD 5.15)
     DISC_NONE = "none"
     DISC_PERCENT = "percent"
