@@ -7,7 +7,7 @@ from apps.accounts.models import log_action
 from apps.accounts.permissions import ModuleViewSetMixin
 from apps.inventory.models import apply_movement
 
-from .models import GoodsReceipt, PurchaseOrder, Supplier
+from .models import GoodsReceipt, PurchaseOrder, Supplier, Vendor
 
 
 def _po_dict(po):
@@ -23,7 +23,7 @@ def _po_dict(po):
 
 
 class SupplierViewSet(ModuleViewSetMixin, viewsets.ViewSet):
-    module = "procurement"
+    module = "suppliers"
 
     def list(self, request):
         return Response([
@@ -31,6 +31,17 @@ class SupplierViewSet(ModuleViewSetMixin, viewsets.ViewSet):
              "payment_terms": s.payment_terms, "lead_time_days": s.lead_time_days,
              "rating": str(s.rating)}
             for s in Supplier.objects.all()
+        ])
+
+
+class VendorViewSet(ModuleViewSetMixin, viewsets.ViewSet):
+    module = "vendors"
+
+    def list(self, request):
+        return Response([
+            {"id": v.id, "name": v.name, "category": v.category, "contact": v.contact,
+             "payment_terms": v.payment_terms, "status": v.status}
+            for v in Vendor.objects.all()
         ])
 
 

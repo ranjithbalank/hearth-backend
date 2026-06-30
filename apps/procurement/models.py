@@ -20,6 +20,22 @@ class Supplier(models.Model):
         return self.name
 
 
+class Vendor(models.Model):
+    """Service vendor (vs goods Supplier) — BRD prototype 'Vendors' master."""
+
+    name = models.CharField(max_length=160, unique=True)
+    category = models.CharField(max_length=80, blank=True)
+    contact = models.CharField(max_length=120, blank=True)
+    payment_terms = models.CharField(max_length=80, blank=True)
+    status = models.CharField(max_length=20, default="Active")
+
+    class Meta:
+        ordering = ["name"]
+
+    def __str__(self):
+        return self.name
+
+
 class PurchaseOrder(models.Model):
     PENDING = "pending"
     APPROVED = "approved"

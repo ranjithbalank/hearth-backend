@@ -26,7 +26,8 @@ from apps.matreq.models import MaterialRequest, MaterialRequestLine
 from apps.pos.models import (
     AddOn, AddOnGroup, Category, ChannelPrice, Coupon, MenuItem, Table, Variant,
 )
-from apps.procurement.models import PurchaseOrder, PurchaseOrderLine, Supplier
+from apps.procurement.models import PurchaseOrder, PurchaseOrderLine, Supplier, Vendor
+from apps.tax.models import GstSlab
 from apps.recipes.models import Recipe, RecipeLine
 from apps.reservations.models import Reservation
 from apps.revenue.models import RateRecommendation
@@ -52,6 +53,7 @@ class Command(BaseCommand):
         self._supply_chain()
         self._banquets()
         self._hr()
+        self._masters()
         self.stdout.write(self.style.SUCCESS(
             f"Done. Property '{prop.name}' [{prop.edition}]. "
             f"Logins: md / gm / frontoffice / cashier / housekeeping (pwd: {PASSWORD})"
@@ -359,3 +361,24 @@ class Command(BaseCommand):
         ]
         for name, dept, role, shifts in staff:
             Employee.objects.create(name=name, department=dept, role=role, shifts=shifts)
+
+    def _masters(self):
+        vendors = [
+            ("CoolAir HVAC Services", "Maintenance", "Net 30"),
+            ("BrightClean Laundry", "Laundry", "Net 15"),
+            ("SecureGuard Pvt Ltd", "Security", "Net 30"),
+            ("PestAway Solutions", "Pest control", "Net 45"),
+        ]
+        for name, cat, terms in vendors:
+            Vendor.objects.get_or_create(name=name, defaults={
+                "category": cat, "payment_terms": terms,
+                "contact": "+91 90000 00000"})
+        slabs = [
+            ("Rooms (low)", "12", "996311", "rooms"),
+            ("Rooms (high)", "18", "996311", "rooms"),
+            ("F&B", "5", "996331", "fnb"),
+            ("Banquet", "18", "996334", "banquet"),
+        ]
+        for name, rate, hsn, applies in slabs:
+            GstSlab.objects.get_or_create(name=name, defaults={
+                "rate": Decimal(rate), "hsn_sac": hsn, "applies_to": applies})
