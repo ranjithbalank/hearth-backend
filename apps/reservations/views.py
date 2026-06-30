@@ -73,6 +73,44 @@ class ReservationViewSet(ModuleViewSetMixin, viewsets.ModelViewSet):
             qs = qs.filter(checkin_date=day)
         return Response(ReservationSerializer(qs, many=True).data)
 
+    @action(detail=False, methods=["get"])
+    def room_types(self, request):
+        """Room types with rate + live availability — for the walk-in form."""
+        out = []
+        for rt in RoomType.objects.all():
+            sellable = Room.objects.filter(room_type=rt, status__in=Room.SELLABLE).count()
+            out.append({"code": rt.code, "name": rt.name, "base_rate": str(rt.base_rate),
+                        "available": sellable})
+        return Response(out)
+
+    @action(detail=False, methods=["post"])
+    def walkin(self, request):
+        """Create a walk-in reservation for a guest arriving without a booking."""
+        from datetime import timedelta
+
+        from apps.crm.models import Customer
+        rt = RoomType.objects.filter(code=request.data.get("room_type")).first()
+        if not rt:
+            return Response({"detail": "room_type not found"}, status=400)
+        nights = int(request.data.get("nights", 1))
+        guest = None
+        mobile = request.data.get("mobile", "").strip()
+        if mobile:
+            guest, _ = Customer.objects.get_or_create(
+                mobile=mobile, defaults={"name": request.data.get("guest_name", "Walk-in")})
+        resv = Reservation.objects.create(
+            guest=guest,
+            guest_name=request.data.get("guest_name", "Walk-in Guest"),
+            room_type=rt,
+            checkin_date=date.today(),
+            checkout_date=date.today() + timedelta(days=nights),
+            nights=nights, rate=rt.base_rate,
+            source=Reservation.SOURCE_WALKIN, status=Reservation.BOOKED,
+        )
+        log_action(request.user, "walkin_create", entity="Reservation", entity_id=resv.id,
+                   after={"guest": resv.guest_name, "room_type": rt.code})
+        return Response(ReservationSerializer(resv).data, status=201)
+
     @action(detail=True, methods=["get"])
     def room_options(self, request, pk=None):
         """Sellable rooms matching the reservation's room type."""
