@@ -150,14 +150,17 @@ class Command(BaseCommand):
             return
         today = date.today()
         samples = [
-            ("Rahul Mehta", "STD", "ota", 4500, True, 4500),
-            ("Lakshmi Iyer", "DLX", "direct", 6500, False, 0),
-            ("John Carter", "STE", "booking", 9500, True, 9500),
-            ("Sneha Gupta", "STD", "walkin", 4500, False, 0),
+            ("Rahul Mehta", "STD", "ota", 4500, True, 4500, "9811100001"),
+            ("Lakshmi Iyer", "DLX", "direct", 6500, False, 0, "9811100002"),
+            ("John Carter", "STE", "booking", 9500, True, 9500, "9811100003"),
+            ("Sneha Gupta", "STD", "walkin", 4500, False, 0, "9811100004"),
         ]
-        for name, code, source, rate, prepaid, deposit in samples:
+        for name, code, source, rate, prepaid, deposit, mobile in samples:
+            guest, _ = Customer.objects.get_or_create(mobile=mobile, defaults={
+                "name": name, "email": name.split()[0].lower() + "@example.com",
+            })
             Reservation.objects.create(
-                guest_name=name, room_type=room_types[code], source=source,
+                guest=guest, guest_name=name, room_type=room_types[code], source=source,
                 checkin_date=today, checkout_date=today + timedelta(days=2),
                 nights=2, rate=Decimal(rate), prepaid=prepaid,
                 deposit=Decimal(deposit), status=Reservation.BOOKED,

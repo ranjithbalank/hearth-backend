@@ -38,6 +38,24 @@ class FolioViewSet(ModuleViewSetMixin, viewsets.ModelViewSet):
         return Response(FolioSerializer(folio).data)
 
     @action(detail=True, methods=["post"])
+    def email_invoice(self, request, pk=None):
+        """Send the invoice to the guest via the messaging adapter (FR-NOT-001)."""
+        from apps.integrations import services as integ
+        folio = self.get_object()
+        guest = folio.reservation.guest if folio.reservation else None
+        email = getattr(guest, "email", "") or ""
+        mobile = getattr(guest, "mobile", "") or ""
+        body = (f"{folio.guest_name}, your invoice {folio.invoice_no or '(pending)'} "
+                f"total ₹{folio.charges_total}. Thank you for staying with us.")
+        if email:
+            integ.notify("email", email, body)
+            return Response({"sent": True, "channel": "email", "to": email})
+        if mobile:
+            integ.notify("sms", mobile, body)
+            return Response({"sent": True, "channel": "sms", "to": mobile})
+        return Response({"detail": "No email or mobile on file for this guest"}, status=400)
+
+    @action(detail=True, methods=["post"])
     def checkout(self, request, pk=None):
         folio = self.get_object()
         try:

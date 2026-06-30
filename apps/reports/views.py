@@ -191,6 +191,30 @@ class ReportExportView(ModuleAPIView):
         return resp
 
 
+class DayEndView(ModuleAPIView):
+    """Day-end (Z) settlement: tender-wise collection totals (BRD FR-PAY-007)."""
+
+    module = "accounting"
+
+    def get(self, request):
+        from collections import defaultdict
+
+        from apps.frontoffice.models import Settlement
+        by = defaultdict(lambda: {"amount": Decimal("0"), "count": 0, "tip": Decimal("0")})
+        for s in Settlement.objects.all():
+            b = by[s.tender]
+            b["amount"] += s.amount
+            b["count"] += 1
+            b["tip"] += s.tip
+        tenders = [
+            {"tender": k, "amount": str(v["amount"]), "count": v["count"], "tip": str(v["tip"])}
+            for k, v in sorted(by.items())
+        ]
+        total = sum((v["amount"] for v in by.values()), start=Decimal("0"))
+        tips = sum((v["tip"] for v in by.values()), start=Decimal("0"))
+        return Response({"tenders": tenders, "total": str(total), "tips": str(tips)})
+
+
 class ReportView(ModuleAPIView):
     """In-app report viewer data: KPIs + a chartable series (FR-RPT-001/004)."""
 
