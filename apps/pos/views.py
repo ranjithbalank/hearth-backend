@@ -110,11 +110,20 @@ class KdsViewSet(ModuleViewSetMixin, viewsets.ViewSet):
         out = []
         for o in orders:
             out.append({
-                "id": o.id, "kot_no": o.kot_no, "kitchen_status": o.kitchen_status,
+                "id": o.id, "type": "order", "kot_no": o.kot_no, "kitchen_status": o.kitchen_status,
                 "table": o.table.name if o.table else o.get_mode_display(),
                 "created_at": o.created_at,
                 "items": [{"name": l.display_name, "qty": l.qty,
                            "station": l.menu_item.station} for l in o.lines.all()],
+            })
+        # Banquet Event Order catering prep (FR-BQT-004).
+        from apps.banquets.models import Event as BqEvent
+        for e in BqEvent.objects.filter(beo_status__in=["pending", "ready"]).select_related("space"):
+            out.append({
+                "id": e.id, "type": "beo", "kot_no": f"BEO-{e.id}", "kitchen_status": e.beo_status,
+                "table": f"{e.space.name} · {e.title}", "created_at": e.event_date,
+                "items": [{"name": f"Catering ~{e.food_covers} plates ({e.food_pref or 'mixed'}) "
+                                   f"— {e.event_date}", "qty": e.covers, "station": "kitchen"}],
             })
         return Response(out)
 
@@ -126,6 +135,17 @@ class KdsViewSet(ModuleViewSetMixin, viewsets.ViewSet):
         order.kitchen_status = "ready" if order.kitchen_status == "cooking" else "served"
         order.save(update_fields=["kitchen_status"])
         return Response({"id": order.id, "kitchen_status": order.kitchen_status})
+
+    @action(detail=True, methods=["post"])
+    def beo_bump(self, request, pk=None):
+        """Advance a banquet BEO prep ticket from the kitchen display (FR-BQT-004)."""
+        from apps.banquets.models import Event as BqEvent
+        e = BqEvent.objects.filter(pk=pk).first()
+        if not e:
+            return Response({"detail": "not found"}, status=404)
+        e.beo_status = "ready" if e.beo_status == "pending" else "done"
+        e.save(update_fields=["beo_status"])
+        return Response({"id": e.id, "kitchen_status": e.beo_status})
 
 
 class CategoryViewSet(ModuleViewSetMixin, viewsets.ModelViewSet):

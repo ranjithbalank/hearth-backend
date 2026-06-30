@@ -78,7 +78,14 @@ class BanquetViewSet(ModuleViewSetMixin, viewsets.ViewSet):
         if not e:
             return Response({"detail": "not found"}, status=404)
         e.status = Event.CONFIRMED
-        e.save(update_fields=["status"])
+        fields = ["status"]
+        # Fire the BEO catering prep to the kitchen display (FR-BQT-004).
+        if e.food_covers > 0 and not e.beo_status:
+            e.beo_status = "pending"
+            fields.append("beo_status")
+            log_action(request.user, "beo_fired", entity="Event", entity_id=e.id,
+                       after={"food_covers": e.food_covers, "food_pref": e.food_pref})
+        e.save(update_fields=fields)
         return Response(_event_dict(e))
 
     @action(detail=True, methods=["post"])
