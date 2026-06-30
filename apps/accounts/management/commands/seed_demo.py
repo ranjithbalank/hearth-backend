@@ -56,6 +56,7 @@ class Command(BaseCommand):
         self._banquets()
         self._hr()
         self._masters()
+        self._activity()
         self.stdout.write(self.style.SUCCESS(
             f"Done. Property '{prop.name}' [{prop.edition}]. "
             f"Logins: md / gm / frontoffice / cashier / housekeeping (pwd: {PASSWORD})"
@@ -413,3 +414,64 @@ class Command(BaseCommand):
         for name, rate, hsn, applies in slabs:
             GstSlab.objects.get_or_create(name=name, defaults={
                 "rate": Decimal(rate), "hsn_sac": hsn, "applies_to": applies})
+
+    def _activity(self):
+        """Generate realistic transactions so dashboards/reports show data on a
+        fresh seed: a couple of completed stays, in-house guests, F&B sales across
+        channels, and an online aggregator order."""
+        from apps.frontoffice import services as fo
+        from apps.frontoffice.models import Folio
+        from apps.pos.models import MenuItem, Order, OrderLine, Table
+        from apps.pos.views import OrderViewSet  # noqa: F401 (ensure import path)
+        from apps.recipes.services import deduct_for_newly_fired
+        from apps.frontoffice.models import Settlement
+        from apps.rooms.models import Room
+
+        if Folio.objects.exists() or Order.objects.exists():
+            return  # already has activity
+
+        # --- Rooms: check in 4 arrivals, check out 2 (revenue + invoices), leave 2 in-house.
+        arrivals = list(Reservation.objects.filter(status=Reservation.BOOKED)[:4])
+        for idx, resv in enumerate(arrivals):
+            room = Room.objects.filter(room_type=resv.room_type,
+                                       status__in=Room.SELLABLE).first()
+            if not room:
+                continue
+            folio = fo.check_in(resv, room)
+            if idx < 2:  # check two out -> room revenue, ADR/RevPAR, GST, invoices
+                fo.check_out(folio, tender="Card")
+
+        # --- F&B: a few settled POS orders across channels.
+        items = list(MenuItem.objects.filter(available=True)[:6])
+        tables = list(Table.objects.all())
+        if items:
+            def make_order(mode, picks, tender, table=None):
+                o = Order.objects.create(mode=mode, table=table)
+                lines = []
+                for mi, qty in picks:
+                    lines.append(OrderLine.objects.create(order=o, menu_item=mi, qty=qty,
+                                                          unit_price=mi.price, kot_fired=True))
+                deduct_for_newly_fired(o, lines)
+                o.kot_no = f"KOT-{o.id:05d}"
+                o.status = Order.SETTLED
+                o.save(update_fields=["kot_no", "status"])
+                Settlement.objects.create(tender=tender, amount=o.totals()["total"],
+                                          reference=f"POS {o.id}")
+                if table:
+                    table.status = Table.FREE
+                    table.save(update_fields=["status"])
+            make_order(Order.DINEIN, [(items[0], 2), (items[1], 1)], "Cash",
+                       tables[0] if tables else None)
+            make_order(Order.TAKEAWAY, [(items[2], 1), (items[3], 2)], "UPI")
+            make_order(Order.DELIVERY, [(items[1], 1), (items[4], 1)], "Card")
+
+            # --- One online aggregator order (prepaid).
+            o = Order.objects.create(mode=Order.DELIVERY, source_platform="zomato",
+                                     external_ref="ZOM-DEMO-1", online_status="received",
+                                     prepaid=True, status=Order.KOT_FIRED,
+                                     kitchen_status="cooking", kot_no="AGG-ZOMDEM")
+            agg_lines = [OrderLine.objects.create(order=o, menu_item=items[0], qty=1,
+                                                  unit_price=items[0].price, kot_fired=True)]
+            deduct_for_newly_fired(o, agg_lines)
+            Settlement.objects.create(tender="zomato (prepaid)", amount=o.totals()["total"],
+                                      reference="zomato:ZOM-DEMO-1")
