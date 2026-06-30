@@ -7,7 +7,9 @@ from rest_framework.test import APIClient
 from apps.accounts.models import User
 from apps.crm.models import Customer
 
-from .models import AddOn, AddOnGroup, Category, Coupon, MenuItem, Order, OrderLine, Variant
+from .models import (
+    AddOn, AddOnGroup, Category, ChannelPrice, Coupon, MenuItem, Order, OrderLine, Variant,
+)
 
 
 class DiscountLoyaltyTests(TestCase):
@@ -83,6 +85,18 @@ class DiscountLoyaltyTests(TestCase):
         line = o.lines.first()
         self.assertEqual(line.unit_price, Decimal("525.00"))  # 500 variant + 25 add-on
         self.assertEqual(line.addons[0]["name"], "Egg")
+
+    def test_channel_price_applies_per_mode(self):
+        self.client.force_authenticate(self.mgr)
+        ChannelPrice.objects.create(menu_item=self.item, channel="delivery", price=Decimal("450"))
+        dinein = Order.objects.create(mode=Order.DINEIN)
+        delivery = Order.objects.create(mode=Order.DELIVERY)
+        self.client.post(reverse("order-add-item", args=[dinein.id]),
+                         {"menu_item": self.item.id, "qty": 1}, format="json")
+        self.client.post(reverse("order-add-item", args=[delivery.id]),
+                         {"menu_item": self.item.id, "qty": 1}, format="json")
+        self.assertEqual(dinein.lines.first().unit_price, Decimal("400.00"))   # base
+        self.assertEqual(delivery.lines.first().unit_price, Decimal("450.00"))  # channel price
 
     def test_required_addon_group_enforced(self):
         self.client.force_authenticate(self.mgr)

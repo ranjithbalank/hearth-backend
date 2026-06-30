@@ -119,9 +119,13 @@ class OrderViewSet(ModuleViewSetMixin, viewsets.ModelViewSet):
             return Response({"detail": "menu_item not found"}, status=404)
         qty = int(request.data.get("qty", 1))
 
-        # Variant pricing (FR-MNU-004)
+        # Channel pricing (FR-MNU-003): the item's price for this order's mode.
         variant = None
         base_price = item.price
+        chan_price = item.channel_prices.filter(channel=order.mode).first()
+        if chan_price:
+            base_price = chan_price.price
+        # Variant pricing (FR-MNU-004) overrides the base for that size.
         variant_id = request.data.get("variant")
         if variant_id:
             variant = Variant.objects.filter(pk=variant_id, menu_item=item).first()

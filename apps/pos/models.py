@@ -67,6 +67,23 @@ class MenuItem(models.Model):
         return self.name
 
 
+class ChannelPrice(models.Model):
+    """Per-channel price override for an item (BRD FR-MNU-003).
+
+    e.g. a dish priced higher on delivery than dine-in. Channel == order mode.
+    """
+
+    menu_item = models.ForeignKey(MenuItem, on_delete=models.CASCADE, related_name="channel_prices")
+    channel = models.CharField(max_length=12, help_text="dinein | takeaway | delivery | online")
+    price = models.DecimalField(max_digits=10, decimal_places=2)
+
+    class Meta:
+        unique_together = [("menu_item", "channel")]
+
+    def __str__(self):
+        return f"{self.menu_item.name} @ {self.channel}: {self.price}"
+
+
 class Variant(models.Model):
     """A priced variant of an item, e.g. Half/Full, S/M/L (BRD FR-MNU-004)."""
 

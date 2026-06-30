@@ -41,13 +41,18 @@ class MenuItemSerializer(serializers.ModelSerializer):
     category_name = serializers.CharField(source="category.name", read_only=True)
     variants = VariantSerializer(many=True, read_only=True)
     addon_groups = AddOnGroupSerializer(many=True, read_only=True)
+    channel_prices = serializers.SerializerMethodField()
 
     class Meta:
         model = MenuItem
         fields = [
             "id", "name", "short_code", "category", "category_name", "price",
             "gst_rate", "diet", "station", "available", "variants", "addon_groups",
+            "channel_prices",
         ]
+
+    def get_channel_prices(self, obj):
+        return {cp.channel: str(cp.price) for cp in obj.channel_prices.all()}
 
 
 class OrderLineSerializer(serializers.ModelSerializer):

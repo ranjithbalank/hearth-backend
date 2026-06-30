@@ -23,7 +23,9 @@ from apps.crm.models import Customer
 from apps.hr.models import Employee
 from apps.inventory.models import Ingredient
 from apps.matreq.models import MaterialRequest, MaterialRequestLine
-from apps.pos.models import AddOn, AddOnGroup, Category, Coupon, MenuItem, Table, Variant
+from apps.pos.models import (
+    AddOn, AddOnGroup, Category, ChannelPrice, Coupon, MenuItem, Table, Variant,
+)
 from apps.procurement.models import PurchaseOrder, PurchaseOrderLine, Supplier
 from apps.recipes.models import Recipe, RecipeLine
 from apps.reservations.models import Reservation
@@ -207,6 +209,13 @@ class Command(BaseCommand):
             spice = AddOnGroup.objects.create(menu_item=tikka, name="Spice level", min_select=1, max_select=1)
             for lvl in ["Mild", "Medium", "Spicy"]:
                 AddOn.objects.create(group=spice, name=lvl, price=Decimal("0"))
+
+        # Per-channel pricing (FR-MNU-003): delivery/online carry a ~12% uplift.
+        for mi in MenuItem.objects.all():
+            for chan, factor in [("delivery", Decimal("1.12")), ("online", Decimal("1.12"))]:
+                ChannelPrice.objects.get_or_create(
+                    menu_item=mi, channel=chan,
+                    defaults={"price": (mi.price * factor).quantize(Decimal("1"))})
 
     def _customers(self):
         data = [
