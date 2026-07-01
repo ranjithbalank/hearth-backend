@@ -37,6 +37,21 @@ class FolioViewSet(ModuleViewSetMixin, viewsets.ModelViewSet):
         services.settle_folio(folio, payments, user=request.user)
         return Response(FolioSerializer(folio).data)
 
+    @action(detail=True, methods=["get"])
+    def invoice_pdf(self, request, pk=None):
+        """Download the folio as a GST tax-invoice PDF (FR-TAX-003)."""
+        from django.http import HttpResponse
+
+        from apps.accounts.views import get_property
+        from .invoice_pdf import build_invoice_pdf
+        folio = self.get_object()
+        prop = get_property()
+        pdf = build_invoice_pdf(folio, prop.name, prop.gstin)
+        resp = HttpResponse(pdf.read(), content_type="application/pdf")
+        name = folio.invoice_no or f"folio-{folio.id}"
+        resp["Content-Disposition"] = f'attachment; filename="{name}.pdf"'
+        return resp
+
     @action(detail=True, methods=["post"])
     def email_invoice(self, request, pk=None):
         """Send the invoice to the guest via the messaging adapter (FR-NOT-001)."""

@@ -1,0 +1,91 @@
+"""GST tax-invoice PDF generation with ReportLab (BRD FR-TAX-003)."""
+import io
+from decimal import Decimal
+
+from reportlab.lib import colors
+from reportlab.lib.pagesizes import A4
+from reportlab.lib.units import mm
+from reportlab.platypus import (
+    SimpleDocTemplate,
+    Spacer,
+    Table,
+    TableStyle,
+)
+from reportlab.platypus.flowables import HRFlowable
+from reportlab.platypus.paragraph import Paragraph
+from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
+
+PINE = colors.HexColor("#1C6B57")
+INK = colors.HexColor("#16221F")
+MUTED = colors.HexColor("#8A8478")
+CREAM = colors.HexColor("#F6F2EC")
+
+
+def _money(v):
+    return "INR " + f"{Decimal(str(v)):,.2f}"
+
+
+def build_invoice_pdf(folio, property_name, gstin):
+    buf = io.BytesIO()
+    doc = SimpleDocTemplate(buf, pagesize=A4, topMargin=18 * mm, bottomMargin=18 * mm,
+                            leftMargin=16 * mm, rightMargin=16 * mm, title=f"Invoice {folio.invoice_no or folio.id}")
+    ss = getSampleStyleSheet()
+    h_brand = ParagraphStyle("brand", parent=ss["Title"], textColor=PINE, fontSize=20, spaceAfter=0)
+    h_doc = ParagraphStyle("doc", parent=ss["Normal"], alignment=2, fontSize=13, textColor=INK, leading=16)
+    small = ParagraphStyle("small", parent=ss["Normal"], fontSize=9, textColor=MUTED)
+    normal = ParagraphStyle("n", parent=ss["Normal"], fontSize=10.5, textColor=INK)
+    story = []
+
+    # Header
+    header = Table([[
+        Paragraph(f"{property_name}<br/><font size=8 color='#8A8478'>{'GSTIN: ' + gstin if gstin else ''}</font>", h_brand),
+        Paragraph(f"<b>TAX INVOICE</b><br/><font size=9 color='#8A8478'>No. {folio.invoice_no or '—'}<br/>"
+                  f"{folio.opened_at:%d %b %Y}</font>", h_doc),
+    ]], colWidths=[100 * mm, 78 * mm])
+    header.setStyle(TableStyle([("VALIGN", (0, 0), (-1, -1), "TOP")]))
+    story += [header, Spacer(1, 4), HRFlowable(width="100%", thickness=2, color=PINE), Spacer(1, 8)]
+
+    room = f" &nbsp;·&nbsp; Room {folio.room.number}" if folio.room else ""
+    story += [Paragraph(f"<b>Bill to:</b> {folio.guest_name}{room}", normal), Spacer(1, 8)]
+
+    # Line items
+    rows = [["Description", "Taxable", "CGST", "SGST", "Amount"]]
+    cgst = sgst = Decimal("0")
+    for l in folio.lines.all():
+        rows.append([l.description, _money(l.taxable), _money(l.cgst), _money(l.sgst), _money(l.total)])
+        cgst += l.cgst
+        sgst += l.sgst
+    tbl = Table(rows, colWidths=[74 * mm, 26 * mm, 24 * mm, 24 * mm, 30 * mm])
+    tbl.setStyle(TableStyle([
+        ("BACKGROUND", (0, 0), (-1, 0), CREAM),
+        ("TEXTCOLOR", (0, 0), (-1, 0), MUTED),
+        ("FONTSIZE", (0, 0), (-1, -1), 9),
+        ("ALIGN", (1, 0), (-1, -1), "RIGHT"),
+        ("LINEBELOW", (0, 0), (-1, -1), 0.5, colors.HexColor("#EDE7DC")),
+        ("TOPPADDING", (0, 0), (-1, -1), 6), ("BOTTOMPADDING", (0, 0), (-1, -1), 6),
+    ]))
+    story += [tbl, Spacer(1, 10)]
+
+    taxable = Decimal(str(folio.charges_total)) - cgst - sgst
+    tot = Table([
+        ["Taxable", _money(taxable)],
+        ["CGST", _money(cgst)],
+        ["SGST", _money(sgst)],
+        ["Total", _money(folio.charges_total)],
+        ["Paid", _money(folio.paid_total)],
+        ["Balance", _money(folio.balance)],
+    ], colWidths=[40 * mm, 38 * mm], hAlign="RIGHT")
+    tot.setStyle(TableStyle([
+        ("ALIGN", (1, 0), (1, -1), "RIGHT"),
+        ("FONTSIZE", (0, 0), (-1, -1), 10),
+        ("LINEABOVE", (0, 3), (-1, 3), 1.4, PINE),
+        ("FONTNAME", (0, 3), (-1, 3), "Helvetica-Bold"),
+        ("TOPPADDING", (0, 0), (-1, -1), 3), ("BOTTOMPADDING", (0, 0), (-1, -1), 3),
+    ]))
+    story += [tot, Spacer(1, 18),
+              Paragraph(f"<font size=8 color='#B6AF9F'>{property_name} · GST-compliant tax invoice · "
+                        f"computer-generated, no signature required</font>",
+                        ParagraphStyle("f", parent=ss["Normal"], alignment=1))]
+    doc.build(story)
+    buf.seek(0)
+    return buf
