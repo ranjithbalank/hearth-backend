@@ -46,7 +46,7 @@ class FolioViewSet(ModuleViewSetMixin, viewsets.ModelViewSet):
         from .invoice_pdf import build_invoice_pdf
         folio = self.get_object()
         prop = get_property()
-        pdf = build_invoice_pdf(folio, prop.name, prop.gstin)
+        pdf = build_invoice_pdf(folio, prop.name, prop.gstin, prop.address)
         resp = HttpResponse(pdf.read(), content_type="application/pdf")
         name = folio.invoice_no or f"folio-{folio.id}"
         resp["Content-Disposition"] = f'attachment; filename="{name}.pdf"'

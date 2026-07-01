@@ -21,6 +21,8 @@ class Property(models.Model):
     setup_done = models.BooleanField(default=False)
     business_date = models.DateField(null=True, blank=True)
     gstin = models.CharField(max_length=20, blank=True)
+    address = models.CharField(max_length=300, blank=True)
+    phone = models.CharField(max_length=30, blank=True)
     currency = models.CharField(max_length=8, default="INR")
     # GST Master: with_gst (tax invoice) vs without_gst (bill of supply) — BRD 5.23.
     gst_billing_mode = models.CharField(max_length=12, default="with_gst")

@@ -25,7 +25,7 @@ def _money(v):
     return "INR " + f"{Decimal(str(v)):,.2f}"
 
 
-def build_invoice_pdf(folio, property_name, gstin):
+def build_invoice_pdf(folio, property_name, gstin, address=""):
     buf = io.BytesIO()
     doc = SimpleDocTemplate(buf, pagesize=A4, topMargin=18 * mm, bottomMargin=18 * mm,
                             leftMargin=16 * mm, rightMargin=16 * mm, title=f"Invoice {folio.invoice_no or folio.id}")
@@ -38,7 +38,9 @@ def build_invoice_pdf(folio, property_name, gstin):
 
     # Header
     header = Table([[
-        Paragraph(f"{property_name}<br/><font size=8 color='#8A8478'>{'GSTIN: ' + gstin if gstin else ''}</font>", h_brand),
+        Paragraph(f"{property_name}<br/>"
+                  f"<font size=8 color='#8A8478'>{address + '<br/>' if address else ''}"
+                  f"{'GSTIN: ' + gstin if gstin else ''}</font>", h_brand),
         Paragraph(f"<b>TAX INVOICE</b><br/><font size=9 color='#8A8478'>No. {folio.invoice_no or '—'}<br/>"
                   f"{folio.opened_at:%d %b %Y}</font>", h_doc),
     ]], colWidths=[100 * mm, 78 * mm])

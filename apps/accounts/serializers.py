@@ -39,7 +39,7 @@ class PropertySerializer(serializers.ModelSerializer):
         model = Property
         fields = [
             "id", "name", "edition", "setup_done", "business_date",
-            "gstin", "currency", "entitlement",
+            "gstin", "address", "phone", "currency", "entitlement",
         ]
 
 

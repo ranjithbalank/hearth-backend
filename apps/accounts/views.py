@@ -49,13 +49,23 @@ class MeView(APIView):
 
 class PropertyView(APIView):
     """Property + entitlement state. Setup is open (AllowAny) for the first-run screen;
-    reads require auth otherwise."""
+    reads require auth otherwise. PATCH edits the business details (name/GSTIN/address)."""
 
     def get_permissions(self):
         return [AllowAny()] if self.request.method == "GET" else [IsAuthenticated()]
 
     def get(self, request):
         return Response(PropertySerializer(get_property()).data)
+
+    def patch(self, request):
+        prop = get_property()
+        for f in ["name", "gstin", "address", "phone", "currency"]:
+            if f in request.data:
+                setattr(prop, f, request.data[f])
+        prop.save()
+        log_action(request.user, "property_update", entity="Property", entity_id=prop.id,
+                   after={"name": prop.name, "gstin": prop.gstin})
+        return Response(PropertySerializer(prop).data)
 
 
 class SetupView(APIView):
