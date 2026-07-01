@@ -442,6 +442,19 @@ class OrderViewSet(ModuleViewSetMixin, viewsets.ModelViewSet):
                    after={"override": mgr.username, "reason": request.data.get("reason", "")})
         return Response(OrderSerializer(order).data)
 
+    @action(detail=True, methods=["get"])
+    def bill_pdf(self, request, pk=None):
+        """Download the POS bill/receipt as a PDF (FR-POS-007)."""
+        from django.http import HttpResponse
+
+        from apps.accounts.views import get_property
+        from .bill_pdf import build_bill_pdf
+        order = self.get_object()
+        pdf = build_bill_pdf(order, get_property().name)
+        resp = HttpResponse(pdf.read(), content_type="application/pdf")
+        resp["Content-Disposition"] = f'attachment; filename="bill-{order.id}.pdf"'
+        return resp
+
     @action(detail=True, methods=["post"])
     def apply_discount(self, request, pk=None):
         """Order-level discount within the user's cap; over-cap needs manager override

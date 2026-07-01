@@ -72,6 +72,21 @@ class BanquetViewSet(ModuleViewSetMixin, viewsets.ViewSet):
             for s in FunctionSpace.objects.all()
         ])
 
+    @action(detail=True, methods=["get"])
+    def beo_pdf(self, request, pk=None):
+        """Download the Banquet Event Order as a PDF (FR-BQT-004)."""
+        from django.http import HttpResponse
+
+        from apps.accounts.views import get_property
+        from .beo_pdf import build_beo_pdf
+        e = Event.objects.filter(pk=pk).select_related("space").first()
+        if not e:
+            return Response({"detail": "not found"}, status=404)
+        pdf = build_beo_pdf(e, get_property().name)
+        resp = HttpResponse(pdf.read(), content_type="application/pdf")
+        resp["Content-Disposition"] = f'attachment; filename="BEO-{e.id}.pdf"'
+        return resp
+
     @action(detail=True, methods=["post"])
     def confirm(self, request, pk=None):
         e = Event.objects.filter(pk=pk).first()
