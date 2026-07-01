@@ -9,14 +9,15 @@ from .models import Entitlement, Property, User
 class UserSerializer(serializers.ModelSerializer):
     name = serializers.SerializerMethodField()
     allowed_modules = serializers.SerializerMethodField()
+    password = serializers.CharField(write_only=True, required=False, allow_blank=True)
 
     class Meta:
         model = User
         fields = [
             "id", "username", "name", "first_name", "last_name", "email",
-            "role", "user_code", "phone", "discount_cap_type",
+            "role", "user_code", "phone", "passcode", "discount_cap_type",
             "discount_cap_value", "rights", "is_active", "allowed_modules",
-            "mfa_enabled",
+            "mfa_enabled", "password",
         ]
 
     def get_name(self, obj):
@@ -24,6 +25,23 @@ class UserSerializer(serializers.ModelSerializer):
 
     def get_allowed_modules(self, obj):
         return ROLE_ALLOW.get(obj.role, [])
+
+    def create(self, validated_data):
+        password = validated_data.pop("password", "") or ""
+        user = User(**validated_data)
+        if password:
+            user.set_password(password)
+        user.save()
+        return user
+
+    def update(self, instance, validated_data):
+        password = validated_data.pop("password", "")
+        for k, v in validated_data.items():
+            setattr(instance, k, v)
+        if password:
+            instance.set_password(password)
+        instance.save()
+        return instance
 
 
 class EntitlementSerializer(serializers.ModelSerializer):
