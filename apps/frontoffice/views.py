@@ -102,6 +102,19 @@ class CheckInView(ModuleViewSetMixin, viewsets.ViewSet):
         if room is None:
             return Response({"detail": "no sellable room available"}, status=400)
         folio = services.check_in(resv, room, user=request.user)
+        # Persist the guest's contact to the customer store for later enquiry.
+        mobile = (request.data.get("mobile") or "").strip()
+        if mobile:
+            from apps.crm.models import Customer
+            if resv.guest:
+                if not resv.guest.mobile or resv.guest.mobile.startswith("erased"):
+                    resv.guest.mobile = mobile
+                    resv.guest.save(update_fields=["mobile"])
+            else:
+                guest, _ = Customer.objects.get_or_create(
+                    mobile=mobile, defaults={"name": resv.guest_name})
+                resv.guest = guest
+                resv.save(update_fields=["guest"])
         # Capture & store KYC + guest-type from the multi-step wizard (BRD FR-PMS-004/012).
         id_type = request.data.get("id_type", "")
         id_number = request.data.get("id_number", "")
