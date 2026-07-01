@@ -58,8 +58,13 @@ class FolioViewSet(ModuleViewSetMixin, viewsets.ModelViewSet):
     @action(detail=True, methods=["post"])
     def checkout(self, request, pk=None):
         folio = self.get_object()
+        # Always settle the full remaining balance with one tender — check-out may
+        # post the stay's room charges first, so the client's pre-read balance is
+        # stale. Tender comes from payments[0], an explicit `tender`, else Cash.
+        pays = request.data.get("payments") or []
+        tender = (pays[0].get("tender") if pays else None) or request.data.get("tender") or "Cash"
         try:
-            services.check_out(folio, payments=request.data.get("payments"), user=request.user)
+            services.check_out(folio, tender=tender, user=request.user)
         except ValueError as e:
             return Response({"detail": str(e)}, status=400)
         return Response(FolioSerializer(folio).data)
