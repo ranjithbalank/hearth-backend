@@ -162,21 +162,49 @@ class MfaDisableView(APIView):
 
 
 class RoleMatrixView(APIView):
-    """Role × module permission matrix (BRD FR-USR-002 / 5.10).
+    """Editable role × module permission matrix (BRD FR-USR-002 / 5.10).
 
-    Reflects the server-enforced allow-lists. Read-only here because the
-    allow-lists are code constants; editing them is a deliberate change.
+    GET returns the live matrix (honours RoleConfig overrides). POST toggles a
+    module for a role: {role, module, allowed}. MD/GM are protected (full access).
     """
 
     permission_classes = [IsAuthenticated]
 
     def get(self, request):
+        from .rbac import allowed_modules_for
         roles = list(ROLE_ALLOW.keys())
+        allow_by_role = {r: allowed_modules_for(r) for r in roles}
         matrix = []
         for module in ALL_MODULES:
             cells = []
             for role in roles:
-                allow = ROLE_ALLOW[role]
+                allow = allow_by_role[role]
                 cells.append(allow == "*" or module in allow)
             matrix.append({"module": module, "cells": cells})
-        return Response({"roles": roles, "matrix": matrix})
+        from .rbac import PROTECTED
+        return Response({"roles": roles, "matrix": matrix, "protected": list(PROTECTED)})
+
+    def post(self, request):
+        from .models import RoleConfig
+        from .rbac import PROTECTED, allowed_modules_for
+        role = request.data.get("role")
+        module = request.data.get("module")
+        allowed = bool(request.data.get("allowed"))
+        if role not in ROLE_ALLOW:
+            return Response({"detail": "unknown role"}, status=status.HTTP_400_BAD_REQUEST)
+        if role in PROTECTED:
+            return Response({"detail": f"{role} always has full access and can't be edited"},
+                            status=status.HTTP_400_BAD_REQUEST)
+        if module not in ALL_MODULES:
+            return Response({"detail": "unknown module"}, status=status.HTTP_400_BAD_REQUEST)
+        # Seed the config from the current effective allow-list, then toggle.
+        current = allowed_modules_for(role)
+        mods = list(current) if isinstance(current, list) else []
+        if allowed and module not in mods:
+            mods.append(module)
+        elif not allowed and module in mods:
+            mods.remove(module)
+        RoleConfig.objects.update_or_create(role=role, defaults={"modules": mods})
+        log_action(request.user, "role_permission", entity="RoleConfig", entity_id=role,
+                   after={"module": module, "allowed": allowed})
+        return Response({"role": role, "modules": mods})

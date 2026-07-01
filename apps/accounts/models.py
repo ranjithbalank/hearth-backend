@@ -85,6 +85,20 @@ class User(AbstractUser):
         return f"{self.get_full_name() or self.username} ({self.role})"
 
 
+class RoleConfig(models.Model):
+    """Editable per-role module allow-list (BRD FR-USR-002 / 5.10 role mapping).
+
+    Overrides the built-in ROLE_ALLOW constant when present. Managing Director and
+    General Manager are always full-access and are not stored/editable here.
+    """
+
+    role = models.CharField(max_length=40, unique=True)
+    modules = models.JSONField(default=list)
+
+    def __str__(self):
+        return f"RoleConfig {self.role} ({len(self.modules)} modules)"
+
+
 class AuditLog(models.Model):
     """Tamper-evident trail of security-relevant actions (BRD FR-USR-007 / SR-090)."""
 

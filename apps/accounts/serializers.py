@@ -24,7 +24,8 @@ class UserSerializer(serializers.ModelSerializer):
         return obj.get_full_name() or obj.username
 
     def get_allowed_modules(self, obj):
-        return ROLE_ALLOW.get(obj.role, [])
+        from .rbac import allowed_modules_for
+        return allowed_modules_for(obj.role)
 
     def create(self, validated_data):
         password = validated_data.pop("password", "") or ""

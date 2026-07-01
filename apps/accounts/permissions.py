@@ -11,8 +11,9 @@ the module AND that the active property's entitlement enables it (BRD SR-021, NF
 """
 from rest_framework.permissions import BasePermission
 
-from .constants import entitlement_allows, role_can_access
+from .constants import entitlement_allows
 from .models import Property
+from .rbac import can_access
 
 
 def active_entitlements():
@@ -33,7 +34,7 @@ class ModulePermission(BasePermission):
         user = request.user
         if not (user and user.is_authenticated):
             return False
-        if not role_can_access(user.role, module):
+        if not can_access(user.role, module):
             self.message = f"Role '{user.role}' cannot access '{module}'."
             return False
         if not entitlement_allows(active_entitlements(), module):
