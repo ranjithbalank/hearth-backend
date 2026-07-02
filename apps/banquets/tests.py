@@ -44,6 +44,27 @@ class BanquetTests(TestCase):
         r = self._create(title="Clash")
         self.assertEqual(r.status_code, 409)
 
+    def test_same_hall_same_day_non_overlapping_allowed(self):
+        # A lunch and an evening reception in the same hall don't clash.
+        e = self._create(start_time="10:00", end_time="14:00").data
+        self.client.post(reverse("banquet-confirm", args=[e["id"]]))
+        r = self._create(title="Evening", start_time="18:00", end_time="23:00")
+        self.assertEqual(r.status_code, 201)
+
+    def test_same_hall_overlapping_time_blocked(self):
+        e = self._create(start_time="10:00", end_time="14:00").data
+        self.client.post(reverse("banquet-confirm", args=[e["id"]]))
+        r = self._create(title="Overlap", start_time="13:00", end_time="17:00")
+        self.assertEqual(r.status_code, 409)
+
+    def test_confirm_blocked_when_slot_taken(self):
+        # Two tentative enquiries may overlap; confirming the second is blocked.
+        e1 = self._create(start_time="10:00", end_time="14:00").data
+        e2 = self._create(title="B", start_time="12:00", end_time="16:00").data
+        self.assertEqual(self.client.post(reverse("banquet-confirm", args=[e1["id"]])).status_code, 200)
+        r = self.client.post(reverse("banquet-confirm", args=[e2["id"]]))
+        self.assertEqual(r.status_code, 409)
+
     def test_capacity_guard(self):
         r = self._create(covers=9999)
         self.assertEqual(r.status_code, 400)

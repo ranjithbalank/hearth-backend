@@ -1,3 +1,4 @@
+from datetime import datetime, time as dtime
 from decimal import Decimal
 
 from rest_framework import status, viewsets
@@ -9,6 +10,44 @@ from apps.accounts.permissions import ModuleViewSetMixin
 from apps.tax import service as tax
 
 from .models import Event, FunctionSpace
+
+
+def _parse_time(v):
+    """Coerce a 'HH:MM' string (or time) to a time; None if empty/invalid."""
+    if not v:
+        return None
+    if isinstance(v, dtime):
+        return v
+    try:
+        return datetime.strptime(str(v)[:5], "%H:%M").time()
+    except ValueError:
+        return None
+
+
+def _overlaps(s1, e1, s2, e2):
+    """Two time ranges overlap. If either range is open (no times), treat as a
+    whole-day booking that conflicts with anything else that day."""
+    if not (s1 and e1) or not (s2 and e2):
+        return True
+    return s1 < e2 and s2 < e1
+
+
+def _find_clash(space, event_date, start, end, exclude_pk=None):
+    """Return a confirmed event in this hall/date whose time overlaps, else None."""
+    qs = Event.objects.filter(space=space, event_date=event_date, status=Event.CONFIRMED)
+    if exclude_pk:
+        qs = qs.exclude(pk=exclude_pk)
+    for other in qs:
+        if _overlaps(start, end, other.start_time, other.end_time):
+            return other
+    return None
+
+
+def _clash_msg(space, other):
+    when = ""
+    if other.start_time and other.end_time:
+        when = f" ({other.start_time.strftime('%H:%M')}–{other.end_time.strftime('%H:%M')})"
+    return f"{space.name} is already booked on {other.event_date}{when} for '{other.title}'"
 
 
 def _event_dict(e):
@@ -45,11 +84,14 @@ class BanquetViewSet(ModuleViewSetMixin, viewsets.ViewSet):
         event_date = request.data.get("event_date")
         if not event_date:
             return Response({"detail": "event date required"}, status=400)
-        # Prevent double-booking a confirmed hall on the same date (FR-BQT-003).
-        if Event.objects.filter(space=space, event_date=event_date,
-                                status=Event.CONFIRMED).exists():
-            return Response({"detail": f"{space.name} is already booked on {event_date}"},
-                            status=status.HTTP_409_CONFLICT)
+        # Prevent double-booking: a confirmed hall clashes only if the *times*
+        # overlap on that date (FR-BQT-003), so non-overlapping same-day events
+        # (e.g. a lunch and an evening reception) are allowed.
+        start = _parse_time(request.data.get("start_time"))
+        end = _parse_time(request.data.get("end_time"))
+        clash = _find_clash(space, event_date, start, end)
+        if clash:
+            return Response({"detail": _clash_msg(space, clash)}, status=status.HTTP_409_CONFLICT)
         covers = int(request.data.get("covers", 0) or 0)
         if covers > space.capacity:
             return Response({"detail": f"{space.name} seats {space.capacity}; {covers} requested"},
@@ -99,11 +141,12 @@ class BanquetViewSet(ModuleViewSetMixin, viewsets.ViewSet):
             e.space = space
         if d.get("event_date"):
             e.event_date = d.get("event_date")
-        # Don't let an edit collide with another confirmed booking of that hall/date.
-        if Event.objects.filter(space=e.space, event_date=e.event_date, status=Event.CONFIRMED
-                                ).exclude(pk=e.pk).exists():
-            return Response({"detail": f"{e.space.name} is already booked on {e.event_date}"},
-                            status=status.HTTP_409_CONFLICT)
+        # Don't let an edit collide (by time) with another confirmed booking.
+        new_start = _parse_time(d["start_time"]) if "start_time" in d else e.start_time
+        new_end = _parse_time(d["end_time"]) if "end_time" in d else e.end_time
+        clash = _find_clash(e.space, e.event_date, new_start, new_end, exclude_pk=e.pk)
+        if clash:
+            return Response({"detail": _clash_msg(e.space, clash)}, status=status.HTTP_409_CONFLICT)
         if "covers" in d:
             covers = int(d.get("covers") or 0)
             if covers > e.space.capacity:
@@ -175,6 +218,11 @@ class BanquetViewSet(ModuleViewSetMixin, viewsets.ViewSet):
         e = Event.objects.filter(pk=pk).first()
         if not e:
             return Response({"detail": "not found"}, status=404)
+        # Can't confirm into a slot another confirmed event already holds — this
+        # is the real guard, since two tentative enquiries may overlap freely.
+        clash = _find_clash(e.space, e.event_date, e.start_time, e.end_time, exclude_pk=e.pk)
+        if clash:
+            return Response({"detail": _clash_msg(e.space, clash)}, status=status.HTTP_409_CONFLICT)
         e.status = Event.CONFIRMED
         fields = ["status"]
         # Fire the BEO catering prep to the kitchen display (FR-BQT-004).
