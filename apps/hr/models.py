@@ -11,9 +11,35 @@ class Employee(models.Model):
     # Weekly shift pattern, one code per day (M=morning, E=evening, N=night, O=off).
     shifts = models.JSONField(default=list, blank=True)
     status = models.CharField(max_length=20, default="Active")
+    monthly_salary = models.DecimalField(max_digits=12, decimal_places=2, default=0)
 
     class Meta:
         ordering = ["department", "name"]
 
     def __str__(self):
         return f"{self.name} — {self.role}"
+
+
+class Attendance(models.Model):
+    """Daily attendance mark (FR-HRM: attendance → payroll feed).
+
+    present | half | leave | absent. Payroll counts present=1, half=0.5,
+    paid leave=1, absent=0 payable days.
+    """
+
+    PRESENT = "present"
+    HALF = "half"
+    LEAVE = "leave"
+    ABSENT = "absent"
+
+    employee = models.ForeignKey(Employee, on_delete=models.CASCADE, related_name="attendance")
+    date = models.DateField()
+    status = models.CharField(max_length=10, default=PRESENT)
+    marked_by = models.CharField(max_length=80, blank=True)
+
+    class Meta:
+        unique_together = [("employee", "date")]
+        ordering = ["-date"]
+
+    def __str__(self):
+        return f"{self.employee.name} {self.date} {self.status}"

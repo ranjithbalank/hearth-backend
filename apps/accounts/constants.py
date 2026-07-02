@@ -67,7 +67,8 @@ MODULE_ENTITLEMENT = {
     "execdashboard": "hms",
     "frontdesk": "hms", "checkin": "hms", "checkout": "hms", "livegrid": "hms",
     "folio": "hms", "reservations": "hms", "housekeeping": "hms", "roommaster": "hms",
-    "accounting": "hms", "engineering": "hms", "hr": "hms",
+    "accounting": "hms", "engineering": "hms",
+    # hr is a shared service — restaurants run staff attendance/payroll too.
     # Revenue / distribution
     "revenue": "rms", "channel": "hms", "booking": "hms",
     # Banquets

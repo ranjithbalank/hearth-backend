@@ -47,3 +47,34 @@ class ReservationOpsTests(TestCase):
         self.resv.refresh_from_db()
         self.assertEqual(self.resv.status, Reservation.NO_SHOW)
         self.assertTrue(self.resv.folio.lines.exists())
+
+
+class PreCheckinTests(TestCase):
+    def setUp(self):
+        from apps.rooms.models import RoomType
+        from rest_framework.test import APIClient
+        self.anon = APIClient()
+        rt = RoomType.objects.create(code="DLX", name="Deluxe", base_rate=4000)
+        self.res = Reservation.objects.create(
+            guest_name="Anita Sharma", room_type=rt,
+            checkin_date="2026-07-10", checkout_date="2026-07-12", nights=2)
+
+    def test_precheckin_verify_and_submit(self):
+        from django.urls import reverse
+        url = reverse("pre-checkin-public")
+        # Wrong verify → 404
+        r = self.anon.post(url, {"booking": self.res.id, "verify": "wrong"}, format="json")
+        self.assertEqual(r.status_code, 404)
+        # Verify by surname → booking summary.
+        r = self.anon.post(url, {"booking": self.res.id, "verify": "Sharma"}, format="json")
+        self.assertEqual(r.status_code, 200)
+        self.assertEqual(r.data["guest_name"], "Anita Sharma")
+        # Submit KYC details.
+        r = self.anon.post(url, {"booking": self.res.id, "verify": "sharma",
+                                 "details": {"mobile": "9333333333", "id_type": "Aadhaar",
+                                             "id_number": "XXXX-1234", "eta": "14:00"}},
+                           format="json")
+        self.assertEqual(r.status_code, 201)
+        self.res.refresh_from_db()
+        self.assertTrue(self.res.precheckin_done)
+        self.assertEqual(self.res.precheckin["id_type"], "Aadhaar")

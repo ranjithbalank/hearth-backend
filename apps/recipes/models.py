@@ -68,3 +68,24 @@ class RecipeLine(models.Model):
         if self.wastage_pct:
             qty = qty * (Decimal("1") + self.wastage_pct / Decimal("100"))
         return qty
+
+
+class ProductionBatch(models.Model):
+    """Batch prep of a sub-recipe (spec §4 Production/Preparation).
+
+    Making N portions consumes the recipe's BOM as 'production' movements and
+    credits an auto-created prep ingredient ("Prep: <item>", unit pc) so dish
+    recipes can draw from prepped stock instead of raw ingredients.
+    """
+
+    menu_item = models.ForeignKey(MenuItem, on_delete=models.PROTECT, related_name="production_batches")
+    portions = models.DecimalField(max_digits=10, decimal_places=2)
+    produced_by = models.CharField(max_length=80, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ["-created_at"]
+        verbose_name_plural = "production batches"
+
+    def __str__(self):
+        return f"{self.portions}× {self.menu_item.name}"

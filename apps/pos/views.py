@@ -317,8 +317,14 @@ class KdsViewSet(ModuleViewSetMixin, viewsets.ViewSet):
         kot = Kot.objects.filter(pk=pk).select_related("order").first()
         if not kot:
             return Response({"detail": "not found"}, status=404)
-        kot.status = Kot.READY if kot.status == Kot.COOKING else Kot.SERVED
-        kot.save(update_fields=["status"])
+        from django.utils import timezone
+        if kot.status == Kot.COOKING:
+            kot.status = Kot.READY
+            kot.ready_at = timezone.now()
+        else:
+            kot.status = Kot.SERVED
+            kot.served_at = timezone.now()
+        kot.save(update_fields=["status", "ready_at", "served_at"])
         # Order-level summary status: worst state across its rounds.
         order = kot.order
         statuses = set(order.kots.values_list("status", flat=True))
@@ -326,6 +332,36 @@ class KdsViewSet(ModuleViewSetMixin, viewsets.ViewSet):
                                 else "ready" if Kot.READY in statuses else "served")
         order.save(update_fields=["kitchen_status"])
         return Response({"id": kot.id, "kitchen_status": kot.status})
+
+    @action(detail=False, methods=["get"])
+    def performance(self, request):
+        """Kitchen performance: prep times from KOT fire → ready (spec P2.11)."""
+        from datetime import timedelta
+
+        from django.utils import timezone
+        days = int(request.query_params.get("days", 7))
+        kots = (Kot.objects.filter(created_at__gte=timezone.now() - timedelta(days=days),
+                                   ready_at__isnull=False)
+                .select_related("order__table"))
+        if not kots:
+            return Response({"days": days, "tickets": 0, "avg_prep_minutes": 0,
+                             "by_hour": [], "slowest": []})
+        durations = [(k, (k.ready_at - k.created_at).total_seconds() / 60) for k in kots]
+        by_hour: dict = {}
+        for k, mins in durations:
+            h = timezone.localtime(k.created_at).hour
+            by_hour.setdefault(h, []).append(mins)
+        slowest = sorted(durations, key=lambda x: -x[1])[:5]
+        return Response({
+            "days": days,
+            "tickets": len(durations),
+            "avg_prep_minutes": round(sum(m for _, m in durations) / len(durations), 1),
+            "by_hour": [{"hour": h, "avg_minutes": round(sum(v) / len(v), 1), "tickets": len(v)}
+                        for h, v in sorted(by_hour.items())],
+            "slowest": [{"kot_no": k.number,
+                         "table": k.order.table.name if k.order.table else k.order.get_mode_display(),
+                         "minutes": round(m, 1)} for k, m in slowest],
+        })
 
     @action(detail=True, methods=["post"])
     def beo_bump(self, request, pk=None):
@@ -435,8 +471,10 @@ class OrderViewSet(ModuleViewSetMixin, viewsets.ModelViewSet):
                          .select_related("order").first()
         if not kot:
             return Response({"detail": "ready KOT not found"}, status=404)
+        from django.utils import timezone
         kot.status = Kot.SERVED
-        kot.save(update_fields=["status"])
+        kot.served_at = timezone.now()
+        kot.save(update_fields=["status", "served_at"])
         order = kot.order
         statuses = set(order.kots.values_list("status", flat=True))
         order.kitchen_status = ("cooking" if Kot.COOKING in statuses
@@ -1104,3 +1142,87 @@ class FeedbackViewSet(ModuleViewSetMixin, viewsets.ViewSet):
                 "submitted_at": f.submitted_at,
             } for f in recent],
         })
+
+
+class ReconViewSet(ModuleViewSetMixin, viewsets.ViewSet):
+    """Payment reconciliation: POS-recorded settlements vs external payouts.
+
+    Flags variance per day×tender and per aggregator platform so pilferage or
+    missed orders surface at day-end instead of month-end (Restroworks parity).
+    """
+
+    module = "pos"
+
+    def list(self, request):
+        from datetime import timedelta
+
+        from django.db.models import Count, Sum
+        from django.db.models.functions import TruncDate
+        from django.utils import timezone
+
+        from .models import AggregatorPayout
+        days = int(request.query_params.get("days", 7))
+        since = timezone.now() - timedelta(days=days)
+
+        def money(v):
+            return str(Decimal(v).quantize(Decimal("0.01")))
+
+        # POS/PMS settlements grouped by day × tender.
+        rows = (Settlement.objects.filter(created_at__gte=since)
+                .annotate(day=TruncDate("created_at"))
+                .values("day", "tender").annotate(amount=Sum("amount"), count=Count("id"))
+                .order_by("-day", "tender"))
+        by_day: dict = {}
+        for r in rows:
+            d = str(r["day"])
+            by_day.setdefault(d, {"date": d, "tenders": [], "aggregators": []})
+            by_day[d]["tenders"].append({"tender": r["tender"],
+                                         "amount": money(r["amount"]), "count": r["count"]})
+
+        # Aggregator prepaid settlements ("zomato (prepaid)") vs imported payouts.
+        payouts = AggregatorPayout.objects.filter(date__gte=since.date())
+        payout_map: dict = {}
+        for p in payouts:
+            payout_map.setdefault((str(p.date), p.platform), Decimal("0"))
+            payout_map[(str(p.date), p.platform)] += p.amount
+        for d, data in by_day.items():
+            for t in data["tenders"]:
+                if "(prepaid)" in t["tender"]:
+                    platform = t["tender"].split(" ")[0]
+                    paid_out = payout_map.pop((d, platform), None)
+                    pos_amt = Decimal(t["amount"])
+                    data["aggregators"].append({
+                        "platform": platform, "pos_amount": money(pos_amt),
+                        "payout_amount": money(paid_out) if paid_out is not None else None,
+                        "variance": money(paid_out - pos_amt) if paid_out is not None else None,
+                    })
+        # Payouts with no matching POS settlement (orders missing in POS!).
+        orphans = [{"date": d, "platform": pf, "payout_amount": money(amt),
+                    "pos_amount": None, "variance": None}
+                   for (d, pf), amt in payout_map.items()]
+        return Response({"days": days, "rows": sorted(by_day.values(),
+                                                      key=lambda x: x["date"], reverse=True),
+                         "unmatched_payouts": orphans})
+
+    @action(detail=False, methods=["post"])
+    def import_payouts(self, request):
+        """Import aggregator payout lines: {rows: [{platform, date, amount, reference}]}.
+        Idempotent on (platform, date, reference)."""
+        from .models import AggregatorPayout
+        created = skipped = 0
+        for row in request.data.get("rows", []):
+            try:
+                _, was_created = AggregatorPayout.objects.get_or_create(
+                    platform=str(row.get("platform", "")).lower().strip(),
+                    date=row.get("date"),
+                    reference=str(row.get("reference", "")),
+                    defaults={"amount": Decimal(str(row.get("amount", 0)))},
+                )
+            except Exception:
+                skipped += 1
+                continue
+            created += was_created
+            skipped += not was_created
+        log_action(request.user, "payout_import", entity="AggregatorPayout",
+                   after={"created": created, "skipped": skipped})
+        return Response({"created": created, "skipped": skipped})

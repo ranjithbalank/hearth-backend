@@ -535,6 +535,40 @@ class KotBillFlowTests(TestCase):
         self.table.refresh_from_db()
         self.assertEqual(self.table.status, "free")
 
+    def test_reconciliation_report_and_payout_import(self):
+        """POS aggregator settlements vs imported payouts → variance flagged."""
+        from django.utils import timezone
+        # A prepaid swiggy order books a "swiggy (prepaid)" settlement (210).
+        self.client.post(reverse("order-aggregator"),
+                         {"platform": "swiggy", "external_id": "SW-1", "prepaid": True,
+                          "items": [{"menu_item": self.item.id, "qty": 2}]}, format="json")
+        # Platform payout report says only 195 was paid out.
+        r = self.client.post(reverse("recon-import-payouts"),
+                             {"rows": [{"platform": "swiggy", "date": str(timezone.localdate()),
+                                        "amount": "195", "reference": "PAYOUT-1"}]}, format="json")
+        self.assertEqual(r.data["created"], 1)
+        # Replay is idempotent.
+        r = self.client.post(reverse("recon-import-payouts"),
+                             {"rows": [{"platform": "swiggy", "date": str(timezone.localdate()),
+                                        "amount": "195", "reference": "PAYOUT-1"}]}, format="json")
+        self.assertEqual(r.data["created"], 0)
+        rep = self.client.get(reverse("recon-list")).data
+        agg = rep["rows"][0]["aggregators"][0]
+        self.assertEqual(agg["platform"], "swiggy")
+        self.assertEqual(agg["pos_amount"], "210.00")
+        self.assertEqual(agg["payout_amount"], "195.00")
+        self.assertEqual(agg["variance"], "-15.00")
+
+    def test_kitchen_performance_report(self):
+        from .models import Kot
+        o = self._order()
+        kot = Kot.objects.create(order=o, number="KOT-X/1")
+        self.client.post(reverse("kds-bump", args=[kot.id]))  # cooking → ready (stamps ready_at)
+        r = self.client.get(reverse("kds-performance"))
+        self.assertEqual(r.data["tickets"], 1)
+        self.assertGreaterEqual(r.data["avg_prep_minutes"], 0)
+        self.assertEqual(len(r.data["by_hour"]), 1)
+
     def test_open_orders_filter_resumes_table(self):
         o = self._order()
         r = self.client.get(f"/api/pos/orders/?table={self.table.id}&open=1")

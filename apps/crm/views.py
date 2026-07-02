@@ -26,6 +26,56 @@ class CustomerViewSet(ModuleViewSetMixin, viewsets.ModelViewSet):
             qs = qs.filter(mobile=mobile)
         return qs
 
+    @action(detail=False, methods=["post"])
+    def campaign(self, request):
+        """SMS/WhatsApp blast to a segment (FR-CRM parity with Petpooja campaigns).
+
+        Consent-gated: only customers with marketing_consent and a mobile get it.
+        Placeholders: {name}, {points}. Delivery via the pluggable messaging adapter.
+        """
+        from apps.integrations import services as integ
+
+        from .models import Campaign
+        segment = request.data.get("segment", "all")
+        channel = request.data.get("channel", "sms")
+        message = str(request.data.get("message", "")).strip()
+        name = str(request.data.get("name", "")).strip() or f"Campaign {segment}"
+        if not message:
+            return Response({"detail": "a message is required"}, status=400)
+        if channel not in ("sms", "whatsapp"):
+            return Response({"detail": "channel must be sms or whatsapp"}, status=400)
+        qs = Customer.objects.all()
+        if segment == "guests":
+            qs = qs.filter(customer_type=Customer.TYPE_GUEST)
+        elif segment == "corporate":
+            qs = qs.filter(customer_type=Customer.TYPE_CORPORATE)
+        elif segment == "loyal":
+            qs = qs.filter(loyalty_points__gt=0)
+        sent = skipped = 0
+        for c in qs:
+            if not c.marketing_consent or not c.mobile:
+                skipped += 1
+                continue
+            body = message.replace("{name}", c.name).replace("{points}", str(c.loyalty_points))
+            integ.notify(channel, c.mobile, body)
+            sent += 1
+        camp = Campaign.objects.create(name=name, channel=channel, segment=segment,
+                                       message=message, sent_count=sent, skipped_count=skipped,
+                                       created_by=request.user.username)
+        log_action(request.user, "crm_campaign", entity="Campaign", entity_id=camp.id,
+                   after={"segment": segment, "sent": sent, "skipped": skipped})
+        return Response({"id": camp.id, "sent": sent, "skipped": skipped}, status=201)
+
+    @action(detail=False, methods=["get"])
+    def campaigns(self, request):
+        """Recent campaign history."""
+        from .models import Campaign
+        return Response([{
+            "id": c.id, "name": c.name, "channel": c.channel, "segment": c.segment,
+            "message": c.message, "sent_count": c.sent_count, "skipped_count": c.skipped_count,
+            "created_by": c.created_by, "created_at": c.created_at,
+        } for c in Campaign.objects.all()[:20]])
+
     @action(detail=False, methods=["get"])
     def lookup(self, request):
         """Auto-fill a saved customer by mobile (FR-POS-009)."""

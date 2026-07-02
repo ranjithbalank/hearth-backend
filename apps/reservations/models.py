@@ -53,6 +53,10 @@ class Reservation(models.Model):
     # bookings. ota_ref makes re-delivered webhooks idempotent.
     channel_name = models.CharField(max_length=80, blank=True)
     ota_ref = models.CharField(max_length=80, blank=True, db_index=True)
+    # Guest self check-in (pre-arrival web form): captured details + flag.
+    # {"mobile", "email", "id_type", "id_number", "eta", "note"}
+    precheckin = models.JSONField(default=dict, blank=True)
+    precheckin_done = models.BooleanField(default=False)
     created_at = models.DateTimeField(auto_now_add=True)
 
     class Meta:

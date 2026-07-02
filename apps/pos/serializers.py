@@ -60,7 +60,7 @@ class MenuItemSerializer(serializers.ModelSerializer):
         fields = [
             "id", "name", "short_code", "category", "category_name", "price",
             "gst_rate", "diet", "station", "available", "variants", "addon_groups",
-            "channel_prices",
+            "channel_prices", "image",
         ]
 
     def get_channel_prices(self, obj):

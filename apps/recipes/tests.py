@@ -85,6 +85,31 @@ class SubRecipeTests(TestCase):
         self.assertEqual(tomato.current_stock, Decimal("9.400"))
 
 
+class ProductionBatchTests(TestCase):
+    def test_produce_batch_consumes_bom_and_credits_prep_stock(self):
+        from django.urls import reverse
+
+        from apps.accounts.models import User
+        from rest_framework.test import APIClient
+        client = APIClient()
+        client.force_authenticate(User.objects.create_user(
+            username="gmp", password="Tk9$mZ2pQw!7", role="General Manager"))
+        cat = Category.objects.create(name="Preps")
+        tomato = Ingredient.objects.create(name="Tomato", unit="kg", current_stock=Decimal("10"))
+        gravy = MenuItem.objects.create(name="Gravy", category=cat, price=Decimal("0"))
+        rec = Recipe.objects.create(menu_item=gravy)
+        RecipeLine.objects.create(recipe=rec, ingredient=tomato, qty=Decimal("0.3"))
+        r = client.post(reverse("recipe-produce", args=[rec.id]), {"portions": "10"}, format="json")
+        self.assertEqual(r.status_code, 201)
+        tomato.refresh_from_db()
+        self.assertEqual(tomato.current_stock, Decimal("7.000"))  # 10 − 0.3×10
+        prep = Ingredient.objects.get(name="Prep: Gravy")
+        self.assertEqual(prep.current_stock, Decimal("10.000"))
+        # Movements carry the 'production' kind (spec §4).
+        self.assertEqual(tomato.movements.first().kind, "production")
+        self.assertEqual(prep.movements.first().kind, "production")
+
+
 class GoodsReceiptTests(TestCase):
     def test_grn_posts_stock(self):
         ing = Ingredient.objects.create(name="Butter", unit="kg", current_stock=Decimal("3"), unit_cost=Decimal("480"))

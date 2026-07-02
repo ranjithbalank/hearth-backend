@@ -11,6 +11,7 @@ from .views import (
     OrderStatusPublicView,
     OrderViewSet,
     QrOrderView,
+    ReconViewSet,
     TableReservationViewSet,
     TableViewSet,
     TillViewSet,
@@ -22,6 +23,7 @@ router.register("pos/categories", CategoryViewSet, basename="category")
 router.register("pos/menu-items", MenuItemViewSet, basename="menuitem")
 router.register("pos/orders", OrderViewSet, basename="order")
 router.register("pos/till", TillViewSet, basename="till")
+router.register("pos/reconciliation", ReconViewSet, basename="recon")
 router.register("pos/table-reservations", TableReservationViewSet, basename="tablereservation")
 router.register("crm/feedback", FeedbackViewSet, basename="feedback")
 router.register("kds", KdsViewSet, basename="kds")

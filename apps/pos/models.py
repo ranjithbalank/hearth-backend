@@ -61,6 +61,9 @@ class MenuItem(models.Model):
     diet = models.CharField(max_length=10, choices=DIET_CHOICES, default=VEG)
     station = models.CharField(max_length=20, default="kitchen", help_text="kitchen | bar")
     available = models.BooleanField(default=True)
+    # Item photo as a data URL (same pattern as the property logo) — shows on
+    # POS tiles and the guest QR menu. Kept small client-side (~64kB).
+    image = models.TextField(blank=True, default="")
 
     class Meta:
         ordering = ["category__sort_order", "name"]
@@ -340,12 +343,36 @@ class Kot(models.Model):
     number = models.CharField(max_length=24)
     status = models.CharField(max_length=12, default=COOKING)  # cooking | ready | served
     created_at = models.DateTimeField(auto_now_add=True)
+    # Kitchen performance: when the round was bumped ready / served.
+    ready_at = models.DateTimeField(null=True, blank=True)
+    served_at = models.DateTimeField(null=True, blank=True)
 
     class Meta:
         ordering = ["created_at"]
 
     def __str__(self):
         return self.number
+
+
+class AggregatorPayout(models.Model):
+    """Imported payout line from a delivery platform's settlement report.
+
+    Reconciled against POS-recorded prepaid settlements to flag variances
+    (anti-pilferage / missed-order detection).
+    """
+
+    platform = models.CharField(max_length=20)
+    date = models.DateField()
+    amount = models.DecimalField(max_digits=12, decimal_places=2)
+    reference = models.CharField(max_length=80, blank=True, default="")
+    imported_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ["-date"]
+        unique_together = [("platform", "date", "reference")]
+
+    def __str__(self):
+        return f"{self.platform} {self.date}: {self.amount}"
 
 
 class Feedback(models.Model):

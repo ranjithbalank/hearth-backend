@@ -17,4 +17,5 @@ class ReservationSerializer(serializers.ModelSerializer):
             "room", "room_number", "checkin_date", "checkout_date", "nights",
             "source", "source_label", "status", "status_label", "rate", "deposit",
             "prepaid", "notes", "channel_name", "ota_ref", "created_at",
+            "precheckin", "precheckin_done",
         ]

@@ -3,7 +3,9 @@ from decimal import Decimal
 
 from rest_framework import viewsets
 from rest_framework.decorators import action
+from rest_framework.permissions import AllowAny
 from rest_framework.response import Response
+from rest_framework.views import APIView
 
 from apps.accounts.models import log_action
 from apps.accounts.permissions import ModuleViewSetMixin
@@ -211,3 +213,58 @@ class ReservationViewSet(ModuleViewSetMixin, viewsets.ModelViewSet):
                     amount=amount, gst_rate=tax.room_rate_for(amount),
                     source="penalty", user=request.user)
         return amount
+
+
+class PreCheckinPublicView(APIView):
+    """Guest self check-in before arrival (eZee/Hotelogix parity).
+
+    The guest verifies with booking ref + mobile (or surname when no profile),
+    then submits KYC + ETA — the front desk sees it on the arrivals board and
+    the check-in wizard is pre-filled.
+    """
+
+    permission_classes = [AllowAny]
+    throttle_scope = "sensitive"
+
+    def _find(self, request_data):
+        rid = str(request_data.get("booking", "")).strip().lstrip("#")
+        verify = str(request_data.get("verify", "")).strip().lower()
+        if not rid.isdigit() or not verify:
+            return None
+        r = (Reservation.objects.filter(pk=int(rid), status=Reservation.BOOKED)
+             .select_related("guest").first())
+        if not r:
+            return None
+        mobile = (r.guest.mobile if r.guest else "").lower()
+        surname = r.guest_name.split()[-1].lower() if r.guest_name else ""
+        return r if verify in (mobile, surname) and verify else None
+
+    def post(self, request):
+        if request.data.get("details") is None:
+            # Step 1: verify identity, return the booking summary.
+            r = self._find(request.data)
+            if not r:
+                return Response({"detail": "Booking not found — check the number and mobile/surname"},
+                                status=404)
+            return Response({
+                "booking": r.id, "guest_name": r.guest_name,
+                "room_type": r.room_type.name, "checkin_date": r.checkin_date,
+                "checkout_date": r.checkout_date, "nights": r.nights,
+                "precheckin_done": r.precheckin_done,
+            })
+        # Step 2: save the pre-check-in details.
+        r = self._find(request.data)
+        if not r:
+            return Response({"detail": "Booking not found"}, status=404)
+        d = request.data.get("details") or {}
+        r.precheckin = {
+            "mobile": str(d.get("mobile", ""))[:15],
+            "email": str(d.get("email", ""))[:120],
+            "id_type": str(d.get("id_type", ""))[:30],
+            "id_number": str(d.get("id_number", ""))[:40],
+            "eta": str(d.get("eta", ""))[:10],
+            "note": str(d.get("note", ""))[:200],
+        }
+        r.precheckin_done = True
+        r.save(update_fields=["precheckin", "precheckin_done"])
+        return Response({"detail": "Pre-check-in saved — see you soon!"}, status=201)
