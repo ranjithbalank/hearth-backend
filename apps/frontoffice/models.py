@@ -27,6 +27,9 @@ class Folio(models.Model):
     opened_at = models.DateTimeField(auto_now_add=True)
     settled_at = models.DateTimeField(null=True, blank=True)
     invoice_no = models.CharField(max_length=30, blank=True)
+    # Per-bill GST mode (BRD 5.23): "" = follow the property's GST Master
+    # setting; "with_gst" = tax invoice; "without_gst" = bill of supply.
+    billing_mode = models.CharField(max_length=12, blank=True, default="")
     # KYC for statutory guest reporting (BRD FR-PMS-012)
     id_type = models.CharField(max_length=30, blank=True)
     id_number = models.CharField(max_length=40, blank=True)

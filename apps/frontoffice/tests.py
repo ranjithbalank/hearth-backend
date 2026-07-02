@@ -82,3 +82,56 @@ class FrontOfficeFlowTests(TestCase):
         self.assertEqual(run1.id, run2.id)
         self.assertEqual(first_count, second_count)  # no double-posting
         self.assertEqual(run1.rooms_posted, 1)
+
+
+class BillingModeTests(TestCase):
+    """Room bill with or without GST (BRD 5.23): per-folio override + recompute."""
+
+    def setUp(self):
+        from apps.accounts.models import User
+        from rest_framework.test import APIClient
+        self.client = APIClient()
+        self.client.force_authenticate(User.objects.create_user(
+            username="gmb", password="Tk9$mZ2pQw!7", role="General Manager"))
+        self.folio = Folio.objects.create(guest_name="Guest X")
+
+    def test_without_gst_posts_zero_tax(self):
+        from decimal import Decimal
+
+        from django.urls import reverse
+
+        from . import services
+        # Charge under with_gst: 4000 @ 12% → 4480.
+        line = services.post_charge(self.folio, kind=FolioLine.KIND_ROOM,
+                                    description="Room", amount=Decimal("4000"),
+                                    gst_rate=Decimal("12"))
+        self.assertEqual(line.total, Decimal("4480.00"))
+        # Switch the bill to without_gst → lines recomputed to taxable only.
+        r = self.client.post(reverse("folio-billing-mode", args=[self.folio.id]),
+                             {"mode": "without_gst"}, format="json")
+        self.assertEqual(r.status_code, 200)
+        self.assertEqual(r.data["effective_billing_mode"], "without_gst")
+        line.refresh_from_db()
+        self.assertEqual(line.cgst, Decimal("0"))
+        self.assertEqual(line.total, Decimal("4000.00"))
+        # New charges on this folio post untaxed.
+        self.folio.refresh_from_db()
+        line2 = services.post_charge(self.folio, kind=FolioLine.KIND_FNB,
+                                     description="Dinner", amount=Decimal("500"),
+                                     gst_rate=Decimal("5"))
+        self.assertEqual(line2.total, Decimal("500.00"))
+        # Switch back → tax re-applied from each line's own rate.
+        self.client.post(reverse("folio-billing-mode", args=[self.folio.id]),
+                         {"mode": "with_gst"}, format="json")
+        line.refresh_from_db(); line2.refresh_from_db()
+        self.assertEqual(line.total, Decimal("4480.00"))
+        self.assertEqual(line2.total, Decimal("525.00"))
+
+    def test_invoice_pdf_renders_both_modes(self):
+        from django.urls import reverse
+        r = self.client.get(reverse("folio-invoice-pdf", args=[self.folio.id]))
+        self.assertEqual(r.status_code, 200)  # tax invoice
+        self.client.post(reverse("folio-billing-mode", args=[self.folio.id]),
+                         {"mode": "without_gst"}, format="json")
+        r = self.client.get(reverse("folio-invoice-pdf", args=[self.folio.id]))
+        self.assertEqual(r.status_code, 200)  # bill of supply

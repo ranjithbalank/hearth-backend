@@ -25,7 +25,8 @@ def _money(v):
     return "INR " + f"{Decimal(str(v)):,.2f}"
 
 
-def build_invoice_pdf(folio, property_name, gstin, address=""):
+def build_invoice_pdf(folio, property_name, gstin, address="", with_gst=True):
+    """with_gst=True → GST tax invoice; False → bill of supply (no tax columns)."""
     buf = io.BytesIO()
     doc = SimpleDocTemplate(buf, pagesize=A4, topMargin=18 * mm, bottomMargin=18 * mm,
                             leftMargin=16 * mm, rightMargin=16 * mm, title=f"Invoice {folio.invoice_no or folio.id}")
@@ -35,13 +36,14 @@ def build_invoice_pdf(folio, property_name, gstin, address=""):
     small = ParagraphStyle("small", parent=ss["Normal"], fontSize=9, textColor=MUTED)
     normal = ParagraphStyle("n", parent=ss["Normal"], fontSize=10.5, textColor=INK)
     story = []
+    doc_title = "TAX INVOICE" if with_gst else "BILL OF SUPPLY"
 
     # Header
     header = Table([[
         Paragraph(f"{property_name}<br/>"
                   f"<font size=8 color='#8A8478'>{address + '<br/>' if address else ''}"
-                  f"{'GSTIN: ' + gstin if gstin else ''}</font>", h_brand),
-        Paragraph(f"<b>TAX INVOICE</b><br/><font size=9 color='#8A8478'>No. {folio.invoice_no or '—'}<br/>"
+                  f"{'GSTIN: ' + gstin if gstin and with_gst else ''}</font>", h_brand),
+        Paragraph(f"<b>{doc_title}</b><br/><font size=9 color='#8A8478'>No. {folio.invoice_no or '—'}<br/>"
                   f"{folio.opened_at:%d %b %Y}</font>", h_doc),
     ]], colWidths=[100 * mm, 78 * mm])
     header.setStyle(TableStyle([("VALIGN", (0, 0), (-1, -1), "TOP")]))
@@ -55,14 +57,21 @@ def build_invoice_pdf(folio, property_name, gstin, address=""):
     else:
         story += [Paragraph(f"<b>Bill to:</b> {folio.guest_name}{room}", normal), Spacer(1, 8)]
 
-    # Line items
-    rows = [["Description", "Taxable", "CGST", "SGST", "Amount"]]
+    # Line items — the bill of supply carries no tax columns.
     cgst = sgst = Decimal("0")
-    for l in folio.lines.all():
-        rows.append([l.description, _money(l.taxable), _money(l.cgst), _money(l.sgst), _money(l.total)])
-        cgst += l.cgst
-        sgst += l.sgst
-    tbl = Table(rows, colWidths=[74 * mm, 26 * mm, 24 * mm, 24 * mm, 30 * mm])
+    if with_gst:
+        rows = [["Description", "Taxable", "CGST", "SGST", "Amount"]]
+        for l in folio.lines.all():
+            rows.append([l.description, _money(l.taxable), _money(l.cgst), _money(l.sgst), _money(l.total)])
+            cgst += l.cgst
+            sgst += l.sgst
+        col_widths = [74 * mm, 26 * mm, 24 * mm, 24 * mm, 30 * mm]
+    else:
+        rows = [["Description", "Amount"]]
+        for l in folio.lines.all():
+            rows.append([l.description, _money(l.total)])
+        col_widths = [138 * mm, 40 * mm]
+    tbl = Table(rows, colWidths=col_widths)
     tbl.setStyle(TableStyle([
         ("BACKGROUND", (0, 0), (-1, 0), CREAM),
         ("TEXTCOLOR", (0, 0), (-1, 0), MUTED),
@@ -73,24 +82,36 @@ def build_invoice_pdf(folio, property_name, gstin, address=""):
     ]))
     story += [tbl, Spacer(1, 10)]
 
-    taxable = Decimal(str(folio.charges_total)) - cgst - sgst
-    tot = Table([
-        ["Taxable", _money(taxable)],
-        ["CGST", _money(cgst)],
-        ["SGST", _money(sgst)],
-        ["Total", _money(folio.charges_total)],
-        ["Paid", _money(folio.paid_total)],
-        ["Balance", _money(folio.balance)],
-    ], colWidths=[40 * mm, 38 * mm], hAlign="RIGHT")
+    if with_gst:
+        taxable = Decimal(str(folio.charges_total)) - cgst - sgst
+        tot_rows = [
+            ["Taxable", _money(taxable)],
+            ["CGST", _money(cgst)],
+            ["SGST", _money(sgst)],
+            ["Total", _money(folio.charges_total)],
+            ["Paid", _money(folio.paid_total)],
+            ["Balance", _money(folio.balance)],
+        ]
+        total_idx = 3
+    else:
+        tot_rows = [
+            ["Total", _money(folio.charges_total)],
+            ["Paid", _money(folio.paid_total)],
+            ["Balance", _money(folio.balance)],
+        ]
+        total_idx = 0
+    tot = Table(tot_rows, colWidths=[40 * mm, 38 * mm], hAlign="RIGHT")
     tot.setStyle(TableStyle([
         ("ALIGN", (1, 0), (1, -1), "RIGHT"),
         ("FONTSIZE", (0, 0), (-1, -1), 10),
-        ("LINEABOVE", (0, 3), (-1, 3), 1.4, PINE),
-        ("FONTNAME", (0, 3), (-1, 3), "Helvetica-Bold"),
+        ("LINEABOVE", (0, total_idx), (-1, total_idx), 1.4, PINE),
+        ("FONTNAME", (0, total_idx), (-1, total_idx), "Helvetica-Bold"),
         ("TOPPADDING", (0, 0), (-1, -1), 3), ("BOTTOMPADDING", (0, 0), (-1, -1), 3),
     ]))
+    footer = ("GST-compliant tax invoice" if with_gst
+              else "bill of supply — GST not applicable")
     story += [tot, Spacer(1, 18),
-              Paragraph(f"<font size=8 color='#B6AF9F'>{property_name} · GST-compliant tax invoice · "
+              Paragraph(f"<font size=8 color='#B6AF9F'>{property_name} · {footer} · "
                         f"computer-generated, no signature required</font>",
                         ParagraphStyle("f", parent=ss["Normal"], alignment=1))]
     doc.build(story)

@@ -37,16 +37,28 @@ class FolioViewSet(ModuleViewSetMixin, viewsets.ModelViewSet):
         services.settle_folio(folio, payments, user=request.user)
         return Response(FolioSerializer(folio).data)
 
+    @action(detail=True, methods=["post"])
+    def billing_mode(self, request, pk=None):
+        """Switch this bill between GST tax invoice and bill of supply (BRD 5.23).
+        Existing charge lines are recomputed accordingly."""
+        folio = self.get_object()
+        try:
+            services.set_billing_mode(folio, request.data.get("mode", ""), user=request.user)
+        except ValueError as e:
+            return Response({"detail": str(e)}, status=400)
+        return Response(FolioSerializer(folio).data)
+
     @action(detail=True, methods=["get"])
     def invoice_pdf(self, request, pk=None):
-        """Download the folio as a GST tax-invoice PDF (FR-TAX-003)."""
+        """Download the folio bill: GST tax invoice or bill of supply (FR-TAX-003)."""
         from django.http import HttpResponse
 
         from apps.accounts.views import get_property
         from .invoice_pdf import build_invoice_pdf
         folio = self.get_object()
         prop = get_property()
-        pdf = build_invoice_pdf(folio, prop.name, prop.gstin, prop.address)
+        with_gst = services.effective_billing_mode(folio) == "with_gst"
+        pdf = build_invoice_pdf(folio, prop.name, prop.gstin, prop.address, with_gst=with_gst)
         resp = HttpResponse(pdf.read(), content_type="application/pdf")
         name = folio.invoice_no or f"folio-{folio.id}"
         resp["Content-Disposition"] = f'attachment; filename="{name}.pdf"'

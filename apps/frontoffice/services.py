@@ -58,10 +58,49 @@ def check_in(reservation, room, user=None):
     return folio
 
 
+def effective_billing_mode(folio):
+    """The folio's GST mode: its own override, else the property's GST Master setting."""
+    if folio.billing_mode:
+        return folio.billing_mode
+    from apps.accounts.views import get_property
+    prop = get_property()
+    return getattr(prop, "gst_billing_mode", "with_gst") or "with_gst"
+
+
+def set_billing_mode(folio, mode, user=None):
+    """Switch a folio between tax invoice and bill of supply (BRD 5.23).
+
+    Existing lines are recomputed from their taxable base: without_gst zeroes
+    the tax (guest pays taxable only); with_gst re-applies each line's rate.
+    """
+    if mode not in ("with_gst", "without_gst"):
+        raise ValueError("mode must be with_gst or without_gst")
+    folio.billing_mode = mode
+    folio.save(update_fields=["billing_mode"])
+    for line in folio.lines.all():
+        if mode == "without_gst":
+            line.cgst = line.sgst = Decimal("0")
+            line.total = line.taxable
+        else:
+            b = tax.compute(line.taxable, line.gst_rate)
+            line.cgst, line.sgst, line.total = b["cgst"], b["sgst"], b["total"]
+        line.save(update_fields=["cgst", "sgst", "total"])
+    log_action(user, "billing_mode", entity="Folio", entity_id=folio.id,
+               after={"mode": mode})
+    return folio
+
+
 def post_charge(folio, *, kind, description, amount, gst_rate, source="",
                 inclusive=False, user=None):
-    """Post a taxed charge line to a folio. Used by rooms, POS post-to-room, incidentals."""
-    breakdown = tax.compute(amount, gst_rate, inclusive=inclusive)
+    """Post a taxed charge line to a folio. Used by rooms, POS post-to-room, incidentals.
+
+    A bill-of-supply folio (without_gst — per-folio override or the property's
+    GST Master mode) posts with zero tax, but the line keeps its real GST rate
+    so switching the bill back to with_gst can re-apply it.
+    """
+    zero_tax = effective_billing_mode(folio) == "without_gst"
+    breakdown = tax.compute(amount, Decimal("0") if zero_tax else gst_rate,
+                            inclusive=inclusive)
     line = FolioLine.objects.create(
         folio=folio,
         kind=kind,

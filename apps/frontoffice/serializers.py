@@ -27,6 +27,7 @@ class FolioSerializer(serializers.ModelSerializer):
     charges_total = serializers.DecimalField(max_digits=14, decimal_places=2, read_only=True)
     paid_total = serializers.DecimalField(max_digits=14, decimal_places=2, read_only=True)
     balance = serializers.DecimalField(max_digits=14, decimal_places=2, read_only=True)
+    effective_billing_mode = serializers.SerializerMethodField()
 
     class Meta:
         model = Folio
@@ -34,8 +35,12 @@ class FolioSerializer(serializers.ModelSerializer):
             "id", "reservation", "guest_name", "room", "room_number", "status",
             "routing", "opened_at", "settled_at", "invoice_no", "lines",
             "settlements", "charges_total", "paid_total", "balance",
-            "guest_type", "company_name",
+            "guest_type", "company_name", "billing_mode", "effective_billing_mode",
         ]
+
+    def get_effective_billing_mode(self, obj):
+        from . import services
+        return services.effective_billing_mode(obj)
 
 
 class NightAuditRunSerializer(serializers.ModelSerializer):
