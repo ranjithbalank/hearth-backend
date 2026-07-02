@@ -59,11 +59,24 @@ class ModuleAPIView(APIView):
     module = None
 
 
+def _receivables():
+    """Accounts receivable: outstanding owed to us, and the corporate (BTC) share."""
+    customers = list(Customer.objects.all())
+    total = sum((c.outstanding for c in customers), start=Decimal("0"))
+    corporate = [c for c in customers if c.customer_type == Customer.TYPE_CORPORATE and c.outstanding > 0]
+    corp_total = sum((c.outstanding for c in corporate), start=Decimal("0"))
+    return {
+        "total": str(total),
+        "corporate": str(corp_total),
+        "corporate_accounts": len(corporate),
+    }
+
+
 class DashboardView(ModuleAPIView):
     module = "dashboard"
 
     def get(self, request):
-        return Response({"rooms": _room_kpis(), "fnb": _fnb_kpis()})
+        return Response({"rooms": _room_kpis(), "fnb": _fnb_kpis(), "receivables": _receivables()})
 
 
 class ExecutiveView(ModuleAPIView):
