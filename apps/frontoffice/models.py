@@ -31,6 +31,8 @@ class Folio(models.Model):
     id_type = models.CharField(max_length=30, blank=True)
     id_number = models.CharField(max_length=40, blank=True)
     guest_type = models.CharField(max_length=20, blank=True)
+    # For corporate (bill-to-company) guests — the company the folio bills to.
+    company_name = models.CharField(max_length=200, blank=True)
 
     def __str__(self):
         return f"Folio #{self.id} — {self.guest_name}"

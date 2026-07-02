@@ -128,18 +128,21 @@ class CheckInView(ModuleViewSetMixin, viewsets.ViewSet):
         id_type = request.data.get("id_type", "")
         id_number = request.data.get("id_number", "")
         guest_type = request.data.get("guest_type", "")
+        company_name = (request.data.get("company_name") or "").strip()
         if id_type or guest_type or id_number:
             from apps.accounts.models import log_action
             folio.id_type = id_type
             folio.id_number = id_number
             folio.guest_type = guest_type
+            # Company name only applies when billing to a company.
+            folio.company_name = company_name if guest_type == "corporate" else ""
             if guest_type == "corporate":
                 folio.routing = "city_ledger"
-            folio.save(update_fields=["id_type", "id_number", "guest_type", "routing"])
+            folio.save(update_fields=["id_type", "id_number", "guest_type", "company_name", "routing"])
             log_action(
                 request.user, "kyc_capture", entity="Folio", entity_id=folio.id,
                 after={"id_type": id_type, "id_number_present": bool(id_number),
-                       "guest_type": guest_type},
+                       "guest_type": guest_type, "company": folio.company_name},
                 note="Check-in KYC captured",
             )
         return Response(FolioSerializer(folio).data, status=status.HTTP_201_CREATED)

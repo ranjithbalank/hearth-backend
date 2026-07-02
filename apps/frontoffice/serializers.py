@@ -34,6 +34,7 @@ class FolioSerializer(serializers.ModelSerializer):
             "id", "reservation", "guest_name", "room", "room_number", "status",
             "routing", "opened_at", "settled_at", "invoice_no", "lines",
             "settlements", "charges_total", "paid_total", "balance",
+            "guest_type", "company_name",
         ]
 
 
