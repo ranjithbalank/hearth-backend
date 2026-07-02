@@ -18,6 +18,9 @@ def _room_kpis():
     rooms = list(Room.objects.all())
     total = len(rooms) or 1
     occupied = sum(1 for r in rooms if r.status == Room.OCCUPIED)
+    available = sum(1 for r in rooms if r.status in Room.SELLABLE)
+    dirty = sum(1 for r in rooms if r.status in (Room.VACANT_DIRTY, Room.CLEANING))
+    ooo = sum(1 for r in rooms if r.status == Room.OOO)
     room_lines = FolioLine.objects.filter(kind=FolioLine.KIND_ROOM)
     room_revenue = sum((l.taxable for l in room_lines), start=Decimal("0"))
     rooms_sold = room_lines.count() or 1
@@ -25,8 +28,11 @@ def _room_kpis():
     adr = round(float(room_revenue) / rooms_sold, 2)
     revpar = round(float(room_revenue) / total, 2)
     return {
-        "rooms_total": total,
+        "rooms_total": len(rooms),
         "occupied": occupied,
+        "available": available,
+        "dirty": dirty,
+        "ooo": ooo,
         "occupancy_pct": occupancy,
         "adr": adr,
         "revpar": revpar,
