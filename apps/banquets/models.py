@@ -23,6 +23,8 @@ class Event(models.Model):
     contact = models.CharField(max_length=40, blank=True)
     event_type = models.CharField(max_length=40, blank=True, help_text="Wedding | Corporate | Birthday …")
     event_date = models.DateField()
+    start_time = models.TimeField(null=True, blank=True, help_text="event start time")
+    end_time = models.TimeField(null=True, blank=True, help_text="event end time")
     covers = models.PositiveSmallIntegerField(default=50)
     package_amount = models.DecimalField(max_digits=12, decimal_places=2, default=0)
     deposit = models.DecimalField(max_digits=12, decimal_places=2, default=0)

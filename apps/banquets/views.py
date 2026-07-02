@@ -15,7 +15,10 @@ def _event_dict(e):
     return {
         "id": e.id, "title": e.title, "host": e.host, "contact": e.contact,
         "event_type": e.event_type, "space": e.space.name, "space_id": e.space_id,
-        "event_date": e.event_date, "covers": e.covers, "deposit": str(e.deposit),
+        "event_date": e.event_date,
+        "start_time": e.start_time.strftime("%H:%M") if e.start_time else "",
+        "end_time": e.end_time.strftime("%H:%M") if e.end_time else "",
+        "covers": e.covers, "deposit": str(e.deposit),
         "package_amount": str(e.package_amount), "status": e.status, "billed": e.billed,
         "food_covers": e.food_covers, "food_pref": e.food_pref,
         "food_veg": e.food_veg, "food_nonveg": e.food_nonveg, "beo_status": e.beo_status,
@@ -61,6 +64,8 @@ class BanquetViewSet(ModuleViewSetMixin, viewsets.ViewSet):
             space=space, title=request.data.get("title", "Event"),
             host=request.data.get("host", ""), contact=request.data.get("contact", ""),
             event_type=request.data.get("event_type", ""), event_date=event_date,
+            start_time=request.data.get("start_time") or None,
+            end_time=request.data.get("end_time") or None,
             covers=covers, package_amount=Decimal(str(request.data.get("package_amount", 0) or 0)),
             deposit=Decimal(str(request.data.get("deposit", 0) or 0)),
             food_covers=food_covers, food_pref=food_pref,
@@ -69,6 +74,7 @@ class BanquetViewSet(ModuleViewSetMixin, viewsets.ViewSet):
         )
         log_action(request.user, "event_create", entity="Event", entity_id=e.id,
                    after={"space": space.name, "date": str(event_date)})
+        e.refresh_from_db()  # coerce string time inputs to time objects for serialisation
         return Response(_event_dict(e), status=status.HTTP_201_CREATED)
 
     @action(detail=False, methods=["get"])

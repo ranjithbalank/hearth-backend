@@ -50,9 +50,12 @@ def build_beo_pdf(event, property_name):
                                ("LEFTPADDING", (0, 0), (-1, -1), 8), ("BOTTOMPADDING", (0, 0), (-1, -1), 6)]))
         return t
 
+    _time = (f"{event.start_time.strftime('%H:%M')}–{event.end_time.strftime('%H:%M')}"
+             if event.start_time and event.end_time
+             else (event.start_time.strftime('%H:%M') if event.start_time else "—"))
     ev = card("Event", [("Title", event.title), ("Type", event.event_type),
-                        ("Date", str(event.event_date)), ("Space", event.space.name),
-                        ("Covers", str(event.covers))])
+                        ("Date", str(event.event_date)), ("Time", _time),
+                        ("Space", event.space.name), ("Covers", str(event.covers))])
     cl = card("Client", [("Host", event.host), ("Contact", event.contact)])
     cat = card("Catering (F&B)", [("Food plates", str(event.food_covers) if event.food_covers else "—"),
                                   ("Preference", (event.food_pref or "—").upper()),

@@ -27,6 +27,17 @@ class BanquetTests(TestCase):
         self.assertEqual(r.status_code, 201)
         self.assertEqual(r.data["status"], "tentative")
 
+    def test_event_timing_round_trips(self):
+        r = self._create(start_time="19:30", end_time="23:45")
+        self.assertEqual(r.status_code, 201)
+        self.assertEqual(r.data["start_time"], "19:30")
+        self.assertEqual(r.data["end_time"], "23:45")
+        e = Event.objects.get(pk=r.data["id"])
+        self.assertEqual(e.start_time.strftime("%H:%M"), "19:30")
+        # BEO PDF renders with the timing row.
+        pdf = self.client.get(reverse("banquet-beo-pdf", args=[e.id]))
+        self.assertEqual(pdf.status_code, 200)
+
     def test_double_booking_blocked(self):
         e = self._create().data
         self.client.post(reverse("banquet-confirm", args=[e["id"]]))
