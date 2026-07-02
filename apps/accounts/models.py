@@ -24,6 +24,12 @@ class Property(models.Model):
     address = models.CharField(max_length=300, blank=True)
     phone = models.CharField(max_length=30, blank=True)
     logo = models.TextField(blank=True, help_text="hotel logo as a data URL (white-label)")
+    # Company letterhead blocks printed on invoices/bills. Simple markup
+    # (<b>, <i>) is allowed — edited in Settings > Letterhead.
+    doc_header = models.TextField(blank=True, default="",
+                                  help_text="extra letterhead lines (tagline, CIN, FSSAI…)")
+    doc_footer = models.TextField(blank=True, default="",
+                                  help_text="terms & conditions / bank details footer")
     currency = models.CharField(max_length=8, default="INR")
     # GST Master: with_gst (tax invoice) vs without_gst (bill of supply) — BRD 5.23.
     gst_billing_mode = models.CharField(max_length=12, default="with_gst")

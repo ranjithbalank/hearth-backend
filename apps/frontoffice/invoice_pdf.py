@@ -25,8 +25,28 @@ def _money(v):
     return "INR " + f"{Decimal(str(v)):,.2f}"
 
 
-def build_invoice_pdf(folio, property_name, gstin, address="", with_gst=True):
-    """with_gst=True → GST tax invoice; False → bill of supply (no tax columns)."""
+def _logo_flowable(logo_data_url):
+    """Company logo from the property's stored data URL (letterhead)."""
+    import base64
+
+    from reportlab.platypus import Image
+    try:
+        header, b64 = logo_data_url.split(",", 1)
+        img = Image(io.BytesIO(base64.b64decode(b64)))
+        # Scale to letterhead size, preserving aspect.
+        scale = min(20 * mm / img.imageHeight, 46 * mm / img.imageWidth)
+        img.drawWidth = img.imageWidth * scale
+        img.drawHeight = img.imageHeight * scale
+        img.hAlign = "LEFT"
+        return img
+    except Exception:
+        return None
+
+
+def build_invoice_pdf(folio, property_name, gstin, address="", with_gst=True,
+                      logo="", doc_header="", doc_footer=""):
+    """with_gst=True → GST tax invoice; False → bill of supply (no tax columns).
+    logo/doc_header/doc_footer come from Settings → Letterhead."""
     buf = io.BytesIO()
     doc = SimpleDocTemplate(buf, pagesize=A4, topMargin=18 * mm, bottomMargin=18 * mm,
                             leftMargin=16 * mm, rightMargin=16 * mm, title=f"Invoice {folio.invoice_no or folio.id}")
@@ -38,11 +58,18 @@ def build_invoice_pdf(folio, property_name, gstin, address="", with_gst=True):
     story = []
     doc_title = "TAX INVOICE" if with_gst else "BILL OF SUPPLY"
 
-    # Header
+    # Letterhead: logo + name/address/GSTIN + custom header lines (Settings).
+    extra_lines = "".join(
+        f"<br/>{ln.strip()}" for ln in (doc_header or "").splitlines() if ln.strip())
+    brand_cell = [Paragraph(f"{property_name}<br/>"
+                            f"<font size=8 color='#8A8478'>{address + '<br/>' if address else ''}"
+                            f"{'GSTIN: ' + gstin if gstin and with_gst else ''}"
+                            f"{extra_lines}</font>", h_brand)]
+    logo_img = _logo_flowable(logo) if logo else None
+    if logo_img:
+        brand_cell.insert(0, logo_img)
     header = Table([[
-        Paragraph(f"{property_name}<br/>"
-                  f"<font size=8 color='#8A8478'>{address + '<br/>' if address else ''}"
-                  f"{'GSTIN: ' + gstin if gstin and with_gst else ''}</font>", h_brand),
+        brand_cell,
         Paragraph(f"<b>{doc_title}</b><br/><font size=9 color='#8A8478'>No. {folio.invoice_no or '—'}<br/>"
                   f"{folio.opened_at:%d %b %Y}</font>", h_doc),
     ]], colWidths=[100 * mm, 78 * mm])
@@ -108,10 +135,16 @@ def build_invoice_pdf(folio, property_name, gstin, address="", with_gst=True):
         ("FONTNAME", (0, total_idx), (-1, total_idx), "Helvetica-Bold"),
         ("TOPPADDING", (0, 0), (-1, -1), 3), ("BOTTOMPADDING", (0, 0), (-1, -1), 3),
     ]))
+    story += [tot, Spacer(1, 14)]
+    # Custom terms & conditions / bank details footer (Settings → Letterhead).
+    if doc_footer:
+        for ln in doc_footer.splitlines():
+            if ln.strip():
+                story.append(Paragraph(f"<font size=8 color='#8A8478'>{ln.strip()}</font>", small))
+        story.append(Spacer(1, 8))
     footer = ("GST-compliant tax invoice" if with_gst
               else "bill of supply — GST not applicable")
-    story += [tot, Spacer(1, 18),
-              Paragraph(f"<font size=8 color='#B6AF9F'>{property_name} · {footer} · "
+    story += [Paragraph(f"<font size=8 color='#B6AF9F'>{property_name} · {footer} · "
                         f"computer-generated, no signature required</font>",
                         ParagraphStyle("f", parent=ss["Normal"], alignment=1))]
     doc.build(story)

@@ -796,7 +796,8 @@ class OrderViewSet(ModuleViewSetMixin, viewsets.ModelViewSet):
         from apps.accounts.views import get_property
         from .bill_pdf import build_bill_pdf
         order = self.get_object()
-        pdf = build_bill_pdf(order, get_property().name)
+        prop = get_property()
+        pdf = build_bill_pdf(order, prop.name, doc_footer=prop.doc_footer)
         resp = HttpResponse(pdf.read(), content_type="application/pdf")
         resp["Content-Disposition"] = f'attachment; filename="bill-{order.id}.pdf"'
         return resp

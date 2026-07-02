@@ -24,7 +24,7 @@ def _m(v):
     return "INR " + f"{Decimal(str(v)):,.2f}"
 
 
-def build_bill_pdf(order, property_name):
+def build_bill_pdf(order, property_name, doc_footer=""):
     buf = io.BytesIO()
     # A slim receipt page.
     doc = SimpleDocTemplate(buf, pagesize=(80 * mm, 200 * mm), topMargin=8 * mm,
@@ -75,6 +75,11 @@ def build_bill_pdf(order, property_name):
         base = getattr(settings, "FRONTEND_BASE_URL", "http://localhost:5173")
         story.append(Paragraph(f"Rate your experience: {base}/feedback?t={fb.token}", small))
         story.append(Spacer(1, 4))
+    # Letterhead footer (Settings → Letterhead), e.g. FSSAI no. / thank-you line.
+    if doc_footer:
+        for ln in doc_footer.splitlines()[:3]:
+            if ln.strip():
+                story.append(Paragraph(ln.strip(), small))
     story.append(Paragraph(f"Thank you · {property_name}", small))
     doc.build(story)
     buf.seek(0)
