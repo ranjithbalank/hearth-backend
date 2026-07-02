@@ -101,6 +101,11 @@ class CheckInView(ModuleViewSetMixin, viewsets.ViewSet):
             ).first()
         if room is None:
             return Response({"detail": "no sellable room available"}, status=400)
+        # ID proof is mandatory for check-in (KYC — BRD FR-PMS-004).
+        id_type = (request.data.get("id_type") or "").strip()
+        id_number = (request.data.get("id_number") or "").strip()
+        if not id_type or not id_number:
+            return Response({"detail": "ID proof (type and number) is required to check in."}, status=400)
         folio = services.check_in(resv, room, user=request.user)
         # Persist the guest's contact to the customer store for later enquiry.
         mobile = (request.data.get("mobile") or "").strip()
