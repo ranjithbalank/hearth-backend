@@ -55,6 +55,23 @@ class BanquetTests(TestCase):
         ev = Event.objects.get(pk=e["id"])
         self.assertEqual(ev.beo_status, "pending")
 
+    def test_adjust_enquiry_before_billing(self):
+        e = self._create(covers=100).data
+        r = self.client.patch(reverse("banquet-detail", args=[e["id"]]),
+                              {"covers": 150, "package_amount": 250000,
+                               "food_pref": "veg", "food_veg": 150, "veg_rate": 900},
+                              format="json")
+        self.assertEqual(r.status_code, 200)
+        self.assertEqual(r.data["covers"], 150)
+        self.assertEqual(r.data["catering_amount"], "135000.00")  # 150 × 900
+        self.assertEqual(r.data["bill_subtotal"], "385000.00")    # 250000 + 135000
+
+    def test_cannot_adjust_billed_event(self):
+        e = self._create().data
+        self.client.post(reverse("banquet-bill", args=[e["id"]]))
+        r = self.client.patch(reverse("banquet-detail", args=[e["id"]]), {"covers": 10}, format="json")
+        self.assertEqual(r.status_code, 400)
+
     def test_bill_applies_18pct_gst(self):
         e = self._create(package_amount=100000).data
         r = self.client.post(reverse("banquet-bill", args=[e["id"]]))

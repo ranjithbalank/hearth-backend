@@ -82,6 +82,68 @@ class BanquetViewSet(ModuleViewSetMixin, viewsets.ViewSet):
         e.refresh_from_db()  # coerce string time inputs to time objects for serialisation
         return Response(_event_dict(e), status=status.HTTP_201_CREATED)
 
+    def partial_update(self, request, pk=None):
+        """Adjust an enquiry before it's billed — space, date/time, covers,
+        catering & pricing (BRD FR-BQT-002). Billed events are locked."""
+        e = Event.objects.filter(pk=pk).first()
+        if not e:
+            return Response({"detail": "not found"}, status=404)
+        if e.billed:
+            return Response({"detail": "a billed event can't be edited"}, status=400)
+        d = request.data
+
+        if d.get("space"):
+            space = FunctionSpace.objects.filter(pk=d.get("space")).first()
+            if not space:
+                return Response({"detail": "function space required"}, status=400)
+            e.space = space
+        if d.get("event_date"):
+            e.event_date = d.get("event_date")
+        # Don't let an edit collide with another confirmed booking of that hall/date.
+        if Event.objects.filter(space=e.space, event_date=e.event_date, status=Event.CONFIRMED
+                                ).exclude(pk=e.pk).exists():
+            return Response({"detail": f"{e.space.name} is already booked on {e.event_date}"},
+                            status=status.HTTP_409_CONFLICT)
+        if "covers" in d:
+            covers = int(d.get("covers") or 0)
+            if covers > e.space.capacity:
+                return Response({"detail": f"{e.space.name} seats {e.space.capacity}; {covers} requested"},
+                                status=400)
+            e.covers = covers
+
+        for field in ("title", "host", "contact", "event_type"):
+            if field in d:
+                setattr(e, field, d.get(field) or "")
+        if "start_time" in d:
+            e.start_time = d.get("start_time") or None
+        if "end_time" in d:
+            e.end_time = d.get("end_time") or None
+        if "package_amount" in d:
+            e.package_amount = Decimal(str(d.get("package_amount") or 0))
+        if "deposit" in d:
+            e.deposit = Decimal(str(d.get("deposit") or 0))
+
+        if any(k in d for k in ("food_pref", "food_veg", "food_nonveg")):
+            food_pref = d.get("food_pref", e.food_pref)
+            food_veg = int(d.get("food_veg", e.food_veg) or 0)
+            food_nonveg = int(d.get("food_nonveg", e.food_nonveg) or 0)
+            if food_pref == "veg":
+                food_nonveg = 0
+            elif food_pref == "nonveg":
+                food_veg = 0
+            e.food_pref, e.food_veg, e.food_nonveg = food_pref, food_veg, food_nonveg
+            e.food_covers = food_veg + food_nonveg
+        if "veg_rate" in d:
+            e.veg_rate = Decimal(str(d.get("veg_rate") or 0))
+        if "nonveg_rate" in d:
+            e.nonveg_rate = Decimal(str(d.get("nonveg_rate") or 0))
+
+        e.save()
+        log_action(request.user, "event_update", entity="Event", entity_id=e.id,
+                   after={"title": e.title, "date": str(e.event_date)})
+        e.refresh_from_db()
+        return Response(_event_dict(e))
+
     @action(detail=False, methods=["get"])
     def availability(self, request):
         """Which halls are free on a given date (FR-BQT-001)."""
