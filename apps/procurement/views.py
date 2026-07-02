@@ -78,7 +78,7 @@ class PurchaseOrderViewSet(ModuleViewSetMixin, viewsets.ViewSet):
                 if outstanding <= 0:
                     continue
                 apply_movement(line.ingredient, "receipt", outstanding,
-                               reason="GRN", source=f"PO:{po.id}")
+                               reason="GRN", source=f"PO:{po.id}", user=request.user)
                 line.received_qty = line.qty
                 line.save(update_fields=["received_qty"])
             po.status = PurchaseOrder.RECEIVED

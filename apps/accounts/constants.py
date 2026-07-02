@@ -4,11 +4,12 @@ Mirrors the prototype's ROLE map and entitlement-gated nav, but is enforced serv
 """
 
 # --- Roles ---
-# Five operational roles. MD & GM have full access; the rest are scoped.
+# Six operational roles. MD & GM have full access; the rest are scoped.
 ROLE_MD = "Managing Director"
 ROLE_GM = "General Manager"
 ROLE_FRONT_OFFICE = "Front Office"
 ROLE_CASHIER = "F&B Cashier"
+ROLE_CAPTAIN = "Captain"
 ROLE_HOUSEKEEPING = "Housekeeping"
 
 ROLE_CHOICES = [
@@ -16,6 +17,7 @@ ROLE_CHOICES = [
     (ROLE_GM, ROLE_GM),
     (ROLE_FRONT_OFFICE, ROLE_FRONT_OFFICE),
     (ROLE_CASHIER, ROLE_CASHIER),
+    (ROLE_CAPTAIN, ROLE_CAPTAIN),
     (ROLE_HOUSEKEEPING, ROLE_HOUSEKEEPING),
 ]
 
@@ -43,9 +45,14 @@ ROLE_ALLOW = {
         "reservations", "housekeeping", "banquets", "cateringmaster", "crm", "customers",
         "reports", "notifications",
     ],
-    # F&B Cashier / Captain — POS & KOT only; capped discounts; no rooms access.
+    # F&B Cashier — POS & KOT; capped discounts; no rooms access.
     ROLE_CASHIER: [
         "pos", "kds", "online", "reports", "notifications",
+    ],
+    # Captain / steward — tableside ordering on mobile: POS only.
+    # Settlement is tender-restricted (see ROLE_TENDERS).
+    ROLE_CAPTAIN: [
+        "pos",
     ],
     # Housekeeping — room status board and maintenance work orders.
     ROLE_HOUSEKEEPING: [
@@ -74,6 +81,28 @@ MODULE_ENTITLEMENT = {
     # dashboard, tax, gstmaster, crm, customers, vendors, employees, roles,
     # notifications, reports, settings -> no specific entitlement (shared services)
 }
+
+
+# --- POS tender mapping (BRD 5.10 role mapping) ---
+# Which tenders each role may accept when settling a bill. "*" == all tenders.
+# Captains take digital payments (UPI / gateway) tableside; cash is counted and
+# reconciled only at the cashier counter, so it stays with cashier/managers.
+ROLE_TENDERS = {
+    ROLE_MD: "*",
+    ROLE_GM: "*",
+    ROLE_CASHIER: "*",
+    ROLE_FRONT_OFFICE: "*",
+    ROLE_CAPTAIN: ["UPI", "Gateway"],
+}
+
+
+def role_can_tender(role: str, tender: str) -> bool:
+    allow = ROLE_TENDERS.get(role)
+    if allow == "*":
+        return True
+    if allow is None:
+        return False
+    return tender in allow
 
 
 def role_can_access(role: str, module: str) -> bool:

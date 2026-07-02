@@ -12,7 +12,7 @@ from apps.accounts.permissions import ModuleViewSetMixin, active_entitlements
 from apps.frontoffice import services as fo_services
 from apps.frontoffice.models import Folio, FolioLine, Settlement
 
-from .models import AddOn, Category, Coupon, MenuItem, Order, OrderLine, Table, Variant
+from .models import AddOn, Category, Coupon, Kot, MenuItem, Order, OrderLine, Table, Variant
 from .serializers import (
     CategorySerializer,
     MenuItemSerializer,
@@ -45,6 +45,31 @@ def _valid_override(passcode):
     return User.objects.filter(
         role__in=["Managing Director", "General Manager"], passcode=passcode, is_active=True
     ).first()
+
+
+# Statuses that end an order's life — no further edits, KOTs or payments.
+CLOSED_STATUSES = (Order.SETTLED, Order.POSTED_TO_ROOM)
+
+
+def _closed_error(order):
+    """409 if the order is already settled/posted; None if it is still live."""
+    if order.status in CLOSED_STATUSES:
+        return Response(
+            {"detail": f"Order is already {order.get_status_display().lower()} — no further changes allowed"},
+            status=409,
+        )
+    return None
+
+
+def _billed_error(order):
+    """409 if the final bill is printed — the order is locked until reopened."""
+    if order.status == Order.BILLED:
+        return Response(
+            {"detail": "Final bill already printed — reopen the order to make changes",
+             "billed_locked": True},
+            status=409,
+        )
+    return None
 
 
 class TableViewSet(ModuleViewSetMixin, viewsets.ModelViewSet):
@@ -84,6 +109,7 @@ class QrOrderView(APIView):
                                          source_platform="qr", online_status="received",
                                          status=Order.KOT_FIRED, kitchen_status="cooking",
                                          kot_no=f"QR-{table.name}")
+            kot = Kot.objects.create(order=order, number=f"QR-{table.name}-{order.id}")
             fired = []
             for ln in request.data.get("items", []):
                 item = MenuItem.objects.filter(pk=ln.get("menu_item"), available=True).first()
@@ -91,7 +117,7 @@ class QrOrderView(APIView):
                     continue
                 fired.append(OrderLine.objects.create(
                     order=order, menu_item=item, qty=int(ln.get("qty", 1)),
-                    unit_price=item.price, kot_fired=True))
+                    unit_price=item.price, kot_fired=True, kot=kot))
             from apps.recipes.services import deduct_for_newly_fired
             deduct_for_newly_fired(order, fired)
             table.status = Table.RUNNING
@@ -105,16 +131,20 @@ class KdsViewSet(ModuleViewSetMixin, viewsets.ViewSet):
     module = "kds"
 
     def list(self, request):
-        orders = (Order.objects.filter(kitchen_status__in=["cooking", "ready"])
-                  .prefetch_related("lines__menu_item").order_by("created_at"))
+        # One ticket per KOT round: a table's second round is its own ticket,
+        # so serving round 1 never hides (or re-shows) other rounds (FR-POS-004).
+        kots = (Kot.objects.filter(status__in=["cooking", "ready"])
+                .select_related("order__table")
+                .prefetch_related("lines__menu_item").order_by("created_at"))
         out = []
-        for o in orders:
+        for k in kots:
+            o = k.order
             out.append({
-                "id": o.id, "type": "order", "kot_no": o.kot_no, "kitchen_status": o.kitchen_status,
+                "id": k.id, "type": "order", "kot_no": k.number, "kitchen_status": k.status,
                 "table": o.table.name if o.table else o.get_mode_display(),
-                "created_at": o.created_at,
+                "created_at": k.created_at,
                 "items": [{"name": l.display_name, "qty": l.qty,
-                           "station": l.menu_item.station} for l in o.lines.all()],
+                           "station": l.menu_item.station} for l in k.lines.all()],
             })
         # Banquet Event Order catering prep (FR-BQT-004).
         from apps.banquets.models import Event as BqEvent
@@ -129,12 +159,19 @@ class KdsViewSet(ModuleViewSetMixin, viewsets.ViewSet):
 
     @action(detail=True, methods=["post"])
     def bump(self, request, pk=None):
-        order = Order.objects.filter(pk=pk).first()
-        if not order:
+        """Advance one KOT round: cooking → ready → served."""
+        kot = Kot.objects.filter(pk=pk).select_related("order").first()
+        if not kot:
             return Response({"detail": "not found"}, status=404)
-        order.kitchen_status = "ready" if order.kitchen_status == "cooking" else "served"
+        kot.status = Kot.READY if kot.status == Kot.COOKING else Kot.SERVED
+        kot.save(update_fields=["status"])
+        # Order-level summary status: worst state across its rounds.
+        order = kot.order
+        statuses = set(order.kots.values_list("status", flat=True))
+        order.kitchen_status = ("cooking" if Kot.COOKING in statuses
+                                else "ready" if Kot.READY in statuses else "served")
         order.save(update_fields=["kitchen_status"])
-        return Response({"id": order.id, "kitchen_status": order.kitchen_status})
+        return Response({"id": kot.id, "kitchen_status": kot.status})
 
     @action(detail=True, methods=["post"])
     def beo_bump(self, request, pk=None):
@@ -177,11 +214,58 @@ class OrderViewSet(ModuleViewSetMixin, viewsets.ModelViewSet):
         status_ = self.request.query_params.get("status")
         if status_:
             qs = qs.filter(status=status_)
+        table = self.request.query_params.get("table")
+        if table:
+            qs = qs.filter(table_id=table)
+        # ?open=1 → orders still on the floor (so the POS resumes a running table).
+        if self.request.query_params.get("open"):
+            qs = qs.filter(status__in=[Order.OPEN, Order.KOT_FIRED, Order.BILLED])
         return qs
+
+    def perform_create(self, serializer):
+        # Stamp who took the order — the captain owns delivery for their tables.
+        user = self.request.user
+        serializer.save(captain=user.get_full_name() or user.username)
+
+    @action(detail=False, methods=["get"])
+    def ready(self, request):
+        """KOT rounds the kitchen marked ready, for the floor's serve board.
+        ?mine=1 → only orders this captain took (their tables to run)."""
+        kots = (Kot.objects.filter(status=Kot.READY)
+                .select_related("order__table").order_by("created_at"))
+        if request.query_params.get("mine"):
+            me = request.user.get_full_name() or request.user.username
+            kots = kots.filter(order__captain=me)
+        return Response([{
+            "kot": k.id, "kot_no": k.number, "order": k.order_id,
+            "table": k.order.table.name if k.order.table else k.order.get_mode_display(),
+            "captain": k.order.captain,
+        } for k in kots])
+
+    @action(detail=False, methods=["post"])
+    def serve(self, request):
+        """Captain confirms the ready round reached the table (kitchen→floor loop)."""
+        kot = Kot.objects.filter(pk=request.data.get("kot"), status=Kot.READY)\
+                         .select_related("order").first()
+        if not kot:
+            return Response({"detail": "ready KOT not found"}, status=404)
+        kot.status = Kot.SERVED
+        kot.save(update_fields=["status"])
+        order = kot.order
+        statuses = set(order.kots.values_list("status", flat=True))
+        order.kitchen_status = ("cooking" if Kot.COOKING in statuses
+                                else "ready" if Kot.READY in statuses else "served")
+        order.save(update_fields=["kitchen_status"])
+        log_action(request.user, "kot_served", entity="Kot", entity_id=kot.id,
+                   after={"kot": kot.number})
+        return Response({"kot": kot.id, "status": kot.status})
 
     @action(detail=True, methods=["post"])
     def add_item(self, request, pk=None):
         order = self.get_object()
+        err = _closed_error(order) or _billed_error(order)
+        if err:
+            return err
         item = MenuItem.objects.filter(pk=request.data.get("menu_item")).first()
         if not item:
             return Response({"detail": "menu_item not found"}, status=404)
@@ -239,10 +323,26 @@ class OrderViewSet(ModuleViewSetMixin, viewsets.ModelViewSet):
     @action(detail=True, methods=["post"])
     def set_qty(self, request, pk=None):
         order = self.get_object()
+        err = _closed_error(order) or _billed_error(order)
+        if err:
+            return err
         line = order.lines.filter(pk=request.data.get("line")).first()
         if not line:
             return Response({"detail": "line not found"}, status=404)
         qty = int(request.data.get("qty", 0))
+        # Reducing/removing an item already fired to the kitchen is an item void —
+        # the food was made, so it needs a manager override (FR-USR-006).
+        if line.kot_fired and qty < line.qty:
+            mgr = _valid_override(request.data.get("override"))
+            if not mgr:
+                return Response(
+                    {"detail": "Item already sent to kitchen — manager override required to reduce it",
+                     "override_required": True},
+                    status=403,
+                )
+            log_action(request.user, "item_void", entity="OrderLine", entity_id=line.id,
+                       after={"item": line.menu_item.name, "from_qty": line.qty, "to_qty": qty,
+                              "override": mgr.username})
         if qty <= 0:
             line.delete()
         else:
@@ -251,7 +351,9 @@ class OrderViewSet(ModuleViewSetMixin, viewsets.ModelViewSet):
         return Response(OrderSerializer(order).data)
 
     def _free_table_if_idle(self, table):
-        if table and not table.orders.filter(status__in=[Order.OPEN, Order.KOT_FIRED]).exists():
+        """Free the table only when nothing on it is still unpaid (incl. printed bills)."""
+        if table and not table.orders.filter(
+                status__in=[Order.OPEN, Order.KOT_FIRED, Order.BILLED]).exists():
             table.status = Table.FREE
             table.save(update_fields=["status"])
 
@@ -284,6 +386,7 @@ class OrderViewSet(ModuleViewSetMixin, viewsets.ModelViewSet):
                 brand=request.data.get("brand", ""),
                 kot_no=f"AGG-{ext[:6].upper()}", status=Order.KOT_FIRED, kitchen_status="cooking",
             )
+            kot = Kot.objects.create(order=order, number=f"AGG-{ext[:6].upper()}")
             fired = []
             for ln in request.data.get("items", []):
                 item = MenuItem.objects.filter(pk=ln.get("menu_item")).first()
@@ -291,7 +394,7 @@ class OrderViewSet(ModuleViewSetMixin, viewsets.ModelViewSet):
                     continue
                 line = OrderLine.objects.create(order=order, menu_item=item,
                                                 qty=int(ln.get("qty", 1)),
-                                                unit_price=item.price, kot_fired=True)
+                                                unit_price=item.price, kot_fired=True, kot=kot)
                 fired.append(line)
             from apps.recipes.services import deduct_for_newly_fired
             deduct_for_newly_fired(order, fired)
@@ -314,6 +417,7 @@ class OrderViewSet(ModuleViewSetMixin, viewsets.ModelViewSet):
         order.online_status = target
         if target == "ready":
             order.kitchen_status = "ready"
+            order.kots.filter(status=Kot.COOKING).update(status=Kot.READY)
         if target == "dispatched":
             order.status = Order.SETTLED if order.prepaid else order.status
         order.save(update_fields=["online_status", "kitchen_status", "status"])
@@ -352,6 +456,8 @@ class OrderViewSet(ModuleViewSetMixin, viewsets.ModelViewSet):
                     client_uuid=uuid, offline_origin=True,
                     kot_no=f"KOT-{uuid[:6].upper()}",
                 )
+                kot = Kot.objects.create(order=order, number=f"KOT-{uuid[:6].upper()}",
+                                         status=Kot.SERVED)  # offline bill: already made
                 for ln in payload.get("lines", []):
                     item = MenuItem.objects.filter(pk=ln.get("menu_item")).first()
                     if not item:
@@ -359,7 +465,7 @@ class OrderViewSet(ModuleViewSetMixin, viewsets.ModelViewSet):
                     OrderLine.objects.create(
                         order=order, menu_item=item, qty=int(ln.get("qty", 1)),
                         unit_price=Decimal(str(ln.get("unit_price", item.price))),
-                        kot_fired=True,
+                        kot_fired=True, kot=kot,
                     )
                 if payload.get("settled"):
                     t = order.totals()
@@ -378,6 +484,9 @@ class OrderViewSet(ModuleViewSetMixin, viewsets.ModelViewSet):
     def move(self, request, pk=None):
         """Move an order to another table, preserving items + KOT history (FR-TBL-004)."""
         order = self.get_object()
+        err = _closed_error(order)
+        if err:
+            return err
         dest = Table.objects.filter(pk=request.data.get("table")).first()
         if not dest:
             return Response({"detail": "destination table not found"}, status=400)
@@ -396,9 +505,14 @@ class OrderViewSet(ModuleViewSetMixin, viewsets.ModelViewSet):
     def merge(self, request, pk=None):
         """Merge another open order's lines into this one (FR-TBL-004)."""
         order = self.get_object()
+        err = _closed_error(order) or _billed_error(order)
+        if err:
+            return err
         src = Order.objects.filter(pk=request.data.get("source")).first()
         if not src or src.id == order.id:
             return Response({"detail": "invalid source order"}, status=400)
+        if src.status in CLOSED_STATUSES:
+            return Response({"detail": "source order is already closed"}, status=400)
         with transaction.atomic():
             src.lines.update(order=order)
             src_table = src.table
@@ -414,6 +528,9 @@ class OrderViewSet(ModuleViewSetMixin, viewsets.ModelViewSet):
     def split(self, request, pk=None):
         """Split selected lines into a new order/bill (FR-TBL-004)."""
         order = self.get_object()
+        err = _closed_error(order)
+        if err:
+            return err
         line_ids = request.data.get("lines", [])
         lines = order.lines.filter(id__in=line_ids)
         if not lines.exists() or lines.count() == order.lines.count():
@@ -430,6 +547,9 @@ class OrderViewSet(ModuleViewSetMixin, viewsets.ModelViewSet):
     def void(self, request, pk=None):
         """Void an order — always requires a manager override passcode (FR-USR-006)."""
         order = self.get_object()
+        if order.status in CLOSED_STATUSES:
+            return Response({"detail": "Order is already settled — process a refund instead of a void"},
+                            status=409)
         mgr = _valid_override(request.data.get("override"))
         if not mgr:
             return Response({"detail": "Manager override required to void", "override_required": True},
@@ -460,6 +580,9 @@ class OrderViewSet(ModuleViewSetMixin, viewsets.ModelViewSet):
         """Order-level discount within the user's cap; over-cap needs manager override
         (BRD FR-POS-012, FR-USR-004/006)."""
         order = self.get_object()
+        err = _closed_error(order) or _billed_error(order)
+        if err:
+            return err
         kind = request.data.get("kind", "percent")
         value = Decimal(str(request.data.get("value", 0)))
         reason = request.data.get("reason", "")
@@ -488,6 +611,9 @@ class OrderViewSet(ModuleViewSetMixin, viewsets.ModelViewSet):
     @action(detail=True, methods=["post"])
     def apply_coupon(self, request, pk=None):
         order = self.get_object()
+        err = _closed_error(order) or _billed_error(order)
+        if err:
+            return err
         coupon = Coupon.objects.filter(code__iexact=request.data.get("code", "")).first()
         if not coupon:
             return Response({"detail": "Unknown coupon code"}, status=400)
@@ -502,6 +628,9 @@ class OrderViewSet(ModuleViewSetMixin, viewsets.ModelViewSet):
     def redeem_loyalty(self, request, pk=None):
         """Redeem a customer's loyalty points against the bill (1 pt = ₹1, FR-PRO-004)."""
         order = self.get_object()
+        err = _closed_error(order) or _billed_error(order)
+        if err:
+            return err
         if not order.customer:
             return Response({"detail": "attach a customer first"}, status=400)
         points = int(request.data.get("points", 0))
@@ -516,6 +645,9 @@ class OrderViewSet(ModuleViewSetMixin, viewsets.ModelViewSet):
     def fire_kot(self, request, pk=None):
         """Fire a KOT for un-fired lines only (incremental KOT, FR-POS-004)."""
         order = self.get_object()
+        err = _closed_error(order) or _billed_error(order)
+        if err:
+            return err
         pending = order.lines.filter(kot_fired=False)
         if not pending.exists():
             return Response({"detail": "nothing new to fire"}, status=400)
@@ -523,9 +655,12 @@ class OrderViewSet(ModuleViewSetMixin, viewsets.ModelViewSet):
         # before flipping kot_fired (so the deduction sees only this round).
         from apps.recipes.services import deduct_for_newly_fired
         deduct_for_newly_fired(order, list(pending))
-        pending.update(kot_fired=True)
-        if not order.kot_no:
-            order.kot_no = f"KOT-{order.id:05d}"
+        # Each fire is its own KOT round: the kitchen gets a fresh ticket with
+        # only the new items — earlier (possibly served) rounds are untouched.
+        seq = order.kots.count() + 1
+        kot = Kot.objects.create(order=order, number=f"KOT-{order.id:05d}/{seq}")
+        pending.update(kot_fired=True, kot=kot)
+        order.kot_no = kot.number  # latest round shown on the order
         order.status = Order.KOT_FIRED
         order.kitchen_status = "cooking"  # appears on the KDS
         order.save(update_fields=["kot_no", "status", "kitchen_status"])
@@ -533,7 +668,48 @@ class OrderViewSet(ModuleViewSetMixin, viewsets.ModelViewSet):
             order.table.status = Table.RUNNING
             order.table.save(update_fields=["status"])
         log_action(request.user, "kot_fire", entity="Order", entity_id=order.id,
-                   after={"kot": order.kot_no})
+                   after={"kot": kot.number, "round": seq})
+        return Response(OrderSerializer(order).data)
+
+    @action(detail=True, methods=["post"])
+    def bill(self, request, pk=None):
+        """Print the final bill: locks the order against further edits (FR-POS-006).
+
+        Every line must be KOT-fired first — nothing reaches the final bill that
+        was never sent to the kitchen (and never deducted from stock).
+        """
+        order = self.get_object()
+        err = _closed_error(order)
+        if err:
+            return err
+        if order.status == Order.BILLED:
+            return Response(OrderSerializer(order).data)  # reprint is fine
+        if not order.lines.exists():
+            return Response({"detail": "nothing to bill"}, status=400)
+        if order.lines.filter(kot_fired=False).exists():
+            return Response({"detail": "Un-fired items on the order — fire the KOT before billing"},
+                            status=400)
+        order.status = Order.BILLED
+        order.save(update_fields=["status"])
+        if order.table:
+            order.table.status = Table.PRINTED
+            order.table.save(update_fields=["status"])
+        log_action(request.user, "bill_print", entity="Order", entity_id=order.id,
+                   after={"total": str(order.totals()["total"])})
+        return Response(OrderSerializer(order).data)
+
+    @action(detail=True, methods=["post"])
+    def reopen(self, request, pk=None):
+        """Unlock a printed bill to make changes; the bill must be reprinted after."""
+        order = self.get_object()
+        if order.status != Order.BILLED:
+            return Response({"detail": "only a billed order can be reopened"}, status=400)
+        order.status = Order.KOT_FIRED if order.lines.filter(kot_fired=True).exists() else Order.OPEN
+        order.save(update_fields=["status"])
+        if order.table and order.table.status == Table.PRINTED:
+            order.table.status = Table.RUNNING
+            order.table.save(update_fields=["status"])
+        log_action(request.user, "bill_reopen", entity="Order", entity_id=order.id)
         return Response(OrderSerializer(order).data)
 
     def _finalize_promotions(self, order, total):
@@ -555,8 +731,24 @@ class OrderViewSet(ModuleViewSetMixin, viewsets.ModelViewSet):
         (PCI-safe — no card data touches us; FR-PAY-008 / SR-060).
         """
         order = self.get_object()
+        err = _closed_error(order)
+        if err:
+            return err
+        if not order.lines.exists():
+            return Response({"detail": "nothing to settle"}, status=400)
+        if order.lines.filter(kot_fired=False).exists():
+            return Response({"detail": "Un-fired items on the order — fire the KOT before settling"},
+                            status=400)
         t = order.totals()
         tender = request.data.get("tender", "Cash")
+        # Role↔tender mapping: e.g. captains settle UPI/gateway tableside,
+        # but cash is handled only at the cashier counter (BRD 5.10).
+        from apps.accounts.constants import role_can_tender
+        if not role_can_tender(getattr(request.user, "role", ""), tender):
+            return Response(
+                {"detail": f"Your role can't accept {tender} — collect it at the cashier counter"},
+                status=403,
+            )
         reference = request.data.get("reference", f"POS order {order.id}")
         if tender == "Gateway":
             from apps.integrations import services as integ
@@ -568,9 +760,8 @@ class OrderViewSet(ModuleViewSetMixin, viewsets.ModelViewSet):
         self._finalize_promotions(order, t["total"])
         order.status = Order.SETTLED
         order.save(update_fields=["status"])
-        if order.table:
-            order.table.status = Table.FREE
-            order.table.save(update_fields=["status"])
+        # Free the table only if no other unpaid order (e.g. a split bill) sits on it.
+        self._free_table_if_idle(order.table)
         # Receipt notification to the customer (FR-NOT-001).
         if order.customer:
             from apps.integrations import services as integ
@@ -592,6 +783,14 @@ class OrderViewSet(ModuleViewSetMixin, viewsets.ModelViewSet):
                 status=403,
             )
         order = self.get_object()
+        err = _closed_error(order)
+        if err:
+            return err
+        if not order.lines.exists():
+            return Response({"detail": "nothing to post"}, status=400)
+        if order.lines.filter(kot_fired=False).exists():
+            return Response({"detail": "Un-fired items on the order — fire the KOT before posting"},
+                            status=400)
         folio = Folio.objects.filter(pk=request.data.get("folio"), status=Folio.OPEN).first()
         if not folio:
             return Response({"detail": "open folio not found for this room/guest"}, status=400)
@@ -611,9 +810,7 @@ class OrderViewSet(ModuleViewSetMixin, viewsets.ModelViewSet):
             order.status = Order.POSTED_TO_ROOM
             order.folio = folio
             order.save(update_fields=["status", "folio"])
-            if order.table:
-                order.table.status = Table.FREE
-                order.table.save(update_fields=["status"])
+            self._free_table_if_idle(order.table)
         log_action(request.user, "post_to_room", entity="Order", entity_id=order.id,
                    after={"folio": folio.id})
         return Response(OrderSerializer(order).data)

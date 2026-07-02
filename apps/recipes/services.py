@@ -18,7 +18,8 @@ def _consume_recipe(menu_item, mult, order, deductions, depth=0):
         if rl.sub_recipe_id:
             _consume_recipe(rl.sub_recipe, rl.qty * mult, order, deductions, depth + 1)
         elif rl.ingredient_id:
-            consumed = rl.qty * mult
+            # base_qty handles unit conversion (g→kg, ml→l) + wastage % (spec §2-3).
+            consumed = rl.base_qty() * mult
             apply_movement(rl.ingredient, "consumption", -consumed,
                            reason=f"{mult}× {menu_item.name}", source=f"order:{order.id}")
             deductions.append((rl.ingredient.name, consumed))

@@ -13,8 +13,9 @@ from .models import MaterialRequest, MaterialRequestLine
 class MaterialRequestTests(TestCase):
     def setUp(self):
         self.client = APIClient()
+        # Material requests need a role with the "matreq" module (cashier is POS-only).
         self.client.force_authenticate(User.objects.create_user(
-            username="c", password="Tk9$mZ2pQw!7", role="F&B Cashier"))
+            username="c", password="Tk9$mZ2pQw!7", role="General Manager"))
         self.ing = Ingredient.objects.create(name="Onion", unit="kg", current_stock=Decimal("20"))
         self.req = MaterialRequest.objects.create(department="Kitchen")
         MaterialRequestLine.objects.create(request=self.req, ingredient=self.ing, qty=Decimal("5"))

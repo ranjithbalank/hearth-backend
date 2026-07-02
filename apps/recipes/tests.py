@@ -35,6 +35,34 @@ class RecipeDeductionTests(TestCase):
     def test_plate_cost_rollup(self):
         self.assertEqual(self.item.recipe.plate_cost, Decimal("64.000"))  # 0.2 * 320
 
+    def test_unit_conversion_g_to_kg_on_deduction(self):
+        """Spec §2: recipe says 250 g, ingredient stocked in kg → deduct 0.25 kg."""
+        rice = Ingredient.objects.create(name="Rice", unit="kg",
+                                         current_stock=Decimal("10"), unit_cost=Decimal("60"))
+        dish = MenuItem.objects.create(name="Fried Rice", category=self.cat, price=Decimal("200"))
+        rec = Recipe.objects.create(menu_item=dish)
+        RecipeLine.objects.create(recipe=rec, ingredient=rice, qty=Decimal("250"), unit="g")
+        order = Order.objects.create(mode=Order.DINEIN)
+        line = OrderLine.objects.create(order=order, menu_item=dish, qty=2, unit_price=Decimal("200"))
+        deduct_for_newly_fired(order, [line])
+        rice.refresh_from_db()
+        self.assertEqual(rice.current_stock, Decimal("9.500"))  # 10 - 2×0.25 kg
+        # Plate cost converts too: 0.25 kg × ₹60 = ₹15
+        self.assertEqual(rec.plate_cost, Decimal("15.00000"))
+
+    def test_wastage_pct_inflates_consumption(self):
+        """Spec §2: 10% wastage on 0.2 kg → 0.22 kg drawn per plate."""
+        oil = Ingredient.objects.create(name="Oil", unit="l", current_stock=Decimal("5"))
+        dish = MenuItem.objects.create(name="Poori", category=self.cat, price=Decimal("80"))
+        rec = Recipe.objects.create(menu_item=dish)
+        RecipeLine.objects.create(recipe=rec, ingredient=oil, qty=Decimal("0.2"),
+                                  wastage_pct=Decimal("10"))
+        order = Order.objects.create(mode=Order.DINEIN)
+        line = OrderLine.objects.create(order=order, menu_item=dish, qty=1, unit_price=Decimal("80"))
+        deduct_for_newly_fired(order, [line])
+        oil.refresh_from_db()
+        self.assertEqual(oil.current_stock, Decimal("4.780"))  # 5 - 0.2×1.1
+
 
 class SubRecipeTests(TestCase):
     def test_sub_recipe_expands_on_deduction(self):

@@ -37,8 +37,10 @@ class MaterialRequestViewSet(ModuleViewSetMixin, viewsets.ViewSet):
         elif r.status == MaterialRequest.APPROVED:
             with transaction.atomic():
                 for line in r.lines.all():
-                    apply_movement(line.ingredient, "consumption", -line.qty,
-                                   reason=f"Issued to {r.department}", source=f"indent:{r.id}")
+                    # Department issue is a stock transfer, not recipe consumption (spec §4).
+                    apply_movement(line.ingredient, "transfer", -line.qty,
+                                   reason=f"Issued to {r.department}", source=f"indent:{r.id}",
+                                   user=request.user)
                 r.status = MaterialRequest.ISSUED
                 r.save(update_fields=["status"])
             log_action(request.user, "indent_issued", entity="MaterialRequest", entity_id=r.id)

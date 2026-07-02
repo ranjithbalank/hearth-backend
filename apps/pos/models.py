@@ -260,6 +260,27 @@ class Order(models.Model):
         }
 
 
+class Kot(models.Model):
+    """One fired kitchen ticket. Each fire on an order is its own round —
+    round 2 must reach the kitchen as a fresh ticket with only the new items,
+    never merged into (or re-showing) an already-served round (FR-POS-004)."""
+
+    COOKING = "cooking"
+    READY = "ready"
+    SERVED = "served"
+
+    order = models.ForeignKey(Order, on_delete=models.CASCADE, related_name="kots")
+    number = models.CharField(max_length=24)
+    status = models.CharField(max_length=12, default=COOKING)  # cooking | ready | served
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ["created_at"]
+
+    def __str__(self):
+        return self.number
+
+
 class Coupon(models.Model):
     """Promo coupon (BRD FR-PRO-002)."""
 
@@ -298,6 +319,9 @@ class OrderLine(models.Model):
     unit_price = models.DecimalField(max_digits=10, decimal_places=2)
     note = models.CharField(max_length=120, blank=True)
     kot_fired = models.BooleanField(default=False)
+    # Which fire round this line went out on (null until fired).
+    kot = models.ForeignKey(Kot, on_delete=models.SET_NULL, null=True, blank=True,
+                            related_name="lines")
 
     def __str__(self):
         return f"{self.qty}× {self.menu_item.name}"

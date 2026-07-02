@@ -10,6 +10,7 @@ from django.core.management.base import BaseCommand
 from django.db import transaction
 
 from apps.accounts.constants import (
+    ROLE_CAPTAIN,
     ROLE_CASHIER,
     ROLE_FRONT_OFFICE,
     ROLE_GM,
@@ -83,6 +84,7 @@ class Command(BaseCommand):
             ("gm", "Meera", "Rao", ROLE_GM, True),
             ("frontoffice", "Anil", "Kumar", ROLE_FRONT_OFFICE, False),
             ("cashier", "Priya", "Nair", ROLE_CASHIER, False),
+            ("captain", "Vijay", "Menon", ROLE_CAPTAIN, False),
             ("housekeeping", "Sunita", "Pal", ROLE_HOUSEKEEPING, False),
         ]
         # Per-user discount caps + manager passcodes (BRD FR-USR-004/006).

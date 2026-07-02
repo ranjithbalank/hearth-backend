@@ -24,9 +24,10 @@ class DiscountLoyaltyTests(TestCase):
         self.mgr = User.objects.create_user(
             username="m1", password="Tk9$mZ2pQw!7", role="General Manager", passcode="4321")
 
-    def _order(self, qty=2):
+    def _order(self, qty=2, fired=True):
         o = Order.objects.create(mode=Order.DINEIN)
-        OrderLine.objects.create(order=o, menu_item=self.item, qty=qty, unit_price=Decimal("400"))
+        OrderLine.objects.create(order=o, menu_item=self.item, qty=qty,
+                                 unit_price=Decimal("400"), kot_fired=fired)
         return o
 
     def test_discount_within_cap_ok(self):
@@ -225,3 +226,198 @@ class DiscountLoyaltyTests(TestCase):
         self.client.post(reverse("order-settle", args=[o.id]), {"tender": "Cash"}, format="json")
         cust.refresh_from_db()
         self.assertEqual(cust.loyalty_points, 8)
+
+
+class KotBillFlowTests(TestCase):
+    """Guards on the KOT → final bill → settle lifecycle."""
+
+    def setUp(self):
+        from .models import Table
+        self.client = APIClient()
+        self.cat = Category.objects.create(name="Main")
+        self.item = MenuItem.objects.create(name="Dosa", category=self.cat,
+                                            price=Decimal("100"), gst_rate=Decimal("5"))
+        self.mgr = User.objects.create_user(
+            username="mgr", password="Tk9$mZ2pQw!7", role="General Manager", passcode="4321")
+        self.client.force_authenticate(self.mgr)
+        self.table = Table.objects.create(name="T1", section="AC", seats=4)
+
+    def _order(self, fired=True, table=None):
+        o = Order.objects.create(mode=Order.DINEIN, table=table or self.table,
+                                 status=Order.KOT_FIRED if fired else Order.OPEN)
+        OrderLine.objects.create(order=o, menu_item=self.item, qty=2,
+                                 unit_price=Decimal("100"), kot_fired=fired)
+        return o
+
+    def test_settle_rejects_unfired_lines(self):
+        o = self._order(fired=False)
+        r = self.client.post(reverse("order-settle", args=[o.id]), {"tender": "Cash"}, format="json")
+        self.assertEqual(r.status_code, 400)
+        self.assertIn("fire the KOT", r.data["detail"])
+
+    def test_settle_rejects_empty_order(self):
+        o = Order.objects.create(mode=Order.DINEIN, table=self.table)
+        r = self.client.post(reverse("order-settle", args=[o.id]), {"tender": "Cash"}, format="json")
+        self.assertEqual(r.status_code, 400)
+
+    def test_double_settle_blocked(self):
+        from apps.frontoffice.models import Settlement
+        o = self._order()
+        r1 = self.client.post(reverse("order-settle", args=[o.id]), {"tender": "Cash"}, format="json")
+        self.assertEqual(r1.status_code, 200)
+        r2 = self.client.post(reverse("order-settle", args=[o.id]), {"tender": "Cash"}, format="json")
+        self.assertEqual(r2.status_code, 409)
+        self.assertEqual(Settlement.objects.count(), 1)  # no duplicate payment row
+
+    def test_bill_requires_all_lines_fired(self):
+        o = self._order(fired=False)
+        r = self.client.post(reverse("order-bill", args=[o.id]), format="json")
+        self.assertEqual(r.status_code, 400)
+
+    def test_bill_locks_edits_until_reopened(self):
+        o = self._order()
+        self.client.post(reverse("order-bill", args=[o.id]), format="json")
+        o.refresh_from_db(); self.table.refresh_from_db()
+        self.assertEqual(o.status, Order.BILLED)
+        self.assertEqual(self.table.status, "printed")
+        # Adding an item to a printed bill is blocked…
+        r = self.client.post(reverse("order-add-item", args=[o.id]),
+                             {"menu_item": self.item.id, "qty": 1}, format="json")
+        self.assertEqual(r.status_code, 409)
+        # …until the bill is reopened.
+        self.client.post(reverse("order-reopen", args=[o.id]), format="json")
+        r = self.client.post(reverse("order-add-item", args=[o.id]),
+                             {"menu_item": self.item.id, "qty": 1}, format="json")
+        self.assertEqual(r.status_code, 200)
+
+    def test_reduce_fired_line_needs_manager_override(self):
+        o = self._order()
+        line = o.lines.first()
+        r = self.client.post(reverse("order-set-qty", args=[o.id]),
+                             {"line": line.id, "qty": 1}, format="json")
+        self.assertEqual(r.status_code, 403)
+        self.assertTrue(r.data.get("override_required"))
+        r = self.client.post(reverse("order-set-qty", args=[o.id]),
+                             {"line": line.id, "qty": 1, "override": "4321"}, format="json")
+        self.assertEqual(r.status_code, 200)
+        line.refresh_from_db(); self.assertEqual(line.qty, 1)
+
+    def test_settle_keeps_table_running_for_split_bill(self):
+        from .models import Table
+        self.table.status = Table.RUNNING; self.table.save()
+        o1 = self._order()
+        self._order()  # second unpaid order on the same table (split bill)
+        self.client.post(reverse("order-settle", args=[o1.id]), {"tender": "Cash"}, format="json")
+        self.table.refresh_from_db()
+        self.assertEqual(self.table.status, Table.RUNNING)  # still one unpaid bill
+
+    def test_settle_frees_table_when_last_bill_paid(self):
+        from .models import Table
+        self.table.status = Table.RUNNING; self.table.save()
+        o = self._order()
+        self.client.post(reverse("order-settle", args=[o.id]), {"tender": "Cash"}, format="json")
+        self.table.refresh_from_db()
+        self.assertEqual(self.table.status, Table.FREE)
+
+    def test_void_of_settled_order_blocked(self):
+        o = self._order()
+        self.client.post(reverse("order-settle", args=[o.id]), {"tender": "Cash"}, format="json")
+        r = self.client.post(reverse("order-void", args=[o.id]),
+                             {"override": "4321", "reason": "oops"}, format="json")
+        self.assertEqual(r.status_code, 409)
+
+    def test_fire_kot_blocked_after_settle(self):
+        o = self._order()
+        self.client.post(reverse("order-settle", args=[o.id]), {"tender": "Cash"}, format="json")
+        OrderLine.objects.create(order=o, menu_item=self.item, qty=1, unit_price=Decimal("100"))
+        r = self.client.post(reverse("order-fire-kot", args=[o.id]), format="json")
+        self.assertEqual(r.status_code, 409)
+
+    def test_ready_board_and_serve_loop(self):
+        """Kitchen marks ready → captain's board lists it (mine=1) → Delivered."""
+        from .models import Kot
+        captain = User.objects.create_user(
+            username="cap2", password="Tk9$mZ2pQw!7", role="Captain",
+            first_name="Vijay", last_name="Menon")
+        cap = APIClient(); cap.force_authenticate(captain)
+        # Captain takes the order — their name is stamped on it.
+        r = cap.post("/api/pos/orders/", {"mode": "dinein", "table": self.table.id}, format="json")
+        oid = r.data["id"]
+        self.assertEqual(r.data["captain"], "Vijay Menon")
+        cap.post(reverse("order-add-item", args=[oid]), {"menu_item": self.item.id, "qty": 2}, format="json")
+        cap.post(reverse("order-fire-kot", args=[oid]), format="json")
+        kot = Kot.objects.get(order_id=oid)
+        # Nothing on the board until the kitchen bumps it ready.
+        self.assertEqual(cap.get("/api/pos/orders/ready/?mine=1").data, [])
+        self.client.post(reverse("kds-bump", args=[kot.id]))  # kitchen: cooking → ready
+        board = cap.get("/api/pos/orders/ready/?mine=1").data
+        self.assertEqual(len(board), 1)
+        self.assertEqual(board[0]["table"], "T1")
+        # Another captain's board stays empty.
+        other = User.objects.create_user(username="cap3", password="Tk9$mZ2pQw!7", role="Captain")
+        oc = APIClient(); oc.force_authenticate(other)
+        self.assertEqual(oc.get("/api/pos/orders/ready/?mine=1").data, [])
+        # Delivered → off the board, order marked served.
+        r = cap.post("/api/pos/orders/serve/", {"kot": kot.id}, format="json")
+        self.assertEqual(r.data["status"], "served")
+        self.assertEqual(cap.get("/api/pos/orders/ready/?mine=1").data, [])
+        Order.objects.get(pk=oid)  # sanity
+        self.assertEqual(Order.objects.get(pk=oid).kitchen_status, "served")
+
+    def test_captain_tender_mapping(self):
+        """Captains settle UPI/Gateway tableside; cash only at the counter (BRD 5.10)."""
+        captain = User.objects.create_user(
+            username="cap1", password="Tk9$mZ2pQw!7", role="Captain")
+        client = APIClient(); client.force_authenticate(captain)
+        o = self._order()
+        r = client.post(reverse("order-settle", args=[o.id]), {"tender": "Cash"}, format="json")
+        self.assertEqual(r.status_code, 403)
+        self.assertIn("cashier counter", r.data["detail"])
+        r = client.post(reverse("order-settle", args=[o.id]), {"tender": "UPI"}, format="json")
+        self.assertEqual(r.status_code, 200)
+
+    def test_kds_shows_only_fired_lines(self):
+        o = Order.objects.create(mode=Order.DINEIN, table=self.table)
+        OrderLine.objects.create(order=o, menu_item=self.item, qty=2, unit_price=Decimal("100"))
+        self.client.post(reverse("order-fire-kot", args=[o.id]), format="json")
+        OrderLine.objects.create(order=o, menu_item=self.item, qty=5,
+                                 unit_price=Decimal("100"))  # added later, not fired
+        r = self.client.get(reverse("kds-list"))
+        tickets = [t for t in r.data if t["type"] == "order"]
+        self.assertEqual(len(tickets), 1)
+        self.assertEqual(len(tickets[0]["items"]), 1)       # un-fired line hidden
+        self.assertEqual(tickets[0]["items"][0]["qty"], 2)  # only the fired round
+
+    def test_each_fire_is_a_separate_kot_round(self):
+        """2 items fired, then 3 more fired → two tickets; serving round 1
+        never hides or re-shows round 2 (FR-POS-004)."""
+        o = Order.objects.create(mode=Order.DINEIN, table=self.table)
+        OrderLine.objects.create(order=o, menu_item=self.item, qty=2, unit_price=Decimal("100"))
+        self.client.post(reverse("order-fire-kot", args=[o.id]), format="json")
+        OrderLine.objects.create(order=o, menu_item=self.item, qty=3, unit_price=Decimal("100"))
+        self.client.post(reverse("order-fire-kot", args=[o.id]), format="json")
+        self.assertEqual(o.kots.count(), 2)
+        k1, k2 = list(o.kots.all())
+        self.assertTrue(k1.number.endswith("/1"))
+        self.assertTrue(k2.number.endswith("/2"))
+        self.assertEqual(k1.lines.get().qty, 2)  # each round carries only its items
+        self.assertEqual(k2.lines.get().qty, 3)
+        # Both rounds are separate tickets on the KDS.
+        r = self.client.get(reverse("kds-list"))
+        self.assertEqual(len([t for t in r.data if t["type"] == "order"]), 2)
+        # Serve round 1 (cooking → ready → served): round 2 stays on the board.
+        self.client.post(reverse("kds-bump", args=[k1.id]))
+        self.client.post(reverse("kds-bump", args=[k1.id]))
+        r = self.client.get(reverse("kds-list"))
+        nums = [t["kot_no"] for t in r.data if t["type"] == "order"]
+        self.assertEqual(nums, [k2.number])
+        o.refresh_from_db()
+        self.assertEqual(o.kitchen_status, "cooking")  # round 2 still cooking
+
+    def test_open_orders_filter_resumes_table(self):
+        o = self._order()
+        r = self.client.get(f"/api/pos/orders/?table={self.table.id}&open=1")
+        self.assertEqual([x["id"] for x in r.data], [o.id])
+        self.client.post(reverse("order-settle", args=[o.id]), {"tender": "Cash"}, format="json")
+        r = self.client.get(f"/api/pos/orders/?table={self.table.id}&open=1")
+        self.assertEqual(len(r.data), 0)

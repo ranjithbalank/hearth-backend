@@ -60,11 +60,12 @@ class OrderLineSerializer(serializers.ModelSerializer):
     gst_rate = serializers.DecimalField(
         source="menu_item.gst_rate", max_digits=4, decimal_places=1, read_only=True
     )
+    kot_no = serializers.CharField(source="kot.number", read_only=True, default=None)
 
     class Meta:
         model = OrderLine
         fields = ["id", "menu_item", "name", "variant", "addons", "qty",
-                  "unit_price", "note", "kot_fired", "gst_rate"]
+                  "unit_price", "note", "kot_fired", "kot_no", "gst_rate"]
 
 
 class OrderSerializer(serializers.ModelSerializer):

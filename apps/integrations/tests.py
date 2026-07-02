@@ -29,7 +29,8 @@ class GatewaySettleTests(TestCase):
         item = MenuItem.objects.create(name="X", category=cat, price=Decimal("400"), gst_rate=Decimal("5"))
         cust = Customer.objects.create(name="C", mobile="9999999999")
         order = Order.objects.create(mode=Order.DINEIN, customer=cust)
-        OrderLine.objects.create(order=order, menu_item=item, qty=1, unit_price=Decimal("400"))
+        OrderLine.objects.create(order=order, menu_item=item, qty=1, unit_price=Decimal("400"),
+                                 kot_fired=True)
         client = APIClient()
         client.force_authenticate(User.objects.create_user(
             username="m", password="Tk9$mZ2pQw!7", role="General Manager"))
