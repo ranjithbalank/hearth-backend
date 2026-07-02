@@ -48,6 +48,10 @@ class Room(models.Model):
     smoking = models.BooleanField(default=False)
     status = models.CharField(max_length=20, choices=STATUS_CHOICES, default=VACANT_CLEAN)
     ooo_reason = models.CharField(max_length=200, blank=True)
+    # Front-desk cleaning request (FR-HSK): flags the room on the housekeeping
+    # board — works for occupied rooms (make-up-room) and vacant/dirty alike.
+    cleaning_requested = models.BooleanField(default=False)
+    cleaning_note = models.CharField(max_length=160, blank=True, default="")
     updated_at = models.DateTimeField(auto_now=True)
 
     class Meta:

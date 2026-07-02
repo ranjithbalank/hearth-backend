@@ -41,6 +41,15 @@ def _build_alerts():
             "title": f"{len(dirty)} room(s) awaiting cleaning",
             "detail": "Vacated — ready to service: " + ", ".join(dirty),
         })
+    # Front-desk cleaning requests (incl. occupied make-up-room) — urgent.
+    requested = list(Room.objects.filter(cleaning_requested=True)
+                     .order_by("number").values_list("number", flat=True))
+    if requested:
+        alerts.append({
+            "severity": "warning", "module": "housekeeping",
+            "title": f"{len(requested)} cleaning request(s) from front desk",
+            "detail": "Guest-requested service: room " + ", ".join(requested),
+        })
     cleaning = Room.objects.filter(status=Room.CLEANING).count()
     if cleaning:
         alerts.append({

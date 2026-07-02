@@ -28,5 +28,5 @@ class RoomSerializer(serializers.ModelSerializer):
         fields = [
             "id", "number", "branch", "room_type", "room_type_name", "room_type_code",
             "floor", "view", "smoking", "status", "status_label", "ooo_reason",
-            "is_sellable", "updated_at",
+            "cleaning_requested", "cleaning_note", "is_sellable", "updated_at",
         ]

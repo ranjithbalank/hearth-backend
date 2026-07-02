@@ -29,18 +29,44 @@ class HousekeepingViewSet(ModuleViewSetMixin, viewsets.ViewSet):
             qs = qs.filter(status=status_)
         return Response(RoomSerializer(qs, many=True).data)
 
-    @action(detail=True, methods=["patch"])
-    def advance(self, request, pk=None):
-        """Move a room one step along Dirty→Cleaning→Clean→Inspected."""
+    @action(detail=True, methods=["post"])
+    def request_cleaning(self, request, pk=None):
+        """Front desk flags a room for servicing (FR-HSK): occupied make-up-room
+        requests and urgent vacant/dirty turnarounds land on the housekeeping
+        board and in housekeeping's notifications."""
         room = Room.objects.filter(pk=pk).first()
         if not room:
             return Response({"detail": "room not found"}, status=404)
+        room.cleaning_requested = True
+        room.cleaning_note = str(request.data.get("note", ""))[:160]
+        room.save(update_fields=["cleaning_requested", "cleaning_note", "updated_at"])
+        log_action(request.user, "hk_request", entity="Room", entity_id=room.id,
+                   after={"room": room.number, "note": room.cleaning_note})
+        return Response(RoomSerializer(room).data)
+
+    @action(detail=True, methods=["patch"])
+    def advance(self, request, pk=None):
+        """Move a room one step along Dirty→Cleaning→Clean→Inspected.
+        An occupied room with a cleaning request is simply marked serviced."""
+        room = Room.objects.filter(pk=pk).first()
+        if not room:
+            return Response({"detail": "room not found"}, status=404)
+        if room.status == Room.OCCUPIED and room.cleaning_requested:
+            room.cleaning_requested = False
+            room.cleaning_note = ""
+            room.save(update_fields=["cleaning_requested", "cleaning_note", "updated_at"])
+            log_action(request.user, "hk_serviced", entity="Room", entity_id=room.id,
+                       after={"room": room.number})
+            return Response(RoomSerializer(room).data)
         nxt = HK_NEXT.get(room.status)
         if not nxt:
             return Response({"detail": f"no transition from {room.status}"}, status=400)
         before = room.status
         room.status = nxt
-        room.save(update_fields=["status", "updated_at"])
+        if room.cleaning_requested:  # picking up the room satisfies the request
+            room.cleaning_requested = False
+            room.cleaning_note = ""
+        room.save(update_fields=["status", "cleaning_requested", "cleaning_note", "updated_at"])
         log_action(request.user, "hk_advance", entity="Room", entity_id=room.id,
                    before={"status": before}, after={"status": nxt})
         return Response(RoomSerializer(room).data)
