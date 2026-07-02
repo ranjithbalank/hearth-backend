@@ -9,7 +9,7 @@ from apps.accounts.models import log_action
 from apps.accounts.permissions import ModuleViewSetMixin
 from apps.tax import service as tax
 
-from .models import Event, FunctionSpace
+from .models import CateringRate, Event, FunctionSpace
 
 
 def _parse_time(v):
@@ -105,6 +105,10 @@ class BanquetViewSet(ModuleViewSetMixin, viewsets.ViewSet):
         elif food_pref == "nonveg":
             food_veg = 0
         food_covers = food_veg + food_nonveg
+        # Rates fall back to the property's standard catering prices when omitted.
+        defaults = CateringRate.get_solo()
+        veg_rate = Decimal(str(request.data.get("veg_rate") or 0)) or defaults.veg_rate
+        nonveg_rate = Decimal(str(request.data.get("nonveg_rate") or 0)) or defaults.nonveg_rate
         e = Event.objects.create(
             space=space, title=request.data.get("title", "Event"),
             host=request.data.get("host", ""), contact=request.data.get("contact", ""),
@@ -115,8 +119,7 @@ class BanquetViewSet(ModuleViewSetMixin, viewsets.ViewSet):
             deposit=Decimal(str(request.data.get("deposit", 0) or 0)),
             food_covers=food_covers, food_pref=food_pref,
             food_veg=food_veg, food_nonveg=food_nonveg,
-            veg_rate=Decimal(str(request.data.get("veg_rate", 0) or 0)),
-            nonveg_rate=Decimal(str(request.data.get("nonveg_rate", 0) or 0)),
+            veg_rate=veg_rate, nonveg_rate=nonveg_rate,
             status=Event.TENTATIVE,
         )
         log_action(request.user, "event_create", entity="Event", entity_id=e.id,
@@ -186,6 +189,18 @@ class BanquetViewSet(ModuleViewSetMixin, viewsets.ViewSet):
                    after={"title": e.title, "date": str(e.event_date)})
         e.refresh_from_db()
         return Response(_event_dict(e))
+
+    @action(detail=False, methods=["get", "post"], url_path="catering_prices")
+    def catering_prices(self, request):
+        """Standard per-plate catering prices (the master new events default to)."""
+        rate = CateringRate.get_solo()
+        if request.method == "POST":
+            rate.veg_rate = Decimal(str(request.data.get("veg_rate") or 0))
+            rate.nonveg_rate = Decimal(str(request.data.get("nonveg_rate") or 0))
+            rate.save()
+            log_action(request.user, "catering_rate_update", entity="CateringRate",
+                       entity_id=rate.id, after={"veg": str(rate.veg_rate), "nonveg": str(rate.nonveg_rate)})
+        return Response({"veg_rate": str(rate.veg_rate), "nonveg_rate": str(rate.nonveg_rate)})
 
     @action(detail=False, methods=["get"])
     def availability(self, request):

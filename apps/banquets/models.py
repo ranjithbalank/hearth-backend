@@ -9,6 +9,17 @@ class FunctionSpace(models.Model):
         return self.name
 
 
+class CateringRate(models.Model):
+    """Singleton: the property's standard per-plate catering prices. New banquet
+    events pre-fill their veg/non-veg rates from here (overridable per event)."""
+    veg_rate = models.DecimalField(max_digits=10, decimal_places=2, default=0)
+    nonveg_rate = models.DecimalField(max_digits=10, decimal_places=2, default=0)
+
+    @classmethod
+    def get_solo(cls):
+        return cls.objects.first() or cls.objects.create()
+
+
 class Event(models.Model):
     """Banquet event / BEO (BRD 5.6)."""
 
@@ -47,6 +58,10 @@ class Event(models.Model):
 
     def __str__(self):
         return f"{self.title} @ {self.space.name} ({self.event_date})"
+
+    @staticmethod
+    def default_rates():
+        return CateringRate.get_solo()
 
     @property
     def catering_amount(self):

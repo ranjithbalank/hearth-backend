@@ -93,6 +93,17 @@ class BanquetTests(TestCase):
         r = self.client.patch(reverse("banquet-detail", args=[e["id"]]), {"covers": 10}, format="json")
         self.assertEqual(r.status_code, 400)
 
+    def test_catering_price_master_defaults_into_new_event(self):
+        self.client.post(reverse("banquet-catering-prices"),
+                         {"veg_rate": 800, "nonveg_rate": 1000}, format="json")
+        got = self.client.get(reverse("banquet-catering-prices")).data
+        self.assertEqual(got["veg_rate"], "800.00")
+        # A new event with catering but no explicit rate inherits the master price.
+        e = self._create(food_pref="both", food_veg=10, food_nonveg=5).data
+        self.assertEqual(e["veg_rate"], "800.00")
+        self.assertEqual(e["nonveg_rate"], "1000.00")
+        self.assertEqual(e["catering_amount"], "13000.00")  # 10×800 + 5×1000
+
     def test_bill_applies_18pct_gst(self):
         e = self._create(package_amount=100000).data
         r = self.client.post(reverse("banquet-bill", args=[e["id"]]))

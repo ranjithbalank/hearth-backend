@@ -26,7 +26,7 @@ ALL_MODULES = [
     "booking", "pos", "inventory", "procurement", "pomanage", "matreq", "recipes",
     "accounting", "tax", "gstmaster", "roommaster", "tablemaster", "menumaster",
     "employees", "roles", "customers", "vendors", "suppliers", "hr", "engineering",
-    "crm", "notifications", "reports", "settings",
+    "crm", "notifications", "reports", "settings", "cateringmaster",
 ]
 
 # "*" == full access. Otherwise an explicit allow-list of module keys.
@@ -40,7 +40,7 @@ ROLE_ALLOW = {
     # and guest records.
     ROLE_FRONT_OFFICE: [
         "dashboard", "frontdesk", "checkin", "checkout", "livegrid", "folio",
-        "reservations", "housekeeping", "banquets", "crm", "customers",
+        "reservations", "housekeeping", "banquets", "cateringmaster", "crm", "customers",
         "reports", "notifications",
     ],
     # F&B Cashier / Captain — POS & KOT only; capped discounts; no rooms access.
@@ -65,6 +65,7 @@ MODULE_ENTITLEMENT = {
     "revenue": "rms", "channel": "hms", "booking": "hms",
     # Banquets
     "banquets": "banquets",
+    "cateringmaster": "banquets",
     # Restaurant (restaurant)
     "pos": "restaurant", "kds": "restaurant", "online": "restaurant", "inventory": "restaurant",
     "procurement": "restaurant", "pomanage": "restaurant", "matreq": "restaurant",
