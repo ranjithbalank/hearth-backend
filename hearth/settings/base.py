@@ -16,6 +16,8 @@ if env_file.exists():
 SECRET_KEY = env("SECRET_KEY", default="dev-insecure-change-me")
 DEBUG = env.bool("DEBUG", default=True)
 ALLOWED_HOSTS = env.list("ALLOWED_HOSTS", default=["127.0.0.1", "localhost"])
+# Public base URL of the frontend — printed on bills (feedback QR/link, order status).
+FRONTEND_BASE_URL = env("FRONTEND_BASE_URL", default="http://localhost:5173")
 
 INSTALLED_APPS = [
     "django.contrib.admin",

@@ -12,12 +12,28 @@ from apps.accounts.permissions import ModuleViewSetMixin, active_entitlements
 from apps.frontoffice import services as fo_services
 from apps.frontoffice.models import Folio, FolioLine, Settlement
 
-from .models import AddOn, Category, Coupon, Kot, MenuItem, Order, OrderLine, Table, Variant
+from .models import (
+    AddOn,
+    Category,
+    Coupon,
+    Feedback,
+    Kot,
+    MenuItem,
+    Order,
+    OrderLine,
+    Table,
+    TableReservation,
+    TillEntry,
+    TillSession,
+    Variant,
+)
 from .serializers import (
     CategorySerializer,
     MenuItemSerializer,
     OrderSerializer,
+    TableReservationSerializer,
     TableSerializer,
+    TillSessionSerializer,
 )
 
 
@@ -76,6 +92,144 @@ class TableViewSet(ModuleViewSetMixin, viewsets.ModelViewSet):
     module = "pos"
     queryset = Table.objects.all()
     serializer_class = TableSerializer
+
+
+class TillViewSet(ModuleViewSetMixin, viewsets.ViewSet):
+    """Cash till sessions: open float → cash in/out → day-end close with variance."""
+
+    module = "pos"
+
+    def list(self, request):
+        return Response(TillSessionSerializer(TillSession.objects.all()[:30], many=True).data)
+
+    @action(detail=False, methods=["get"])
+    def current(self, request):
+        s = TillSession.objects.filter(status=TillSession.OPEN).first()
+        return Response(TillSessionSerializer(s).data if s else None)
+
+    @action(detail=False, methods=["post"])
+    def open(self, request):
+        if TillSession.objects.filter(status=TillSession.OPEN).exists():
+            return Response({"detail": "A till session is already open — close it first"}, status=400)
+        s = TillSession.objects.create(
+            opened_by=request.user.username,
+            opening_float=Decimal(str(request.data.get("opening_float", 0))),
+        )
+        log_action(request.user, "till_open", entity="TillSession", entity_id=s.id,
+                   after={"float": str(s.opening_float)})
+        return Response(TillSessionSerializer(s).data, status=201)
+
+    @action(detail=True, methods=["post"])
+    def entry(self, request, pk=None):
+        """Cash paid in/out mid-shift (petty cash, change top-up, bank drop)."""
+        s = TillSession.objects.filter(pk=pk, status=TillSession.OPEN).first()
+        if not s:
+            return Response({"detail": "open till session not found"}, status=404)
+        kind = request.data.get("kind")
+        amount = Decimal(str(request.data.get("amount", 0)))
+        reason = request.data.get("reason", "").strip()
+        if kind not in ("in", "out") or amount <= 0 or not reason:
+            return Response({"detail": "kind in/out, positive amount and a reason are required"},
+                            status=400)
+        TillEntry.objects.create(session=s, kind=kind, amount=amount, reason=reason,
+                                 created_by=request.user.username)
+        log_action(request.user, f"till_cash_{kind}", entity="TillSession", entity_id=s.id,
+                   after={"amount": str(amount), "reason": reason})
+        return Response(TillSessionSerializer(s).data)
+
+    @action(detail=True, methods=["post"])
+    def close(self, request, pk=None):
+        """Day-end close: count the drawer; variance = counted − expected."""
+        from django.db.models import Sum
+        from django.utils import timezone
+        s = TillSession.objects.filter(pk=pk, status=TillSession.OPEN).first()
+        if not s:
+            return Response({"detail": "open till session not found"}, status=404)
+        counted = Decimal(str(request.data.get("counted_cash", 0)))
+        ins, outs = s.cash_in_out()
+        cash_taken = (Settlement.objects
+                      .filter(tender="Cash", created_at__gte=s.opened_at)
+                      .aggregate(t=Sum("amount"))["t"] or Decimal("0"))
+        s.expected_cash = s.opening_float + ins - outs + cash_taken
+        s.counted_cash = counted
+        s.variance = counted - s.expected_cash
+        s.denominations = request.data.get("denominations", {})
+        s.note = request.data.get("note", "")
+        s.status = TillSession.CLOSED
+        s.closed_at = timezone.now()
+        s.closed_by = request.user.username
+        s.save()
+        log_action(request.user, "till_close", entity="TillSession", entity_id=s.id,
+                   after={"expected": str(s.expected_cash), "counted": str(counted),
+                          "variance": str(s.variance)})
+        return Response(TillSessionSerializer(s).data)
+
+
+class TableReservationViewSet(ModuleViewSetMixin, viewsets.ModelViewSet):
+    """Restaurant table bookings + walk-in waitlist (competitor parity)."""
+
+    module = "pos"
+    queryset = TableReservation.objects.select_related("table").all()
+    serializer_class = TableReservationSerializer
+
+    def get_queryset(self):
+        qs = super().get_queryset()
+        if self.request.query_params.get("open"):
+            qs = qs.filter(status=TableReservation.BOOKED)
+        return qs
+
+    def _hold(self, r):
+        """A booked reservation with a table holds it while it's free."""
+        if (r.kind == "reservation" and r.status == TableReservation.BOOKED
+                and r.table and r.table.status == Table.FREE):
+            r.table.status = Table.RESERVED
+            r.table.save(update_fields=["status"])
+
+    def _release(self, r):
+        if (r.table and r.table.status == Table.RESERVED
+                and not r.table.reservations.filter(status=TableReservation.BOOKED)
+                                            .exclude(pk=r.pk).exists()):
+            r.table.status = Table.FREE
+            r.table.save(update_fields=["status"])
+
+    def perform_create(self, serializer):
+        r = serializer.save()
+        self._hold(r)
+        log_action(self.request.user, "table_reserve", entity="TableReservation",
+                   entity_id=r.id, after={"name": r.name, "kind": r.kind})
+
+    @action(detail=True, methods=["post"])
+    def seat(self, request, pk=None):
+        """Guest arrives: release the hold and hand the table to the POS."""
+        r = self.get_object()
+        if r.status != TableReservation.BOOKED:
+            return Response({"detail": "only a booked entry can be seated"}, status=400)
+        table_id = request.data.get("table")  # waitlist picks a table at seat time
+        if table_id:
+            r.table = Table.objects.filter(pk=table_id).first()
+        if not r.table:
+            return Response({"detail": "choose a table to seat this party"}, status=400)
+        r.status = TableReservation.SEATED
+        r.save(update_fields=["status", "table"])
+        self._release(r)
+        log_action(request.user, "reservation_seated", entity="TableReservation", entity_id=r.id)
+        return Response(TableReservationSerializer(r).data)
+
+    @action(detail=True, methods=["post"])
+    def cancel(self, request, pk=None):
+        r = self.get_object()
+        r.status = TableReservation.CANCELLED
+        r.save(update_fields=["status"])
+        self._release(r)
+        return Response(TableReservationSerializer(r).data)
+
+    @action(detail=True, methods=["post"])
+    def no_show(self, request, pk=None):
+        r = self.get_object()
+        r.status = TableReservation.NO_SHOW
+        r.save(update_fields=["status"])
+        self._release(r)
+        return Response(TableReservationSerializer(r).data)
 
 
 class QrOrderView(APIView):
@@ -224,8 +378,40 @@ class OrderViewSet(ModuleViewSetMixin, viewsets.ModelViewSet):
 
     def perform_create(self, serializer):
         # Stamp who took the order — the captain owns delivery for their tables.
+        # Every order gets a client_uuid so the public status page can reference it.
+        import uuid
         user = self.request.user
-        serializer.save(captain=user.get_full_name() or user.username)
+        serializer.save(captain=user.get_full_name() or user.username,
+                        client_uuid=serializer.validated_data.get("client_uuid") or uuid.uuid4().hex)
+
+    def _assign_token(self, order):
+        """Daily pickup token for takeaway/delivery — shown on the token board."""
+        from django.utils import timezone
+        if order.mode == Order.DINEIN or order.token_no:
+            return
+        today = timezone.localdate()
+        last = (Order.objects.filter(created_at__date=today, token_no__isnull=False)
+                .aggregate(m=models.Max("token_no"))["m"] or 0)
+        order.token_no = last + 1
+
+    @staticmethod
+    def _ensure_feedback(order):
+        """Pending feedback row whose token goes on the bill QR/link."""
+        import uuid
+        Feedback.objects.get_or_create(order=order, defaults={"token": uuid.uuid4().hex})
+
+    @action(detail=False, methods=["get"])
+    def tokens(self, request):
+        """Live pickup-token board: today's takeaway/delivery tickets by status."""
+        from django.utils import timezone
+        qs = (Order.objects.filter(token_no__isnull=False,
+                                   created_at__date=timezone.localdate())
+              .filter(kitchen_status__in=["cooking", "ready"])
+              .order_by("token_no"))
+        return Response([{
+            "token_no": o.token_no, "mode": o.mode, "kitchen_status": o.kitchen_status,
+            "brand": o.brand, "source_platform": o.source_platform,
+        } for o in qs])
 
     @action(detail=False, methods=["get"])
     def ready(self, request):
@@ -386,6 +572,8 @@ class OrderViewSet(ModuleViewSetMixin, viewsets.ModelViewSet):
                 brand=request.data.get("brand", ""),
                 kot_no=f"AGG-{ext[:6].upper()}", status=Order.KOT_FIRED, kitchen_status="cooking",
             )
+            self._assign_token(order)
+            order.save(update_fields=["token_no"])
             kot = Kot.objects.create(order=order, number=f"AGG-{ext[:6].upper()}")
             fired = []
             for ln in request.data.get("items", []):
@@ -663,7 +851,8 @@ class OrderViewSet(ModuleViewSetMixin, viewsets.ModelViewSet):
         order.kot_no = kot.number  # latest round shown on the order
         order.status = Order.KOT_FIRED
         order.kitchen_status = "cooking"  # appears on the KDS
-        order.save(update_fields=["kot_no", "status", "kitchen_status"])
+        self._assign_token(order)  # pickup token for takeaway/delivery
+        order.save(update_fields=["kot_no", "status", "kitchen_status", "token_no"])
         if order.table:
             order.table.status = Table.RUNNING
             order.table.save(update_fields=["status"])
@@ -694,6 +883,7 @@ class OrderViewSet(ModuleViewSetMixin, viewsets.ModelViewSet):
         if order.table:
             order.table.status = Table.PRINTED
             order.table.save(update_fields=["status"])
+        self._ensure_feedback(order)  # QR/link on the printed bill
         log_action(request.user, "bill_print", entity="Order", entity_id=order.id,
                    after={"total": str(order.totals()["total"])})
         return Response(OrderSerializer(order).data)
@@ -758,6 +948,7 @@ class OrderViewSet(ModuleViewSetMixin, viewsets.ModelViewSet):
             reference = result["ref"]
         Settlement.objects.create(tender=tender, amount=t["total"], reference=reference)
         self._finalize_promotions(order, t["total"])
+        self._ensure_feedback(order)
         order.status = Order.SETTLED
         order.save(update_fields=["status"])
         # Free the table only if no other unpaid order (e.g. a split bill) sits on it.
@@ -814,3 +1005,102 @@ class OrderViewSet(ModuleViewSetMixin, viewsets.ModelViewSet):
         log_action(request.user, "post_to_room", entity="Order", entity_id=order.id,
                    after={"folio": folio.id})
         return Response(OrderSerializer(order).data)
+
+
+class FeedbackPublicView(APIView):
+    """Guest-facing feedback form endpoint — the bill's QR/link lands here.
+
+    Token-credentialed like QR ordering; no auth, throttled.
+    """
+
+    permission_classes = [AllowAny]
+    throttle_scope = "sensitive"
+
+    def get(self, request):
+        fb = (Feedback.objects.select_related("order__table")
+              .filter(token=request.query_params.get("t", "")).first())
+        if not fb:
+            return Response({"detail": "invalid feedback link"}, status=404)
+        from apps.accounts.views import get_property
+        o = fb.order
+        return Response({
+            "property": get_property().name,
+            "submitted": fb.submitted_at is not None,
+            "order": o.id if o else None,
+            "where": (f"Table {o.table.name}" if o and o.table
+                      else o.get_mode_display() if o else ""),
+            "total": str(o.totals()["total"]) if o else None,
+        })
+
+    def post(self, request):
+        from django.utils import timezone
+        fb = Feedback.objects.filter(token=request.data.get("t", "")).first()
+        if not fb:
+            return Response({"detail": "invalid feedback link"}, status=404)
+        if fb.submitted_at:
+            return Response({"detail": "feedback already submitted — thank you!"}, status=400)
+        try:
+            rating = int(request.data.get("rating", 0))
+            nps = request.data.get("nps")
+            nps = int(nps) if nps is not None and str(nps) != "" else None
+        except (TypeError, ValueError):
+            return Response({"detail": "invalid rating"}, status=400)
+        if not 1 <= rating <= 5 or (nps is not None and not 0 <= nps <= 10):
+            return Response({"detail": "rating must be 1–5 (NPS 0–10)"}, status=400)
+        fb.rating = rating
+        fb.nps = nps
+        fb.comment = str(request.data.get("comment", ""))[:400]
+        fb.submitted_at = timezone.now()
+        fb.save(update_fields=["rating", "nps", "comment", "submitted_at"])
+        return Response({"detail": "thanks"}, status=201)
+
+
+class OrderStatusPublicView(APIView):
+    """Public 'where's my order' page for takeaway/delivery (token board companion)."""
+
+    permission_classes = [AllowAny]
+    throttle_scope = "sensitive"
+
+    def get(self, request):
+        ref = request.query_params.get("ref", "")
+        if not ref:
+            return Response({"detail": "ref required"}, status=400)
+        o = Order.objects.filter(client_uuid=ref).select_related("table").first()
+        if not o:
+            return Response({"detail": "order not found"}, status=404)
+        return Response({
+            "token_no": o.token_no, "mode": o.mode,
+            "kitchen_status": o.kitchen_status or "received",
+            "online_status": o.online_status,
+            "status": o.status,
+            "table": o.table.name if o.table else None,
+        })
+
+
+class FeedbackViewSet(ModuleViewSetMixin, viewsets.ViewSet):
+    """Feedback dashboard for the CRM screen: average rating, NPS, recent comments."""
+
+    module = "crm"
+
+    def list(self, request):
+        subs = Feedback.objects.filter(submitted_at__isnull=False)
+        n = subs.count()
+        avg = (sum(f.rating for f in subs if f.rating) / n) if n else 0
+        nps_answers = [f.nps for f in subs if f.nps is not None]
+        nps = 0
+        if nps_answers:
+            promoters = sum(1 for x in nps_answers if x >= 9)
+            detractors = sum(1 for x in nps_answers if x <= 6)
+            nps = round((promoters - detractors) / len(nps_answers) * 100)
+        recent = subs.select_related("order__table").order_by("-submitted_at")[:20]
+        return Response({
+            "count": n, "avg_rating": round(avg, 2), "nps": nps,
+            "pending": Feedback.objects.filter(submitted_at__isnull=True).count(),
+            "recent": [{
+                "id": f.id, "rating": f.rating, "nps": f.nps, "comment": f.comment,
+                "order": f.order_id,
+                "where": (f"Table {f.order.table.name}" if f.order and f.order.table
+                          else f.order.get_mode_display() if f.order else ""),
+                "submitted_at": f.submitted_at,
+            } for f in recent],
+        })

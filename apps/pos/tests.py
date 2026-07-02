@@ -414,6 +414,127 @@ class KotBillFlowTests(TestCase):
         o.refresh_from_db()
         self.assertEqual(o.kitchen_status, "cooking")  # round 2 still cooking
 
+    def test_till_session_lifecycle_and_variance(self):
+        """Open float → cash out → cash settle → close: variance surfaces shortfalls."""
+        from .models import TillSession
+        r = self.client.post(reverse("till-open"), {"opening_float": "2000"}, format="json")
+        self.assertEqual(r.status_code, 201)
+        till = r.data["id"]
+        # Second open blocked while one is running.
+        self.assertEqual(self.client.post(reverse("till-open"), {}, format="json").status_code, 400)
+        # Petty cash out 300.
+        r = self.client.post(reverse("till-entry", args=[till]),
+                             {"kind": "out", "amount": "300", "reason": "vegetables"}, format="json")
+        self.assertEqual(r.status_code, 200)
+        # A cash settlement of 210 lands in the drawer (2× Dosa + 5% GST).
+        o = self._order()
+        self.client.post(reverse("order-settle", args=[o.id]), {"tender": "Cash"}, format="json")
+        # Close counting 1800 — expected 2000 − 300 + 210 = 1910 → variance −110.
+        r = self.client.post(reverse("till-close", args=[till]),
+                             {"counted_cash": "1800", "denominations": {"500": 3, "100": 3}},
+                             format="json")
+        self.assertEqual(r.status_code, 200)
+        self.assertEqual(r.data["expected_cash"], "1910.00")
+        self.assertEqual(r.data["variance"], "-110.00")
+        self.assertEqual(TillSession.objects.get(pk=till).status, "closed")
+        # Tender totals include the cash settlement.
+        cash_row = next(t for t in r.data["tender_totals"] if t["tender"] == "Cash")
+        self.assertEqual(cash_row["amount"], "210.00")
+
+    def test_feedback_flow_public_submit_and_summary(self):
+        """Bill creates a pending feedback token; guest submits; CRM summary rolls up."""
+        from .models import Feedback
+        o = self._order()
+        self.client.post(reverse("order-settle", args=[o.id]), {"tender": "Cash"}, format="json")
+        fb = Feedback.objects.get(order=o)
+        anon = APIClient()
+        # Guest opens the link…
+        r = anon.get(reverse("feedback-public") + f"?t={fb.token}")
+        self.assertEqual(r.status_code, 200)
+        self.assertFalse(r.data["submitted"])
+        # …and submits a rating.
+        r = anon.post(reverse("feedback-public"),
+                      {"t": fb.token, "rating": 4, "nps": 9, "comment": "great dosa"}, format="json")
+        self.assertEqual(r.status_code, 201)
+        # Double submission blocked.
+        r = anon.post(reverse("feedback-public"), {"t": fb.token, "rating": 5}, format="json")
+        self.assertEqual(r.status_code, 400)
+        # Bad token 404s.
+        self.assertEqual(anon.get(reverse("feedback-public") + "?t=nope").status_code, 404)
+        # CRM summary rolls up.
+        r = self.client.get(reverse("feedback-list"))
+        self.assertEqual(r.data["count"], 1)
+        self.assertEqual(r.data["avg_rating"], 4)
+        self.assertEqual(r.data["nps"], 100)  # single promoter
+        self.assertEqual(r.data["recent"][0]["comment"], "great dosa")
+
+    def test_takeaway_token_and_public_status(self):
+        """Takeaway orders get a daily pickup token; guest tracks via public status."""
+        r = self.client.post("/api/pos/orders/", {"mode": "takeaway"}, format="json")
+        oid, ref = r.data["id"], r.data["client_uuid"]
+        self.assertTrue(ref)
+        self.client.post(reverse("order-add-item", args=[oid]),
+                         {"menu_item": self.item.id, "qty": 1}, format="json")
+        self.client.post(reverse("order-fire-kot", args=[oid]), format="json")
+        o = Order.objects.get(pk=oid)
+        self.assertEqual(o.token_no, 1)  # first token of the day
+        # Token board lists it as preparing.
+        r = self.client.get(reverse("order-tokens"))
+        self.assertEqual(r.data[0]["token_no"], 1)
+        self.assertEqual(r.data[0]["kitchen_status"], "cooking")
+        # Public status page by ref (no auth).
+        anon = APIClient()
+        r = anon.get(reverse("order-status-public") + f"?ref={ref}")
+        self.assertEqual(r.status_code, 200)
+        self.assertEqual(r.data["token_no"], 1)
+        # Dine-in orders get no token.
+        r2 = self.client.post("/api/pos/orders/", {"mode": "dinein", "table": self.table.id},
+                              format="json")
+        self.client.post(reverse("order-add-item", args=[r2.data["id"]]),
+                         {"menu_item": self.item.id, "qty": 1}, format="json")
+        self.client.post(reverse("order-fire-kot", args=[r2.data["id"]]), format="json")
+        self.assertIsNone(Order.objects.get(pk=r2.data["id"]).token_no)
+
+    def test_table_reservation_holds_and_seats(self):
+        """Booked reservation holds the table (RESERVED); seating releases it."""
+        r = self.client.post(reverse("tablereservation-list"),
+                             {"kind": "reservation", "table": self.table.id, "name": "Ramesh",
+                              "party_size": 4, "reserved_for": "2026-07-02T19:30:00Z"},
+                             format="json")
+        self.assertEqual(r.status_code, 201)
+        rid = r.data["id"]
+        self.table.refresh_from_db()
+        self.assertEqual(self.table.status, "reserved")
+        # Seat the party → hold released, table back to free for the POS to open.
+        r = self.client.post(reverse("tablereservation-seat", args=[rid]), format="json")
+        self.assertEqual(r.data["status"], "seated")
+        self.table.refresh_from_db()
+        self.assertEqual(self.table.status, "free")
+
+    def test_waitlist_seats_with_table_choice(self):
+        r = self.client.post(reverse("tablereservation-list"),
+                             {"kind": "waitlist", "name": "Walk-in", "party_size": 2},
+                             format="json")
+        rid = r.data["id"]
+        self.table.refresh_from_db()
+        self.assertEqual(self.table.status, "free")  # waitlist holds nothing
+        # Seating without a table is rejected; with one, it works.
+        self.assertEqual(self.client.post(reverse("tablereservation-seat", args=[rid]),
+                                          format="json").status_code, 400)
+        r = self.client.post(reverse("tablereservation-seat", args=[rid]),
+                             {"table": self.table.id}, format="json")
+        self.assertEqual(r.data["status"], "seated")
+        self.assertEqual(r.data["table_name"], "T1")
+
+    def test_reservation_cancel_releases_hold(self):
+        r = self.client.post(reverse("tablereservation-list"),
+                             {"kind": "reservation", "table": self.table.id, "name": "NoCome",
+                              "party_size": 2, "reserved_for": "2026-07-02T20:00:00Z"},
+                             format="json")
+        self.client.post(reverse("tablereservation-cancel", args=[r.data["id"]]), format="json")
+        self.table.refresh_from_db()
+        self.assertEqual(self.table.status, "free")
+
     def test_open_orders_filter_resumes_table(self):
         o = self._order()
         r = self.client.get(f"/api/pos/orders/?table={self.table.id}&open=1")

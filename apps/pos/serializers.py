@@ -1,6 +1,18 @@
 from rest_framework import serializers
 
-from .models import AddOn, AddOnGroup, Category, MenuItem, Order, OrderLine, Table, Variant
+from .models import (
+    AddOn,
+    AddOnGroup,
+    Category,
+    MenuItem,
+    Order,
+    OrderLine,
+    Table,
+    TableReservation,
+    TillEntry,
+    TillSession,
+    Variant,
+)
 
 
 class TableSerializer(serializers.ModelSerializer):
@@ -83,9 +95,50 @@ class OrderSerializer(serializers.ModelSerializer):
             "status", "status_label", "folio", "kot_no", "lines", "totals", "created_at",
             "discount_kind", "discount_value", "discount_reason", "coupon_code",
             "loyalty_redeemed", "source_platform", "external_ref", "online_status", "prepaid",
-            "brand",
+            "brand", "token_no", "client_uuid",
         ]
 
     def get_totals(self, obj):
         t = obj.totals()
         return {k: str(v) for k, v in t.items()}
+
+
+class TillEntrySerializer(serializers.ModelSerializer):
+    class Meta:
+        model = TillEntry
+        fields = ["id", "kind", "amount", "reason", "created_by", "created_at"]
+
+
+class TillSessionSerializer(serializers.ModelSerializer):
+    entries = TillEntrySerializer(many=True, read_only=True)
+    cash_in = serializers.SerializerMethodField()
+    cash_out = serializers.SerializerMethodField()
+    tender_totals = serializers.SerializerMethodField()
+
+    class Meta:
+        model = TillSession
+        fields = ["id", "status", "opened_by", "opening_float", "opened_at",
+                  "closed_at", "closed_by", "counted_cash", "expected_cash",
+                  "variance", "denominations", "note", "entries",
+                  "cash_in", "cash_out", "tender_totals"]
+
+    def get_cash_in(self, obj):
+        return str(obj.cash_in_out()[0])
+
+    def get_cash_out(self, obj):
+        return str(obj.cash_in_out()[1])
+
+    def get_tender_totals(self, obj):
+        from decimal import Decimal
+        return [{**t, "amount": str(Decimal(t["amount"]).quantize(Decimal("0.01")))}
+                for t in obj.tender_totals()]
+
+
+class TableReservationSerializer(serializers.ModelSerializer):
+    table_name = serializers.CharField(source="table.name", read_only=True, default=None)
+
+    class Meta:
+        model = TableReservation
+        fields = ["id", "kind", "table", "table_name", "name", "mobile",
+                  "party_size", "reserved_for", "status", "note", "created_at"]
+        read_only_fields = ["status"]

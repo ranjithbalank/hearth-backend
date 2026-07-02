@@ -216,6 +216,8 @@ class Order(models.Model):
     # Offline resilience (BRD FR-POS-010 / NFR-002): client-generated id for dedupe.
     client_uuid = models.CharField(max_length=64, blank=True, default="", db_index=True)
     offline_origin = models.BooleanField(default=False)
+    # Pickup token for takeaway/delivery — daily sequence shown on the token board.
+    token_no = models.PositiveIntegerField(null=True, blank=True)
     created_at = models.DateTimeField(auto_now_add=True)
 
     class Meta:
@@ -260,6 +262,71 @@ class Order(models.Model):
         }
 
 
+class TillSession(models.Model):
+    """Cash till / shift session (competitor parity: day-end close).
+
+    Opens with a float, tracks cash in/out, closes with a counted amount —
+    expected cash is float + ins − outs + cash settlements taken during the
+    session window, so the variance surfaces pilferage or mistakes.
+    """
+
+    OPEN = "open"
+    CLOSED = "closed"
+
+    opened_by = models.CharField(max_length=80, blank=True)
+    opening_float = models.DecimalField(max_digits=12, decimal_places=2, default=0)
+    status = models.CharField(max_length=8, default=OPEN)
+    opened_at = models.DateTimeField(auto_now_add=True)
+    closed_at = models.DateTimeField(null=True, blank=True)
+    closed_by = models.CharField(max_length=80, blank=True)
+    counted_cash = models.DecimalField(max_digits=12, decimal_places=2, null=True, blank=True)
+    expected_cash = models.DecimalField(max_digits=12, decimal_places=2, null=True, blank=True)
+    variance = models.DecimalField(max_digits=12, decimal_places=2, null=True, blank=True)
+    denominations = models.JSONField(default=dict, blank=True,
+                                     help_text='{"500": 4, "100": 10, ...} counted notes')
+    note = models.CharField(max_length=200, blank=True)
+
+    class Meta:
+        ordering = ["-opened_at"]
+
+    def __str__(self):
+        return f"Till {self.id} ({self.status})"
+
+    def cash_in_out(self):
+        from django.db.models import Sum
+        ins = self.entries.filter(kind="in").aggregate(s=Sum("amount"))["s"] or Decimal("0")
+        outs = self.entries.filter(kind="out").aggregate(s=Sum("amount"))["s"] or Decimal("0")
+        return ins, outs
+
+    def tender_totals(self):
+        """Settlements taken during this session's window, grouped by tender."""
+        from django.db.models import Count, Sum
+
+        from apps.frontoffice.models import Settlement
+        qs = Settlement.objects.filter(created_at__gte=self.opened_at)
+        if self.closed_at:
+            qs = qs.filter(created_at__lte=self.closed_at)
+        return list(qs.values("tender").annotate(amount=Sum("amount"), count=Count("id")))
+
+
+class TillEntry(models.Model):
+    """Cash paid in/out of the till mid-shift (petty cash, change, bank drop)."""
+
+    session = models.ForeignKey(TillSession, on_delete=models.CASCADE, related_name="entries")
+    kind = models.CharField(max_length=4, help_text="in | out")
+    amount = models.DecimalField(max_digits=12, decimal_places=2)
+    reason = models.CharField(max_length=160)
+    created_by = models.CharField(max_length=80, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ["created_at"]
+        verbose_name_plural = "till entries"
+
+    def __str__(self):
+        return f"{self.kind} {self.amount} ({self.reason})"
+
+
 class Kot(models.Model):
     """One fired kitchen ticket. Each fire on an order is its own round —
     round 2 must reach the kitchen as a fresh ticket with only the new items,
@@ -279,6 +346,60 @@ class Kot(models.Model):
 
     def __str__(self):
         return self.number
+
+
+class Feedback(models.Model):
+    """Guest feedback captured via the QR/link printed on the bill.
+
+    A pending row (token only) is created when the bill closes; the guest's
+    submission fills rating/NPS/comment. Public endpoint, token-credentialed.
+    """
+
+    order = models.OneToOneField(Order, on_delete=models.CASCADE,
+                                 related_name="feedback", null=True, blank=True)
+    token = models.CharField(max_length=40, unique=True, db_index=True)
+    rating = models.PositiveSmallIntegerField(null=True, blank=True, help_text="1–5 stars")
+    nps = models.PositiveSmallIntegerField(null=True, blank=True, help_text="0–10 recommend score")
+    comment = models.CharField(max_length=400, blank=True)
+    submitted_at = models.DateTimeField(null=True, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ["-created_at"]
+
+    def __str__(self):
+        return f"Feedback {self.token[:8]} ({self.rating or '—'}★)"
+
+
+class TableReservation(models.Model):
+    """Restaurant table booking / walk-in waitlist (competitor parity).
+
+    kind 'reservation' has a time; 'waitlist' is the walk-in queue. A booked
+    reservation with a table holds it (Table.RESERVED) near its time.
+    """
+
+    BOOKED = "booked"
+    SEATED = "seated"
+    CANCELLED = "cancelled"
+    NO_SHOW = "no_show"
+
+    kind = models.CharField(max_length=12, default="reservation",
+                            help_text="reservation | waitlist")
+    table = models.ForeignKey(Table, on_delete=models.SET_NULL, null=True, blank=True,
+                              related_name="reservations")
+    name = models.CharField(max_length=80)
+    mobile = models.CharField(max_length=15, blank=True)
+    party_size = models.PositiveSmallIntegerField(default=2)
+    reserved_for = models.DateTimeField(null=True, blank=True, help_text="null for waitlist")
+    status = models.CharField(max_length=12, default=BOOKED)
+    note = models.CharField(max_length=160, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ["reserved_for", "created_at"]
+
+    def __str__(self):
+        return f"{self.name} ({self.party_size}) {self.kind}"
 
 
 class Coupon(models.Model):

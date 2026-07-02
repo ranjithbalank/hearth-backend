@@ -63,7 +63,19 @@ def build_bill_pdf(order, property_name):
         ("LINEABOVE", (0, len(tot) - 1), (-1, len(tot) - 1), 1, PINE),
         ("FONTNAME", (0, len(tot) - 1), (-1, len(tot) - 1), "Helvetica-Bold"),
     ]))
-    story += [tt, Spacer(1, 8), Paragraph(f"Thank you · {property_name}", small)]
+    story += [tt, Spacer(1, 8)]
+    # Pickup token for takeaway/delivery (token board).
+    if order.token_no:
+        story.append(Paragraph(f"Pickup token: <b>{order.token_no}</b>", center))
+        story.append(Spacer(1, 4))
+    # Feedback QR/link (guest rates via the public form).
+    fb = getattr(order, "feedback", None)
+    if fb:
+        from django.conf import settings
+        base = getattr(settings, "FRONTEND_BASE_URL", "http://localhost:5173")
+        story.append(Paragraph(f"Rate your experience: {base}/feedback?t={fb.token}", small))
+        story.append(Spacer(1, 4))
+    story.append(Paragraph(f"Thank you · {property_name}", small))
     doc.build(story)
     buf.seek(0)
     return buf
