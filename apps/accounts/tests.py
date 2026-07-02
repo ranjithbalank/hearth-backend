@@ -4,6 +4,10 @@ from .constants import (
     ROLE_CASHIER,
     ROLE_FRONT_OFFICE,
     ROLE_MD,
+    ROLE_NIGHT_AUDIT,
+    ROLE_REVENUE,
+    ROLE_SALES_BANQUETS,
+    ROLE_STORE,
     edition_entitlements,
     entitlement_allows,
     role_can_access,
@@ -22,6 +26,25 @@ class RbacTests(TestCase):
     def test_front_office_no_pos(self):
         self.assertTrue(role_can_access(ROLE_FRONT_OFFICE, "frontdesk"))
         self.assertFalse(role_can_access(ROLE_FRONT_OFFICE, "pos"))
+
+    def test_front_office_no_banquets_or_channel(self):
+        # Segregation of duties (BRD §3.1): those belong to Sales/Banquets & Revenue.
+        self.assertFalse(role_can_access(ROLE_FRONT_OFFICE, "banquets"))
+        self.assertFalse(role_can_access(ROLE_FRONT_OFFICE, "channel"))
+
+    def test_cashier_no_stores(self):
+        self.assertTrue(role_can_access(ROLE_CASHIER, "pos"))
+        self.assertFalse(role_can_access(ROLE_CASHIER, "inventory"))
+
+    def test_specialist_roles_scoped(self):
+        self.assertTrue(role_can_access(ROLE_REVENUE, "revenue"))
+        self.assertFalse(role_can_access(ROLE_REVENUE, "pos"))
+        self.assertTrue(role_can_access(ROLE_SALES_BANQUETS, "banquets"))
+        self.assertFalse(role_can_access(ROLE_SALES_BANQUETS, "folio"))
+        self.assertTrue(role_can_access(ROLE_STORE, "procurement"))
+        self.assertFalse(role_can_access(ROLE_STORE, "folio"))
+        self.assertTrue(role_can_access(ROLE_NIGHT_AUDIT, "accounting"))
+        self.assertFalse(role_can_access(ROLE_NIGHT_AUDIT, "pos"))
 
 
 class EntitlementTests(TestCase):

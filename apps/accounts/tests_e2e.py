@@ -38,7 +38,8 @@ class GuestJourneyE2E(TestCase):
         # 2. Check in -> folio + room occupied
         folio = c.post(reverse("checkin-list"),
                        {"reservation": resv["id"], "room": self.room.id,
-                        "id_type": "Passport", "id_number": "P1", "guest_type": "individual"}).data
+                        "id_type": "Passport", "id_number": "P1", "guest_type": "individual",
+                        "mobile": "+91 9000000000"}).data
         self.room.refresh_from_db()
         self.assertEqual(self.room.status, Room.OCCUPIED)
         # 3. POS order -> fire KOT -> post to room

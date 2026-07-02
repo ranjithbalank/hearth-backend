@@ -17,7 +17,8 @@ def _event_dict(e):
         "event_type": e.event_type, "space": e.space.name, "space_id": e.space_id,
         "event_date": e.event_date, "covers": e.covers, "deposit": str(e.deposit),
         "package_amount": str(e.package_amount), "status": e.status, "billed": e.billed,
-        "food_covers": e.food_covers, "food_pref": e.food_pref, "beo_status": e.beo_status,
+        "food_covers": e.food_covers, "food_pref": e.food_pref,
+        "food_veg": e.food_veg, "food_nonveg": e.food_nonveg, "beo_status": e.beo_status,
     }
 
 
@@ -47,14 +48,23 @@ class BanquetViewSet(ModuleViewSetMixin, viewsets.ViewSet):
         if covers > space.capacity:
             return Response({"detail": f"{space.name} seats {space.capacity}; {covers} requested"},
                             status=400)
+        # Catering: for "both" we take a veg/nonveg split; otherwise a single count.
+        food_pref = request.data.get("food_pref", "")
+        food_veg = int(request.data.get("food_veg", 0) or 0)
+        food_nonveg = int(request.data.get("food_nonveg", 0) or 0)
+        if food_pref == "veg":
+            food_nonveg = 0
+        elif food_pref == "nonveg":
+            food_veg = 0
+        food_covers = food_veg + food_nonveg
         e = Event.objects.create(
             space=space, title=request.data.get("title", "Event"),
             host=request.data.get("host", ""), contact=request.data.get("contact", ""),
             event_type=request.data.get("event_type", ""), event_date=event_date,
             covers=covers, package_amount=Decimal(str(request.data.get("package_amount", 0) or 0)),
             deposit=Decimal(str(request.data.get("deposit", 0) or 0)),
-            food_covers=int(request.data.get("food_covers", 0) or 0),
-            food_pref=request.data.get("food_pref", ""),
+            food_covers=food_covers, food_pref=food_pref,
+            food_veg=food_veg, food_nonveg=food_nonveg,
             status=Event.TENTATIVE,
         )
         log_action(request.user, "event_create", entity="Event", entity_id=e.id,

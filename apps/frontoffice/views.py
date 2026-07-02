@@ -106,6 +106,10 @@ class CheckInView(ModuleViewSetMixin, viewsets.ViewSet):
         id_number = (request.data.get("id_number") or "").strip()
         if not id_type or not id_number:
             return Response({"detail": "ID proof (type and number) is required to check in."}, status=400)
+        # A contact mobile is mandatory too (guest comms + folio record).
+        mobile_digits = "".join(ch for ch in (request.data.get("mobile") or "") if ch.isdigit())
+        if len(mobile_digits) < 7:
+            return Response({"detail": "A valid mobile number is required to check in."}, status=400)
         folio = services.check_in(resv, room, user=request.user)
         # Persist the guest's contact to the customer store for later enquiry.
         mobile = (request.data.get("mobile") or "").strip()

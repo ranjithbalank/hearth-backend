@@ -27,8 +27,11 @@ class Event(models.Model):
     package_amount = models.DecimalField(max_digits=12, decimal_places=2, default=0)
     deposit = models.DecimalField(max_digits=12, decimal_places=2, default=0)
     # Optional catering (only when the restaurant/F&B module is enabled).
-    food_covers = models.PositiveSmallIntegerField(default=0, help_text="approx. plates to cater")
+    food_covers = models.PositiveSmallIntegerField(default=0, help_text="approx. plates to cater (veg + nonveg)")
     food_pref = models.CharField(max_length=10, blank=True, help_text="veg | nonveg | both")
+    # When food_pref == "both", the approximate split by preference.
+    food_veg = models.PositiveSmallIntegerField(default=0, help_text="approx. veg plates")
+    food_nonveg = models.PositiveSmallIntegerField(default=0, help_text="approx. non-veg plates")
     # BEO prep status shown on the kitchen display (FR-BQT-004): "" | pending | ready
     beo_status = models.CharField(max_length=10, blank=True, default="")
     status = models.CharField(max_length=12, choices=STATUS_CHOICES, default=TENTATIVE)

@@ -38,7 +38,8 @@ class BanquetTests(TestCase):
         self.assertEqual(r.status_code, 400)
 
     def test_confirm_fires_beo_when_catering(self):
-        e = self._create(food_covers=220, food_pref="both").data
+        e = self._create(food_pref="both", food_veg=120, food_nonveg=100).data
+        self.assertEqual(e["food_covers"], 220)  # derived from the veg/nonveg split
         self.client.post(reverse("banquet-confirm", args=[e["id"]]))
         ev = Event.objects.get(pk=e["id"])
         self.assertEqual(ev.beo_status, "pending")
