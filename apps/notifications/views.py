@@ -31,6 +31,34 @@ def _build_alerts():
             "detail": r.ooo_reason or "Maintenance required",
         })
 
+    # Housekeeping: rooms a guest has just vacated need servicing. This fires
+    # automatically on check-out (which sets the room to vacant/dirty).
+    dirty = list(Room.objects.filter(status=Room.VACANT_DIRTY)
+                 .order_by("number").values_list("number", flat=True))
+    if dirty:
+        alerts.append({
+            "severity": "warning", "module": "housekeeping",
+            "title": f"{len(dirty)} room(s) awaiting cleaning",
+            "detail": "Vacated — ready to service: " + ", ".join(dirty),
+        })
+    cleaning = Room.objects.filter(status=Room.CLEANING).count()
+    if cleaning:
+        alerts.append({
+            "severity": "info", "module": "housekeeping",
+            "title": f"{cleaning} room(s) being cleaned",
+            "detail": "Cleaning in progress — inspect when done",
+        })
+
+    # Front desk: rooms cleaned & inspected are ready to assign to arrivals.
+    ready = list(Room.objects.filter(status__in=list(Room.SELLABLE))
+                 .order_by("number").values_list("number", flat=True))
+    if ready:
+        alerts.append({
+            "severity": "info", "module": "livegrid",
+            "title": f"{len(ready)} room(s) ready to sell",
+            "detail": "Cleaned & inspected: " + ", ".join(ready),
+        })
+
     from apps.housekeeping.models import WorkOrder
     open_wo = WorkOrder.objects.exclude(status=WorkOrder.DONE).count()
     if open_wo:
