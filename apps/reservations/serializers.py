@@ -16,5 +16,5 @@ class ReservationSerializer(serializers.ModelSerializer):
             "id", "guest", "guest_name", "guest_mobile", "room_type", "room_type_code", "rate_plan",
             "room", "room_number", "checkin_date", "checkout_date", "nights",
             "source", "source_label", "status", "status_label", "rate", "deposit",
-            "prepaid", "notes", "created_at",
+            "prepaid", "notes", "channel_name", "ota_ref", "created_at",
         ]

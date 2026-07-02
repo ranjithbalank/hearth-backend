@@ -49,6 +49,10 @@ class Reservation(models.Model):
     deposit = models.DecimalField(max_digits=10, decimal_places=2, default=0)
     prepaid = models.BooleanField(default=False)
     notes = models.CharField(max_length=255, blank=True)
+    # Channel/OTA of origin (e.g. "Booking.com") + its external ref, for inbound
+    # bookings. ota_ref makes re-delivered webhooks idempotent.
+    channel_name = models.CharField(max_length=80, blank=True)
+    ota_ref = models.CharField(max_length=80, blank=True, db_index=True)
     created_at = models.DateTimeField(auto_now_add=True)
 
     class Meta:

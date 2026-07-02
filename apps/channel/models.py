@@ -36,7 +36,9 @@ class ChannelPush(models.Model):
     KIND_MANUAL = "manual"
     KIND_RMS = "rms"
     KIND_PARITY = "parity"
-    KIND_CHOICES = [(KIND_MANUAL, "Manual"), (KIND_RMS, "RMS"), (KIND_PARITY, "Parity fix")]
+    KIND_BOOKING = "booking"
+    KIND_CHOICES = [(KIND_MANUAL, "Manual"), (KIND_RMS, "RMS"), (KIND_PARITY, "Parity fix"),
+                    (KIND_BOOKING, "Inbound booking")]
 
     kind = models.CharField(max_length=12, choices=KIND_CHOICES, default=KIND_MANUAL)
     detail = models.CharField(max_length=200)

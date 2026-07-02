@@ -52,6 +52,22 @@ class ChannelViewSet(ModuleViewSetMixin, viewsets.ViewSet):
         fixed = services.fix_parity()
         return Response({"fixed": fixed})
 
+    @action(detail=False, methods=["post"])
+    def ingest(self, request):
+        """Inbound webhook seam: accept an OTA (e.g. Booking.com) reservation and
+        create it in the PMS. A real channel-manager connector would post here."""
+        from apps.accounts.models import log_action
+        from apps.reservations.serializers import ReservationSerializer
+        try:
+            resv, created = services.ingest_booking(request.data, user=request.user)
+        except services.IngestError as e:
+            return Response({"detail": str(e)}, status=400)
+        if created:
+            log_action(request.user, "ota_ingest", entity="Reservation", entity_id=resv.id,
+                       after={"channel": resv.channel_name, "ref": resv.ota_ref})
+        return Response({"created": created, "reservation": ReservationSerializer(resv).data},
+                        status=(201 if created else 200))
+
     @action(detail=False, methods=["get"])
     def pushes(self, request):
         rows = [
