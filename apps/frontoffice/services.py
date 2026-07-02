@@ -127,16 +127,46 @@ def post_stay_room_charges(folio, user=None):
     return posted
 
 
+def _bill_to_company(folio, amount, user=None):
+    """Move a checked-out folio balance to the billing company's city-ledger AR.
+
+    The company pays later on invoice; their outstanding (receivables) grows now.
+    """
+    from apps.crm.models import Customer
+    name = (folio.company_name or "").strip() or folio.guest_name
+    company = Customer.objects.filter(name=name, customer_type=Customer.TYPE_CORPORATE).first()
+    if not company:
+        key = ("CO:" + name)[:20]  # synthetic AR key when the company has no mobile on file
+        company, _ = Customer.objects.get_or_create(
+            mobile=key, defaults={"name": name, "customer_type": Customer.TYPE_CORPORATE,
+                                  "btc_enabled": True})
+    company.outstanding = (company.outstanding or Decimal("0")) + amount
+    company.save(update_fields=["outstanding"])
+    log_action(user, "city_ledger_post", entity="Customer", entity_id=company.id,
+               after={"folio": folio.id, "amount": str(amount), "outstanding": str(company.outstanding)})
+    return company
+
+
 @transaction.atomic
 def check_out(folio, payments=None, tender=None, user=None):
-    """Settle remaining balance, release the room to housekeeping (FR-PMS-005)."""
+    """Settle remaining balance, release the room to housekeeping (FR-PMS-005).
+
+    Corporate (city-ledger) folios don't collect cash at the desk — the balance
+    transfers to the company's AR and the folio closes billed-to-company.
+    """
     # Capture room charges for the stay if the night audit hasn't already (FR-PMS-008).
     post_stay_room_charges(folio, user=user)
-    # Settle the full remaining balance (room charges may have just been added).
-    if tender is None and payments:
-        tender = payments[0].get("tender", "Cash")
-    if folio.balance > 0 and tender:
-        settle_folio(folio, [{"tender": tender, "amount": str(folio.balance)}], user=user)
+    if folio.routing == "city_ledger" and folio.balance > 0:
+        # Bill-to-company: move the balance to the company's receivables (no cash).
+        amount = folio.balance
+        settle_folio(folio, [{"tender": "BTC", "amount": str(amount)}], user=user)
+        _bill_to_company(folio, amount, user=user)
+    else:
+        # Settle the full remaining balance (room charges may have just been added).
+        if tender is None and payments:
+            tender = payments[0].get("tender", "Cash")
+        if folio.balance > 0 and tender:
+            settle_folio(folio, [{"tender": tender, "amount": str(folio.balance)}], user=user)
     if folio.balance > 0:
         raise ValueError("Outstanding balance must be cleared before check-out")
     if folio.status != Folio.SETTLED:

@@ -56,6 +56,23 @@ class FrontOfficeFlowTests(TestCase):
         self.assertTrue(folio.invoice_no)
         self.assertEqual(self.room.status, Room.VACANT_DIRTY)
 
+    def test_corporate_checkout_posts_to_company_ar(self):
+        from apps.crm.models import Customer
+        folio = services.check_in(self.resv, self.room)
+        folio.routing = "city_ledger"
+        folio.company_name = "Globex Ltd"
+        folio.save(update_fields=["routing", "company_name"])
+        services.post_charge(folio, kind=FolioLine.KIND_ROOM, description="Room",
+                             amount=Decimal("6500"), gst_rate=Decimal("12"))
+        bal = folio.balance
+        # No tender supplied — BTC folio must still check out (bill to company).
+        services.check_out(folio)
+        folio.refresh_from_db()
+        self.assertEqual(folio.status, Folio.SETTLED)
+        self.assertEqual(folio.balance, Decimal("0.00"))
+        company = Customer.objects.get(name="Globex Ltd", customer_type=Customer.TYPE_CORPORATE)
+        self.assertEqual(company.outstanding, bal)
+
     def test_night_audit_is_idempotent(self):
         services.check_in(self.resv, self.room)
         run1 = services.run_night_audit(date.today())

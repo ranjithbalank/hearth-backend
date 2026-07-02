@@ -1,3 +1,5 @@
+from decimal import Decimal
+
 from rest_framework import viewsets
 from rest_framework.decorators import action
 from rest_framework.response import Response
@@ -32,6 +34,22 @@ class CustomerViewSet(ModuleViewSetMixin, viewsets.ModelViewSet):
         if not cust:
             return Response({"found": False})
         return Response({"found": True, "customer": CustomerSerializer(cust).data})
+
+    @action(detail=True, methods=["post"])
+    def settle_ar(self, request, pk=None):
+        """Record a receipt against a company's city-ledger / AR balance (they pay
+        on invoice after a BTC stay)."""
+        cust = self.get_object()
+        amount = Decimal(str(request.data.get("amount") or 0))
+        if amount <= 0:
+            return Response({"detail": "a positive amount is required"}, status=400)
+        applied = min(amount, cust.outstanding)
+        cust.outstanding = cust.outstanding - applied
+        cust.save(update_fields=["outstanding"])
+        log_action(request.user, "ar_receipt", entity="Customer", entity_id=cust.id,
+                   after={"received": str(applied), "tender": request.data.get("tender", "Cash"),
+                          "outstanding": str(cust.outstanding)})
+        return Response({"received": str(applied), "outstanding": str(cust.outstanding)})
 
     @action(detail=True, methods=["get"])
     def export(self, request, pk=None):
