@@ -94,7 +94,18 @@ class TableViewSet(ModuleViewSetMixin, viewsets.ModelViewSet):
     serializer_class = TableSerializer
 
 
-class TillViewSet(ModuleViewSetMixin, viewsets.ViewSet):
+class CounterOnlyMixin:
+    """Cash controls (till, reconciliation) belong to counter roles — captains
+    take orders and digital payments tableside, never the cash drawer."""
+
+    def initial(self, request, *args, **kwargs):
+        super().initial(request, *args, **kwargs)
+        if getattr(request.user, "role", "") == "Captain":
+            from rest_framework.exceptions import PermissionDenied
+            raise PermissionDenied("Till and reconciliation are handled at the cashier counter")
+
+
+class TillViewSet(CounterOnlyMixin, ModuleViewSetMixin, viewsets.ViewSet):
     """Cash till sessions: open float → cash in/out → day-end close with variance."""
 
     module = "pos"
@@ -259,10 +270,12 @@ class QrOrderView(APIView):
         if not active_entitlements().get("restaurant"):
             return Response({"detail": "ordering unavailable"}, status=403)
         with transaction.atomic():
+            import uuid as uuid_lib
             order = Order.objects.create(mode=Order.DINEIN, table=table,
                                          source_platform="qr", online_status="received",
                                          status=Order.KOT_FIRED, kitchen_status="cooking",
-                                         kot_no=f"QR-{table.name}")
+                                         kot_no=f"QR-{table.name}",
+                                         client_uuid=uuid_lib.uuid4().hex)
             kot = Kot.objects.create(order=order, number=f"QR-{table.name}-{order.id}")
             fired = []
             for ln in request.data.get("items", []):
@@ -276,7 +289,8 @@ class QrOrderView(APIView):
             deduct_for_newly_fired(order, fired)
             table.status = Table.RUNNING
             table.save(update_fields=["status"])
-        return Response({"order": order.id, "kot": order.kot_no, "table": table.name}, status=201)
+        return Response({"order": order.id, "kot": order.kot_no, "table": table.name,
+                         "ref": order.client_uuid}, status=201)
 
 
 class KdsViewSet(ModuleViewSetMixin, viewsets.ViewSet):
@@ -1145,7 +1159,7 @@ class FeedbackViewSet(ModuleViewSetMixin, viewsets.ViewSet):
         })
 
 
-class ReconViewSet(ModuleViewSetMixin, viewsets.ViewSet):
+class ReconViewSet(CounterOnlyMixin, ModuleViewSetMixin, viewsets.ViewSet):
     """Payment reconciliation: POS-recorded settlements vs external payouts.
 
     Flags variance per day×tender and per aggregator platform so pilferage or

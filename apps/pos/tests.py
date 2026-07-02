@@ -376,6 +376,32 @@ class KotBillFlowTests(TestCase):
         r = client.post(reverse("order-settle", args=[o.id]), {"tender": "UPI"}, format="json")
         self.assertEqual(r.status_code, 200)
 
+    def test_captain_blocked_from_till_and_recon(self):
+        """Cash controls are counter-only — captains get 403 server-side."""
+        captain = User.objects.create_user(
+            username="capx", password="Tk9$mZ2pQw!7", role="Captain")
+        cap = APIClient(); cap.force_authenticate(captain)
+        self.assertEqual(cap.get(reverse("till-current")).status_code, 403)
+        self.assertEqual(cap.post(reverse("till-open"), {"opening_float": "100"},
+                                  format="json").status_code, 403)
+        self.assertEqual(cap.get(reverse("recon-list")).status_code, 403)
+        # Cashier still fine.
+        self.assertEqual(self.client.get(reverse("till-current")).status_code, 200)
+
+    def test_qr_order_returns_tracking_ref(self):
+        from .models import Table
+        t = Table.objects.create(name="Q9", section="AC", qr_token="QREF")
+        anon = APIClient()
+        r = anon.post(reverse("qr-order"),
+                      {"token": "QREF", "items": [{"menu_item": self.item.id, "qty": 1}]},
+                      format="json")
+        self.assertEqual(r.status_code, 201)
+        self.assertTrue(r.data["ref"])
+        # The ref works on the public status page.
+        s = anon.get(reverse("order-status-public") + f"?ref={r.data['ref']}")
+        self.assertEqual(s.status_code, 200)
+        self.assertEqual(s.data["kitchen_status"], "cooking")
+
     def test_kds_shows_only_fired_lines(self):
         o = Order.objects.create(mode=Order.DINEIN, table=self.table)
         OrderLine.objects.create(order=o, menu_item=self.item, qty=2, unit_price=Decimal("100"))
