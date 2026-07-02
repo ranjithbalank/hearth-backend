@@ -15,10 +15,6 @@ from apps.accounts.constants import (
     ROLE_GM,
     ROLE_HOUSEKEEPING,
     ROLE_MD,
-    ROLE_NIGHT_AUDIT,
-    ROLE_REVENUE,
-    ROLE_SALES_BANQUETS,
-    ROLE_STORE,
 )
 from apps.accounts.models import Entitlement, Property, User
 from apps.banquets.models import Event, FunctionSpace
@@ -86,12 +82,8 @@ class Command(BaseCommand):
             ("md", "Karthik", "Subramanian", ROLE_MD, True),
             ("gm", "Meera", "Rao", ROLE_GM, True),
             ("frontoffice", "Anil", "Kumar", ROLE_FRONT_OFFICE, False),
-            ("revenue", "Meera", "Iyer", ROLE_REVENUE, False),
-            ("housekeeping", "Sunita", "Pal", ROLE_HOUSEKEEPING, False),
-            ("banquets", "Rahul", "Sharma", ROLE_SALES_BANQUETS, False),
             ("cashier", "Priya", "Nair", ROLE_CASHIER, False),
-            ("store", "Sunita", "Devi", ROLE_STORE, False),
-            ("nightaudit", "Vikram", "Singh", ROLE_NIGHT_AUDIT, False),
+            ("housekeeping", "Sunita", "Pal", ROLE_HOUSEKEEPING, False),
         ]
         # Per-user discount caps + manager passcodes (BRD FR-USR-004/006).
         caps = {

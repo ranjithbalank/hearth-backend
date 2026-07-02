@@ -3,27 +3,20 @@
 Mirrors the prototype's ROLE map and entitlement-gated nav, but is enforced server-side.
 """
 
-# --- Roles (BRD §3.1) ---
+# --- Roles ---
+# Five operational roles. MD & GM have full access; the rest are scoped.
 ROLE_MD = "Managing Director"
 ROLE_GM = "General Manager"
 ROLE_FRONT_OFFICE = "Front Office"
-ROLE_REVENUE = "Revenue Manager"
-ROLE_HOUSEKEEPING = "Housekeeping"
-ROLE_SALES_BANQUETS = "Sales & Banquets"
 ROLE_CASHIER = "F&B Cashier"
-ROLE_STORE = "Store & Purchase"
-ROLE_NIGHT_AUDIT = "Night Auditor"
+ROLE_HOUSEKEEPING = "Housekeeping"
 
 ROLE_CHOICES = [
     (ROLE_MD, ROLE_MD),
     (ROLE_GM, ROLE_GM),
     (ROLE_FRONT_OFFICE, ROLE_FRONT_OFFICE),
-    (ROLE_REVENUE, ROLE_REVENUE),
-    (ROLE_HOUSEKEEPING, ROLE_HOUSEKEEPING),
-    (ROLE_SALES_BANQUETS, ROLE_SALES_BANQUETS),
     (ROLE_CASHIER, ROLE_CASHIER),
-    (ROLE_STORE, ROLE_STORE),
-    (ROLE_NIGHT_AUDIT, ROLE_NIGHT_AUDIT),
+    (ROLE_HOUSEKEEPING, ROLE_HOUSEKEEPING),
 ]
 
 # Module keys used across nav, RBAC and entitlement gating.
@@ -37,42 +30,26 @@ ALL_MODULES = [
 ]
 
 # "*" == full access. Otherwise an explicit allow-list of module keys.
-# Allow-lists follow the BRD §3.1 "typical access" per role (least privilege,
-# with segregation of duties between front office, revenue, banquets and stores).
+# Least privilege: MD/GM run everything; the three floor roles are scoped to
+# what that desk actually does. Back-office/distribution/config stay with MD/GM.
 ROLE_ALLOW = {
     ROLE_MD: "*",
     ROLE_GM: "*",
-    # Front Office / Reception — front desk, folios, cashiering; reads room
-    # status for assignment. No revenue, banquets or stores.
+    # Front Office / Reception — the single guest-facing desk: front desk, room
+    # assignment & status, reservations, folios/cashiering, banquets & events,
+    # and guest records.
     ROLE_FRONT_OFFICE: [
         "dashboard", "frontdesk", "checkin", "checkout", "livegrid", "folio",
-        "reservations", "housekeeping", "crm", "customers", "reports", "notifications",
-    ],
-    # Reservations / Revenue Manager — rates, availability, channels, forecasts.
-    ROLE_REVENUE: [
-        "dashboard", "reservations", "revenue", "channel", "booking", "livegrid",
+        "reservations", "housekeeping", "banquets", "crm", "customers",
         "reports", "notifications",
     ],
-    # Housekeeping — room status and maintenance work orders.
-    ROLE_HOUSEKEEPING: [
-        "dashboard", "housekeeping", "livegrid", "engineering", "notifications",
-    ],
-    # Sales & Banquets — event enquiries, function bookings, event folios.
-    ROLE_SALES_BANQUETS: [
-        "dashboard", "banquets", "crm", "customers", "reports", "notifications",
-    ],
-    # F&B Cashier / Captain — POS & KOT only; capped discounts; no rooms/stores.
+    # F&B Cashier / Captain — POS & KOT only; capped discounts; no rooms access.
     ROLE_CASHIER: [
-        "dashboard", "pos", "kds", "online", "reports", "notifications",
+        "pos", "kds", "online", "reports", "notifications",
     ],
-    # Store / Purchase keeper — stores, inventory, purchasing, recipes/BOM.
-    ROLE_STORE: [
-        "dashboard", "inventory", "procurement", "pomanage", "matreq", "suppliers",
-        "vendors", "recipes", "reports", "notifications",
-    ],
-    # Night Auditor — end-of-day close, postings, day-end reports.
-    ROLE_NIGHT_AUDIT: [
-        "dashboard", "accounting", "folio", "livegrid", "tax", "reports", "notifications",
+    # Housekeeping — room status board and maintenance work orders.
+    ROLE_HOUSEKEEPING: [
+        "housekeeping", "livegrid", "engineering", "notifications",
     ],
 }
 

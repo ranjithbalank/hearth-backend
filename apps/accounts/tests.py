@@ -3,11 +3,8 @@ from django.test import TestCase
 from .constants import (
     ROLE_CASHIER,
     ROLE_FRONT_OFFICE,
+    ROLE_HOUSEKEEPING,
     ROLE_MD,
-    ROLE_NIGHT_AUDIT,
-    ROLE_REVENUE,
-    ROLE_SALES_BANQUETS,
-    ROLE_STORE,
     edition_entitlements,
     entitlement_allows,
     role_can_access,
@@ -27,24 +24,25 @@ class RbacTests(TestCase):
         self.assertTrue(role_can_access(ROLE_FRONT_OFFICE, "frontdesk"))
         self.assertFalse(role_can_access(ROLE_FRONT_OFFICE, "pos"))
 
-    def test_front_office_no_banquets_or_channel(self):
-        # Segregation of duties (BRD §3.1): those belong to Sales/Banquets & Revenue.
-        self.assertFalse(role_can_access(ROLE_FRONT_OFFICE, "banquets"))
+    def test_front_office_owns_rooms_and_banquets(self):
+        # The front desk is the single guest-facing desk for rooms AND banquets.
+        self.assertTrue(role_can_access(ROLE_FRONT_OFFICE, "reservations"))
+        self.assertTrue(role_can_access(ROLE_FRONT_OFFICE, "banquets"))
+        self.assertTrue(role_can_access(ROLE_FRONT_OFFICE, "folio"))
+        # Distribution/back-office stays with management.
         self.assertFalse(role_can_access(ROLE_FRONT_OFFICE, "channel"))
+        self.assertFalse(role_can_access(ROLE_FRONT_OFFICE, "inventory"))
 
-    def test_cashier_no_stores(self):
+    def test_cashier_scoped_to_pos(self):
         self.assertTrue(role_can_access(ROLE_CASHIER, "pos"))
         self.assertFalse(role_can_access(ROLE_CASHIER, "inventory"))
+        self.assertFalse(role_can_access(ROLE_CASHIER, "folio"))
 
-    def test_specialist_roles_scoped(self):
-        self.assertTrue(role_can_access(ROLE_REVENUE, "revenue"))
-        self.assertFalse(role_can_access(ROLE_REVENUE, "pos"))
-        self.assertTrue(role_can_access(ROLE_SALES_BANQUETS, "banquets"))
-        self.assertFalse(role_can_access(ROLE_SALES_BANQUETS, "folio"))
-        self.assertTrue(role_can_access(ROLE_STORE, "procurement"))
-        self.assertFalse(role_can_access(ROLE_STORE, "folio"))
-        self.assertTrue(role_can_access(ROLE_NIGHT_AUDIT, "accounting"))
-        self.assertFalse(role_can_access(ROLE_NIGHT_AUDIT, "pos"))
+    def test_kpi_dashboard_is_management_and_front_desk_only(self):
+        # The occupancy/ADR/RevPAR dashboard isn't for the kitchen or housekeeping.
+        self.assertTrue(role_can_access(ROLE_FRONT_OFFICE, "dashboard"))
+        self.assertFalse(role_can_access(ROLE_HOUSEKEEPING, "dashboard"))
+        self.assertFalse(role_can_access(ROLE_CASHIER, "dashboard"))
 
 
 class EntitlementTests(TestCase):
