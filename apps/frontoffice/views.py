@@ -138,7 +138,9 @@ class CheckInView(ModuleViewSetMixin, viewsets.ViewSet):
             folio.company_name = company_name if guest_type == "corporate" else ""
             if guest_type == "corporate":
                 folio.routing = "city_ledger"
-            folio.save(update_fields=["id_type", "id_number", "guest_type", "company_name", "routing"])
+                folio.company = services.company_account(company_name) if company_name else None
+            folio.save(update_fields=["id_type", "id_number", "guest_type", "company_name",
+                                      "company", "routing"])
             log_action(
                 request.user, "kyc_capture", entity="Folio", entity_id=folio.id,
                 after={"id_type": id_type, "id_number_present": bool(id_number),

@@ -127,19 +127,36 @@ def post_stay_room_charges(folio, user=None):
     return posted
 
 
+def company_account(name):
+    """Get or create the corporate (bill-to-company) customer for `name`.
+
+    Matches an existing corporate customer by name, else creates one keyed by a
+    synthetic AR handle (companies often have no mobile on file).
+    """
+    from apps.crm.models import Customer
+    name = (name or "").strip()
+    if not name:
+        return None
+    company = Customer.objects.filter(name=name, customer_type=Customer.TYPE_CORPORATE).first()
+    if not company:
+        key = ("CO:" + name)[:20]
+        company, _ = Customer.objects.get_or_create(
+            mobile=key, defaults={"name": name, "customer_type": Customer.TYPE_CORPORATE,
+                                  "btc_enabled": True})
+    return company
+
+
 def _bill_to_company(folio, amount, user=None):
     """Move a checked-out folio balance to the billing company's city-ledger AR.
 
     The company pays later on invoice; their outstanding (receivables) grows now.
     """
-    from apps.crm.models import Customer
-    name = (folio.company_name or "").strip() or folio.guest_name
-    company = Customer.objects.filter(name=name, customer_type=Customer.TYPE_CORPORATE).first()
+    company = folio.company or company_account(folio.company_name or folio.guest_name)
     if not company:
-        key = ("CO:" + name)[:20]  # synthetic AR key when the company has no mobile on file
-        company, _ = Customer.objects.get_or_create(
-            mobile=key, defaults={"name": name, "customer_type": Customer.TYPE_CORPORATE,
-                                  "btc_enabled": True})
+        return None
+    if folio.company_id != company.id:
+        folio.company = company
+        folio.save(update_fields=["company"])
     company.outstanding = (company.outstanding or Decimal("0")) + amount
     company.save(update_fields=["outstanding"])
     log_action(user, "city_ledger_post", entity="Customer", entity_id=company.id,

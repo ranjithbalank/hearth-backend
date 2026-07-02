@@ -33,6 +33,10 @@ class Folio(models.Model):
     guest_type = models.CharField(max_length=20, blank=True)
     # For corporate (bill-to-company) guests — the company the folio bills to.
     company_name = models.CharField(max_length=200, blank=True)
+    company = models.ForeignKey(
+        "crm.Customer", on_delete=models.SET_NULL, null=True, blank=True,
+        related_name="city_ledger_folios", help_text="corporate account this BTC folio bills to",
+    )
 
     def __str__(self):
         return f"Folio #{self.id} — {self.guest_name}"

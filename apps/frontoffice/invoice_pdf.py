@@ -48,7 +48,12 @@ def build_invoice_pdf(folio, property_name, gstin, address=""):
     story += [header, Spacer(1, 4), HRFlowable(width="100%", thickness=2, color=PINE), Spacer(1, 8)]
 
     room = f" &nbsp;·&nbsp; Room {folio.room.number}" if folio.room else ""
-    story += [Paragraph(f"<b>Bill to:</b> {folio.guest_name}{room}", normal), Spacer(1, 8)]
+    if folio.company_name:
+        # Corporate: the company is billed; the guest is the occupant.
+        story += [Paragraph(f"<b>Bill to:</b> {folio.company_name} <font size=8 color='#8A8478'>(bill-to-company)</font>", normal),
+                  Paragraph(f"<font size=9 color='#8A8478'>Guest: {folio.guest_name}{room}</font>", small), Spacer(1, 8)]
+    else:
+        story += [Paragraph(f"<b>Bill to:</b> {folio.guest_name}{room}", normal), Spacer(1, 8)]
 
     # Line items
     rows = [["Description", "Taxable", "CGST", "SGST", "Amount"]]

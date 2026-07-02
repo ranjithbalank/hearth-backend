@@ -59,11 +59,20 @@ class CustomerViewSet(ModuleViewSetMixin, viewsets.ModelViewSet):
         reservations = list(
             cust.reservations.values("id", "checkin_date", "checkout_date", "status")
         )
+        # City-ledger (bill-to-company) folios billed to this corporate account —
+        # the stays that make up its outstanding balance.
+        city_ledger = [
+            {"folio": f.id, "guest": f.guest_name, "invoice_no": f.invoice_no,
+             "room": f.room.number if f.room else None,
+             "settled_at": f.settled_at, "amount": str(f.charges_total)}
+            for f in cust.city_ledger_folios.select_related("room").all()
+        ]
         log_action(request.user, "dpdp_export", entity="Customer", entity_id=cust.id)
         return Response({
             "profile": CustomerSerializer(cust).data,
             "orders": orders,
             "reservations": reservations,
+            "city_ledger": city_ledger,
         })
 
     @action(detail=True, methods=["post"])
