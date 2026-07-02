@@ -57,11 +57,24 @@ def build_beo_pdf(event, property_name):
                         ("Date", str(event.event_date)), ("Time", _time),
                         ("Space", event.space.name), ("Covers", str(event.covers))])
     cl = card("Client", [("Host", event.host), ("Contact", event.contact)])
-    cat = card("Catering (F&B)", [("Food plates", str(event.food_covers) if event.food_covers else "—"),
-                                  ("Preference", (event.food_pref or "—").upper()),
-                                  ("Kitchen prep", (event.beo_status or "—").upper())])
-    fin = card("Financials", [("Package", _m(event.package_amount)), ("Deposit", _m(event.deposit)),
-                              ("Balance", _m(Decimal(str(event.package_amount)) - Decimal(str(event.deposit))))])
+    cat_rows = [("Food plates", str(event.food_covers) if event.food_covers else "—"),
+                ("Preference", (event.food_pref or "—").upper())]
+    if event.food_veg and event.veg_rate:
+        cat_rows.append((f"Veg — {event.food_veg} × {_m(event.veg_rate)}", _m(event.food_veg * event.veg_rate)))
+    if event.food_nonveg and event.nonveg_rate:
+        cat_rows.append((f"Non-veg — {event.food_nonveg} × {_m(event.nonveg_rate)}", _m(event.food_nonveg * event.nonveg_rate)))
+    cat_rows.append(("Kitchen prep", (event.beo_status or "—").upper()))
+    cat = card("Catering (F&B)", cat_rows)
+
+    subtotal = Decimal(str(event.bill_subtotal))
+    gst = (subtotal * Decimal("0.18")).quantize(Decimal("0.01"))
+    total = subtotal + gst
+    balance = total - Decimal(str(event.deposit))
+    fin = card("Financials", [("Package", _m(event.package_amount)),
+                              ("Catering", _m(event.catering_amount)),
+                              ("Subtotal", _m(subtotal)), ("GST 18%", _m(gst)),
+                              ("Total", _m(total)), ("Deposit", _m(event.deposit)),
+                              ("Balance", _m(balance))])
     grid = Table([[ev, cl], [cat, fin]], colWidths=[88 * mm, 88 * mm])
     grid.setStyle(TableStyle([("VALIGN", (0, 0), (-1, -1), "TOP"), ("TOPPADDING", (0, 0), (-1, -1), 6),
                               ("LEFTPADDING", (0, 0), (-1, -1), 0), ("RIGHTPADDING", (0, 0), (-1, -1), 6)]))

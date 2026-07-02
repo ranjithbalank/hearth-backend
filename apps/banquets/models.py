@@ -34,6 +34,9 @@ class Event(models.Model):
     # When food_pref == "both", the approximate split by preference.
     food_veg = models.PositiveSmallIntegerField(default=0, help_text="approx. veg plates")
     food_nonveg = models.PositiveSmallIntegerField(default=0, help_text="approx. non-veg plates")
+    # Per-plate catering rates (₹/person) by preference.
+    veg_rate = models.DecimalField(max_digits=10, decimal_places=2, default=0, help_text="₹ per veg plate")
+    nonveg_rate = models.DecimalField(max_digits=10, decimal_places=2, default=0, help_text="₹ per non-veg plate")
     # BEO prep status shown on the kitchen display (FR-BQT-004): "" | pending | ready
     beo_status = models.CharField(max_length=10, blank=True, default="")
     status = models.CharField(max_length=12, choices=STATUS_CHOICES, default=TENTATIVE)
@@ -44,3 +47,13 @@ class Event(models.Model):
 
     def __str__(self):
         return f"{self.title} @ {self.space.name} ({self.event_date})"
+
+    @property
+    def catering_amount(self):
+        """Catering charge = plates × per-plate rate, by preference."""
+        return (self.food_veg * self.veg_rate) + (self.food_nonveg * self.nonveg_rate)
+
+    @property
+    def bill_subtotal(self):
+        """Taxable base for the event: hall/package + catering."""
+        return self.package_amount + self.catering_amount

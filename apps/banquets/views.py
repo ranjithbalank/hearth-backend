@@ -21,7 +21,10 @@ def _event_dict(e):
         "covers": e.covers, "deposit": str(e.deposit),
         "package_amount": str(e.package_amount), "status": e.status, "billed": e.billed,
         "food_covers": e.food_covers, "food_pref": e.food_pref,
-        "food_veg": e.food_veg, "food_nonveg": e.food_nonveg, "beo_status": e.beo_status,
+        "food_veg": e.food_veg, "food_nonveg": e.food_nonveg,
+        "veg_rate": str(e.veg_rate), "nonveg_rate": str(e.nonveg_rate),
+        "catering_amount": str(e.catering_amount), "bill_subtotal": str(e.bill_subtotal),
+        "beo_status": e.beo_status,
     }
 
 
@@ -70,6 +73,8 @@ class BanquetViewSet(ModuleViewSetMixin, viewsets.ViewSet):
             deposit=Decimal(str(request.data.get("deposit", 0) or 0)),
             food_covers=food_covers, food_pref=food_pref,
             food_veg=food_veg, food_nonveg=food_nonveg,
+            veg_rate=Decimal(str(request.data.get("veg_rate", 0) or 0)),
+            nonveg_rate=Decimal(str(request.data.get("nonveg_rate", 0) or 0)),
             status=Event.TENTATIVE,
         )
         log_action(request.user, "event_create", entity="Event", entity_id=e.id,
@@ -121,14 +126,37 @@ class BanquetViewSet(ModuleViewSetMixin, viewsets.ViewSet):
 
     @action(detail=True, methods=["post"])
     def bill(self, request, pk=None):
-        """Bill the event (banquets attract 18% GST). Marks billed; returns the tax split."""
+        """Bill the event: hall/package + catering (plates × per-plate rate),
+        18% GST on the subtotal, less the advance deposit = balance due."""
         e = Event.objects.filter(pk=pk).first()
         if not e:
             return Response({"detail": "not found"}, status=404)
-        breakdown = tax.compute(e.package_amount, tax.BANQUET_RATE)
+        catering = e.catering_amount
+        subtotal = e.bill_subtotal
+        breakdown = tax.compute(subtotal, tax.BANQUET_RATE)
+        deposit = Decimal(str(e.deposit))
+        balance = (breakdown["total"] - deposit).quantize(Decimal("0.01"))
         e.billed = True
         e.status = Event.COMPLETED
         e.save(update_fields=["billed", "status"])
         log_action(request.user, "event_bill", entity="Event", entity_id=e.id,
-                   after={"total": str(breakdown["total"])})
-        return Response({"event": _event_dict(e), "tax": {k: str(v) for k, v in breakdown.items()}})
+                   after={"subtotal": str(subtotal), "total": str(breakdown["total"])})
+        lines = [
+            {"label": "Hall / package", "amount": str(e.package_amount)},
+        ]
+        if catering:
+            if e.food_veg and e.veg_rate:
+                lines.append({"label": f"Veg catering — {e.food_veg} × {e.veg_rate}",
+                              "amount": str(e.food_veg * e.veg_rate)})
+            if e.food_nonveg and e.nonveg_rate:
+                lines.append({"label": f"Non-veg catering — {e.food_nonveg} × {e.nonveg_rate}",
+                              "amount": str(e.food_nonveg * e.nonveg_rate)})
+        return Response({
+            "event": _event_dict(e),
+            "lines": lines,
+            "catering": str(catering),
+            "subtotal": str(subtotal),
+            "tax": {k: str(v) for k, v in breakdown.items()},
+            "deposit": str(deposit),
+            "balance": str(balance),
+        })

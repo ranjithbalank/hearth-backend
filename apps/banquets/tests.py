@@ -59,4 +59,15 @@ class BanquetTests(TestCase):
         e = self._create(package_amount=100000).data
         r = self.client.post(reverse("banquet-bill", args=[e["id"]]))
         self.assertEqual(r.data["tax"]["tax"], "18000.00")
-        self.assertEqual(r.data["tax"]["total"], "118000.00")
+
+    def test_bill_includes_catering_and_balance(self):
+        # Package 100000 + catering (80×850 + 40×1050 = 110000) = 210000 subtotal.
+        e = self._create(package_amount=100000, deposit=50000, food_pref="both",
+                         food_veg=80, food_nonveg=40, veg_rate=850, nonveg_rate=1050).data
+        self.assertEqual(e["catering_amount"], "110000.00")
+        self.assertEqual(e["bill_subtotal"], "210000.00")
+        r = self.client.post(reverse("banquet-bill", args=[e["id"]])).data
+        self.assertEqual(r["subtotal"], "210000.00")
+        self.assertEqual(r["tax"]["tax"], "37800.00")          # 18% of 210000
+        self.assertEqual(r["tax"]["total"], "247800.00")
+        self.assertEqual(r["balance"], "197800.00")            # total − 50000 deposit
