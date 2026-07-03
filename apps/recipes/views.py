@@ -42,6 +42,47 @@ class RecipeViewSet(ModuleViewSetMixin, viewsets.ViewSet):
         return Response(out)
 
     @action(detail=False, methods=["get"])
+    def consumption(self, request):
+        """Recipe-wise raw-material consumption (?days=30): for each dish,
+        plates fired and the per-material draw + cost — the chef's view of the
+        same numbers the Store's consumption register holds material-wise."""
+        from datetime import timedelta
+
+        from django.db.models import Sum
+        from django.utils import timezone
+
+        from apps.pos.models import OrderLine
+
+        days = int(request.query_params.get("days", 30))
+        since = timezone.now() - timedelta(days=days)
+        sold = dict(OrderLine.objects
+                    .filter(kot_fired=True, order__created_at__gte=since)
+                    .values_list("menu_item")
+                    .annotate(total=Sum("qty")))
+        rows = []
+        for r in Recipe.objects.select_related("menu_item").prefetch_related(
+                "lines__ingredient", "lines__sub_recipe"):
+            plates = sold.get(r.menu_item_id, 0)
+            if not plates:
+                continue
+            lines, cost = [], Decimal("0")
+            for l in r.lines.all():
+                if l.ingredient_id:
+                    draw = l.base_qty() * plates
+                    line_cost = draw * (l.ingredient.unit_cost or Decimal("0"))
+                    cost += line_cost
+                    lines.append({"name": l.ingredient.name, "qty": str(round(draw, 3)),
+                                  "unit": l.ingredient.unit, "cost": str(round(line_cost, 2))})
+                elif l.sub_recipe_id:
+                    lines.append({"name": f"[prep] {l.sub_recipe.name}",
+                                  "qty": str(round(l.qty * plates, 3)),
+                                  "unit": "portion", "cost": ""})
+            rows.append({"item": r.menu_item.name, "plates": plates,
+                         "cost": str(round(cost, 2)), "lines": lines})
+        rows.sort(key=lambda x: -Decimal(x["cost"] or "0"))
+        return Response({"days": days, "rows": rows})
+
+    @action(detail=False, methods=["get"])
     def menu_categories(self, request):
         """POS menu categories for the create-recipe form — surfaced here so
         recipe-only roles (e.g. Chef) don't need the pos module."""

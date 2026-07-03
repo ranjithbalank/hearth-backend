@@ -206,6 +206,21 @@ class MenuItemMappingTests(TestCase):
         self.assertEqual(r.status_code, 400)
         self.assertIn("category", r.data["detail"])
 
+    def test_recipe_wise_consumption_view(self):
+        """The chef's consumption tab: plates fired × BOM = per-material draw."""
+        from django.urls import reverse
+        order = Order.objects.create(mode=Order.DINEIN)
+        OrderLine.objects.create(order=order, menu_item=self.mapped, qty=5,
+                                 unit_price=self.mapped.price, kot_fired=True)
+        r = self.client.get(reverse("recipe-consumption") + "?days=7")
+        self.assertEqual(r.status_code, 200)
+        row = next(x for x in r.data["rows"] if x["item"] == "Dal")
+        self.assertEqual(row["plates"], 5)
+        line = row["lines"][0]
+        self.assertEqual(line["name"], "Rice")
+        self.assertEqual(line["qty"], "0.500")            # 5 × 0.1 kg
+        self.assertEqual(row["cost"], "30.00")            # 0.5 kg × ₹60
+
     def test_menu_categories_listing(self):
         from django.urls import reverse
         r = self.client.get(reverse("recipe-menu-categories"))
