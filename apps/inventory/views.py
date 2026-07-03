@@ -128,6 +128,82 @@ class IngredientViewSet(ModuleViewSetMixin, viewsets.ModelViewSet):
                            reason=f"physical count: booked {counted}", user=request.user)
         return Response(IngredientSerializer(ing).data)
 
+    @action(detail=False, methods=["get", "post"], url_path="import")
+    def import_materials(self, request):
+        """Bulk onboarding (spec §1): upload a CSV/XLSX of raw materials.
+
+        GET returns the fill-in template. POST with a `file` creates every row,
+        auto-creating unknown categories/units (onboarding shouldn't fight the
+        masters), books opening stock through the ledger, and reports per-row
+        errors instead of failing the whole file.
+        """
+        columns = ["name", "category", "unit", "opening_stock", "min_stock_level",
+                   "reorder_level", "purchase_rate", "storage_location", "expiry_date"]
+        if request.method == "GET":
+            buf = io.StringIO()
+            w = csv.writer(buf)
+            w.writerow(columns)
+            w.writerow(["Basmati Rice", "Other Consumables", "kg", "25", "5", "10",
+                        "90", "Dry store", ""])
+            w.writerow(["Milk", "Dairy", "l", "20", "5", "10", "60", "Cold room",
+                        "2026-07-15"])
+            resp = HttpResponse(buf.getvalue(), content_type="text/csv")
+            resp["Content-Disposition"] = 'attachment; filename="raw-materials-template.csv"'
+            return resp
+
+        f = request.FILES.get("file")
+        if not f:
+            return Response({"detail": "attach a CSV or XLSX file as 'file'"}, status=400)
+        # Parse into a list of dicts keyed by the template's column names.
+        try:
+            if f.name.lower().endswith((".xlsx", ".xlsm")):
+                from openpyxl import load_workbook
+                ws = load_workbook(io.BytesIO(f.read()), read_only=True).active
+                data = [[("" if c is None else str(c)) for c in row]
+                        for row in ws.iter_rows(values_only=True)]
+            else:
+                text = f.read().decode("utf-8-sig", errors="replace")
+                data = list(csv.reader(io.StringIO(text)))
+        except Exception:
+            return Response({"detail": "could not read the file — use the template"}, status=400)
+        if not data or len(data) < 2:
+            return Response({"detail": "the file has no data rows"}, status=400)
+        header = [h.strip().lower().replace(" ", "_") for h in data[0]]
+
+        created, skipped, errors = [], [], []
+        for lineno, raw in enumerate(data[1:], start=2):
+            row = {header[i]: (raw[i] or "").strip() for i in range(min(len(header), len(raw)))}
+            name = row.get("name", "")
+            if not name:
+                continue  # blank line
+            if Ingredient.objects.filter(name__iexact=name).exists():
+                skipped.append(name)
+                continue
+            try:
+                unit = (row.get("unit") or "kg").lower()
+                Uom.objects.get_or_create(code=unit, defaults={"name": unit})
+                category = row.get("category", "")
+                if category:
+                    IngredientCategory.objects.get_or_create(name=category)
+                expiry = row.get("expiry_date") or None
+                ing = Ingredient.objects.create(
+                    name=name, unit=unit, category=category,
+                    min_stock_level=Decimal(row.get("min_stock_level") or "0"),
+                    reorder_level=Decimal(row.get("reorder_level") or "0"),
+                    unit_cost=Decimal(row.get("purchase_rate") or row.get("unit_cost") or "0"),
+                    storage_location=row.get("storage_location", ""),
+                    expiry_date=expiry[:10] if expiry else None,
+                )
+                opening = Decimal(row.get("opening_stock") or "0")
+                if opening > 0:
+                    apply_movement(ing, StockMovement.ADJUSTMENT, opening,
+                                   reason="opening stock (import)", user=request.user)
+                created.append(name)
+            except Exception as e:
+                errors.append({"row": lineno, "name": name, "reason": str(e)[:120]})
+        return Response({"created": len(created), "skipped_existing": skipped,
+                         "errors": errors})
+
     @action(detail=False, methods=["get"])
     def low_stock(self, request):
         low = [i for i in Ingredient.objects.all() if i.below_par]

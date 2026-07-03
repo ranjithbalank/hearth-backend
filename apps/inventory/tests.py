@@ -86,6 +86,37 @@ class InventoryApiTests(TestCase):
         self.assertEqual(len(r.data), 1)
         self.assertEqual(r.data[0]["kind"], "wastage")
 
+    def test_bulk_import_csv_creates_materials_with_opening_stock(self):
+        import io as _io
+        csv_body = (
+            "name,category,unit,opening_stock,min_stock_level,reorder_level,"
+            "purchase_rate,storage_location,expiry_date\n"
+            "Basmati Rice,Grains,kg,25,5,10,90,Dry store,\n"
+            "Rice,,kg,5,0,0,60,,\n"          # duplicate of existing → skipped
+            "Olive Oil,Oils,bottle,12,2,4,450,Dry store,2026-12-01\n"
+        )
+        f = _io.BytesIO(csv_body.encode())
+        f.name = "materials.csv"
+        r = self.client.post(reverse("ingredient-import-materials"),
+                             {"file": f}, format="multipart")
+        self.assertEqual(r.status_code, 200)
+        self.assertEqual(r.data["created"], 2)
+        self.assertEqual(r.data["skipped_existing"], ["Rice"])
+        self.assertEqual(r.data["errors"], [])
+        rice = Ingredient.objects.get(name="Basmati Rice")
+        self.assertEqual(rice.current_stock, Decimal("25.000"))
+        self.assertEqual(rice.movements.first().reason, "opening stock (import)")
+        # Unknown category and unit were auto-created for onboarding.
+        from .models import IngredientCategory, Uom
+        self.assertTrue(IngredientCategory.objects.filter(name="Grains").exists())
+        self.assertTrue(Uom.objects.filter(code="bottle").exists())
+        oil = Ingredient.objects.get(name="Olive Oil")
+        self.assertEqual(str(oil.expiry_date), "2026-12-01")
+        # Template download works too.
+        r = self.client.get(reverse("ingredient-import-materials"))
+        self.assertEqual(r["Content-Type"], "text/csv")
+        self.assertIn("opening_stock", r.content.decode())
+
     def test_stock_transfer_out_and_in(self):
         ing = Ingredient.objects.get(name="Rice")  # 40 in stock
         r = self.client.post(reverse("ingredient-transfer", args=[ing.id]),
