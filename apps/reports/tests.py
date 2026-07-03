@@ -70,6 +70,33 @@ class RestaurantReportsTests(TestCase):
         kpis = {k["label"]: k["value"] for k in data["kpis"]}
         self.assertEqual(Decimal(kpis["Gross profit (F&B)"]), Decimal("370"))
 
+    def test_aggregator_report_and_records(self):
+        """Zomato/Swiggy cumulative report + order-level records export."""
+        z = Order.objects.create(mode=Order.DELIVERY, status=Order.SETTLED,
+                                 source_platform="zomato", external_ref="Z-1001")
+        OrderLine.objects.create(order=z, menu_item=self.item, qty=1,
+                                 unit_price=Decimal("200"), kot_fired=True)
+        s = Order.objects.create(mode=Order.DELIVERY, status=Order.SETTLED,
+                                 source_platform="swiggy", external_ref="S-2002")
+        OrderLine.objects.create(order=s, menu_item=self.item, qty=2,
+                                 unit_price=Decimal("200"), kot_fired=True)
+        # A received-but-unsettled order counts as received, not as sales.
+        Order.objects.create(mode=Order.DELIVERY, status=Order.KOT_FIRED,
+                             source_platform="zomato", external_ref="Z-1002")
+        data = self._view("aggregator")
+        kpis = {k["label"]: k["value"] for k in data["kpis"]}
+        self.assertEqual(Decimal(kpis["Online sales (settled)"]), Decimal("600"))
+        self.assertEqual(kpis["Orders received"], 3)
+        bars = {b["name"]: b["value"] for b in data["bars"]}
+        self.assertEqual(bars["Swiggy"], 400.0)
+        self.assertEqual(bars["Zomato"], 200.0)
+        # Records export: one row per order with its reference.
+        r = self.client.get("/api/reports/export/?report=aggregator&fmt=csv")
+        body = r.content.decode()
+        self.assertIn("Z-1001", body)
+        self.assertIn("S-2002", body)
+        self.assertIn("Z-1002", body)   # unsettled orders appear in records too
+
     def test_export_csv_for_restaurant_report(self):
         r = self.client.get("/api/reports/export/?report=food_cost&fmt=csv")
         self.assertEqual(r.status_code, 200)

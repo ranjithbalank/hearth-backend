@@ -168,6 +168,17 @@ def _report_rows(report):
             rows.append([fo.guest_name, fo.room.number if fo.room else "—",
                          fo.id_type, fo.id_number, fo.opened_at.strftime("%Y-%m-%d")])
         return ("Guest Report", ["Guest", "Room", "ID type", "ID number", "Check-in"], rows)
+    if report == "aggregator":
+        # Order-level records — one row per Zomato/Swiggy/website/QR order.
+        qs = (Order.objects.filter(source_platform__in=["zomato", "swiggy", "website", "qr"])
+              .prefetch_related("lines__menu_item").order_by("-created_at"))
+        rows = [[o.created_at.strftime("%Y-%m-%d %H:%M"), o.source_platform,
+                 o.external_ref or f"order:{o.id}",
+                 sum(l.qty for l in o.lines.all()), str(o.totals()["total"]),
+                 o.get_status_display()]
+                for o in qs]
+        return ("Aggregator Order Records",
+                ["Date", "Platform", "Reference", "Items", "Total", "Status"], rows)
     restaurant = _restaurant_report(report)
     if restaurant:
         # §7 exports reuse the viewer payload: KPI rows then the series.
@@ -368,6 +379,35 @@ def _restaurant_report(report):
             "bars": bars,
         }
 
+    if report == "aggregator":
+        labels = {"zomato": "Zomato", "swiggy": "Swiggy",
+                  "website": "Website", "qr": "QR ordering"}
+        qs = (Order.objects.filter(source_platform__in=labels)
+              .prefetch_related("lines__menu_item"))
+        received = 0
+        settled_total = Decimal("0")
+        by_platform = {}
+        for o in qs:
+            received += 1
+            if o.status in (Order.SETTLED, Order.POSTED_TO_ROOM):
+                t = o.totals()["total"]
+                settled_total += t
+                name = labels[o.source_platform]
+                by_platform[name] = by_platform.get(name, Decimal("0")) + t
+        settled_count = sum(1 for o in qs if o.status in (Order.SETTLED, Order.POSTED_TO_ROOM))
+        avg = round(settled_total / settled_count, 2) if settled_count else Decimal("0")
+        return {
+            "title": "Zomato / Swiggy — Aggregator Orders",
+            "kpis": [
+                {"label": "Online sales (settled)", "value": str(settled_total), "money": True},
+                {"label": "Orders received", "value": received},
+                {"label": "Avg order value", "value": str(avg), "money": True},
+            ],
+            "series_label": "Cumulative sales by platform (₹)",
+            "bars": sorted(({"name": k, "value": float(v)} for k, v in by_platform.items()),
+                           key=lambda x: -x["value"]),
+        }
+
     if report == "item_profitability":
         from apps.recipes.models import Recipe
         sales = _item_sales()
@@ -459,7 +499,7 @@ class CatalogueView(ModuleAPIView):
                 "Night Audit / Daily Revenue", "No-show & Cancellation"]},
             {"group": "F&B", "tiles": [
                 "F&B Sales Summary", "Item & Category Performance",
-                "Discounts & Voids"]},
+                "Discounts & Voids", "Zomato / Swiggy Aggregators"]},
             {"group": "Restaurant Inventory", "tiles": [
                 "Recipe-wise Consumption", "Daily Sales vs Consumption",
                 "Purchase vs Consumption", "Food Cost",
