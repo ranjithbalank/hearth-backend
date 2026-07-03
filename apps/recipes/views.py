@@ -41,13 +41,48 @@ class RecipeViewSet(ModuleViewSetMixin, viewsets.ViewSet):
         out.sort(key=lambda r: (r["recipe_id"] is not None, r["name"]))
         return Response(out)
 
+    @action(detail=False, methods=["get"])
+    def menu_categories(self, request):
+        """POS menu categories for the create-recipe form — surfaced here so
+        recipe-only roles (e.g. Chef) don't need the pos module."""
+        from apps.pos.models import Category
+        return Response([{"id": c.id, "name": c.name} for c in Category.objects.all()])
+
     def create(self, request):
         """Create or replace the recipe (BOM) for a menu item (spec §2/§6).
-        Body: {menu_item, lines: [{ingredient?|sub_recipe?, qty, unit?, wastage_pct?}]}"""
-        from apps.pos.models import MenuItem
-        item = MenuItem.objects.filter(pk=request.data.get("menu_item")).first()
-        if not item:
-            return Response({"detail": "menu item not found"}, status=400)
+
+        Body: {menu_item, lines: [{ingredient?|sub_recipe?, qty, unit?, wastage_pct?}]}
+        OR {new_item: {name, price, category, gst_rate?, diet?}, lines: [...]} —
+        creates the dish on the restaurant menu (available immediately) and
+        attaches the recipe in one step.
+        """
+        from apps.pos.models import Category, MenuItem
+        new_item = request.data.get("new_item")
+        if new_item:
+            name = (new_item.get("name") or "").strip()
+            if not name:
+                return Response({"detail": "the dish needs a name"}, status=400)
+            if MenuItem.objects.filter(name__iexact=name).exists():
+                return Response({"detail": f'"{name}" is already on the menu — edit its recipe from the mapping tab'},
+                                status=400)
+            try:
+                price = Decimal(str(new_item.get("price", 0)))
+            except Exception:
+                return Response({"detail": "invalid price"}, status=400)
+            if price <= 0:
+                return Response({"detail": "the selling price must be positive"}, status=400)
+            cat_name = (new_item.get("category") or "").strip() or "Mains"
+            category, _ = Category.objects.get_or_create(name=cat_name)
+            item = MenuItem.objects.create(
+                name=name, category=category, price=price,
+                gst_rate=Decimal(str(new_item.get("gst_rate") or 5)),
+                diet=new_item.get("diet") or MenuItem.VEG,
+                available=True,
+            )
+        else:
+            item = MenuItem.objects.filter(pk=request.data.get("menu_item")).first()
+            if not item:
+                return Response({"detail": "menu item not found"}, status=400)
         lines = request.data.get("lines") or []
         if not lines:
             return Response({"detail": "at least one ingredient line is required"}, status=400)
@@ -74,8 +109,10 @@ class RecipeViewSet(ModuleViewSetMixin, viewsets.ViewSet):
                 wastage_pct=Decimal(str(l.get("wastage_pct") or 0)),
             )
         log_action(request.user, "recipe_mapped", entity="Recipe", entity_id=recipe.id,
-                   after={"menu_item": item.name, "lines": len(parsed)})
-        return Response({"id": recipe.id, "menu_item": item.id,
+                   after={"menu_item": item.name, "lines": len(parsed),
+                          "menu_item_created": bool(new_item)})
+        return Response({"id": recipe.id, "menu_item": item.id, "item": item.name,
+                         "menu_item_created": bool(new_item),
                          "plate_cost": str(recipe.plate_cost)},
                         status=201 if created else 200)
 

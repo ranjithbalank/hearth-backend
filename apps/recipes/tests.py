@@ -170,6 +170,41 @@ class MenuItemMappingTests(TestCase):
             "lines": [{"ingredient": self.rice.id, "qty": "-1"}]}, format="json")
         self.assertEqual(r.status_code, 400)
 
+    def test_create_recipe_with_new_dish_puts_it_on_menu_and_deducts(self):
+        """One flow: recipe from raw materials creates the POS dish; selling it
+        auto-deducts the raw materials (spec §2/§3/§5)."""
+        r = self.client.post("/api/recipes/", {
+            "new_item": {"name": "Veg Fried Rice", "price": "180",
+                         "category": "Rice Bowls", "gst_rate": "5", "diet": "veg"},
+            "lines": [{"ingredient": self.rice.id, "qty": "250", "unit": "g"}],
+        }, format="json")
+        self.assertEqual(r.status_code, 201, r.data)
+        self.assertTrue(r.data["menu_item_created"])
+        dish = MenuItem.objects.get(name="Veg Fried Rice")
+        self.assertTrue(dish.available)                       # sellable immediately
+        self.assertEqual(dish.category.name, "Rice Bowls")    # category auto-created
+        self.assertEqual(dish.recipe.plate_cost, Decimal("15.0000"))  # 0.25 kg × ₹60
+        # Selling 2 plates draws 0.5 kg of rice from the store.
+        order = Order.objects.create(mode=Order.DINEIN)
+        line = OrderLine.objects.create(order=order, menu_item=dish, qty=2,
+                                        unit_price=dish.price)
+        from .services import deduct_for_newly_fired
+        deduct_for_newly_fired(order, [line])
+        self.rice.refresh_from_db()
+        self.assertEqual(self.rice.current_stock, Decimal("19.500"))
+        # Duplicate dish names are rejected with a helpful message.
+        r = self.client.post("/api/recipes/", {
+            "new_item": {"name": "veg fried rice", "price": "180"},
+            "lines": [{"ingredient": self.rice.id, "qty": "1"}],
+        }, format="json")
+        self.assertEqual(r.status_code, 400)
+
+    def test_menu_categories_listing(self):
+        from django.urls import reverse
+        r = self.client.get(reverse("recipe-menu-categories"))
+        self.assertEqual(r.status_code, 200)
+        self.assertIn("Main", [c["name"] for c in r.data])
+
     def test_unmap_deletes_recipe(self):
         rid = Recipe.objects.get(menu_item=self.mapped).id
         r = self.client.delete(f"/api/recipes/{rid}/")
