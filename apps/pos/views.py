@@ -434,13 +434,40 @@ class OrderViewSet(ModuleViewSetMixin, viewsets.ModelViewSet):
         # Every order gets a client_uuid so the public status page can reference it.
         import uuid
         user = self.request.user
-        serializer.save(captain=user.get_full_name() or user.username,
-                        client_uuid=serializer.validated_data.get("client_uuid") or uuid.uuid4().hex)
+        extra = {"captain": user.get_full_name() or user.username,
+                 "client_uuid": serializer.validated_data.get("client_uuid") or uuid.uuid4().hex}
+        if serializer.validated_data.get("mode") == Order.ROOM:
+            # Room channel: the guest's room is chosen up front, so the bill can
+            # only ever land on that folio (no free folio-picking at the end).
+            from rest_framework.exceptions import ValidationError
+
+            from apps.frontoffice.models import Folio
+            folio = (Folio.objects.filter(pk=self.request.data.get("folio"),
+                                          status=Folio.OPEN, room__isnull=False)
+                     .select_related("room").first())
+            if not folio:
+                raise ValidationError({"detail": "pick an in-house room (open folio) for a room order"})
+            extra["folio"] = folio
+            extra["captain"] = f"Room {folio.room.number}"   # kitchen sees the destination
+            extra["source_platform"] = "roomservice"
+        serializer.save(**extra)
+
+    @action(detail=False, methods=["get"])
+    def room_folios(self, request):
+        """In-house rooms for the POS Room channel — open folios with a room."""
+        if not active_entitlements().get("hms"):
+            return Response([])
+        from apps.frontoffice.models import Folio
+        return Response([
+            {"folio": f.id, "room": f.room.number, "guest": f.guest_name}
+            for f in Folio.objects.filter(status=Folio.OPEN, room__isnull=False)
+            .select_related("room").order_by("room__number")
+        ])
 
     def _assign_token(self, order):
         """Daily pickup token for takeaway/delivery — shown on the token board."""
         from django.utils import timezone
-        if order.mode == Order.DINEIN or order.token_no:
+        if order.mode in (Order.DINEIN, Order.ROOM) or order.token_no:
             return
         today = timezone.localdate()
         last = (Order.objects.filter(created_at__date=today, token_no__isnull=False)
@@ -1022,7 +1049,8 @@ class OrderViewSet(ModuleViewSetMixin, viewsets.ModelViewSet):
     def post_to_room(self, request, pk=None):
         """Cross-module seam: post an in-house guest's F&B bill to their folio (FR-PAY-009).
 
-        Only when the Hotel edition (hms) is enabled, else hidden/blocked.
+        Only Room-channel orders can post, and only to the folio chosen when
+        the order was opened — a table bill can never land on a guest's room.
         """
         if not active_entitlements().get("hms"):
             return Response(
@@ -1033,14 +1061,19 @@ class OrderViewSet(ModuleViewSetMixin, viewsets.ModelViewSet):
         err = _closed_error(order)
         if err:
             return err
+        if order.mode != Order.ROOM or not order.folio_id:
+            return Response(
+                {"detail": "table orders settle at the table — take in-house guest orders via the Room channel"},
+                status=400)
         if not order.lines.exists():
             return Response({"detail": "nothing to post"}, status=400)
         if order.lines.filter(kot_fired=False).exists():
             return Response({"detail": "Un-fired items on the order — fire the KOT before posting"},
                             status=400)
-        folio = Folio.objects.filter(pk=request.data.get("folio"), status=Folio.OPEN).first()
+        folio = Folio.objects.filter(pk=order.folio_id, status=Folio.OPEN).first()
         if not folio:
-            return Response({"detail": "open folio not found for this room/guest"}, status=400)
+            return Response({"detail": "the guest's folio is no longer open — collect payment at the counter"},
+                            status=400)
         sub = order._subtotal()
         disc = order.discount_amount(sub)
         factor = (sub - disc) / sub if sub else Decimal("1")

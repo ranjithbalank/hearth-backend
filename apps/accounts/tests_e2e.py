@@ -42,12 +42,14 @@ class GuestJourneyE2E(TestCase):
                         "mobile": "+91 9000000000"}).data
         self.room.refresh_from_db()
         self.assertEqual(self.room.status, Room.OCCUPIED)
-        # 3. POS order -> fire KOT -> post to room
-        order = c.post(reverse("order-list"), {"mode": "dinein"}, format="json").data
+        # 3. POS Room-channel order -> fire KOT -> post to the guest's own folio.
+        # (Table orders can no longer post to rooms — segregation loophole fix.)
+        order = c.post(reverse("order-list"), {"mode": "room", "folio": folio["id"]},
+                       format="json").data
         c.post(reverse("order-add-item", args=[order["id"]]),
                {"menu_item": self.item.id, "qty": 2}, format="json")
         c.post(reverse("order-fire-kot", args=[order["id"]]))
-        c.post(reverse("order-post-to-room", args=[order["id"]]), {"folio": folio["id"]}, format="json")
+        c.post(reverse("order-post-to-room", args=[order["id"]]), {}, format="json")
         # folio now carries the F&B charge
         f = c.get(reverse("folio-detail", args=[folio["id"]])).data
         self.assertTrue(any(line["kind"] == "fnb" for line in f["lines"]))

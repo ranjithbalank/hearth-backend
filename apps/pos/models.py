@@ -165,7 +165,11 @@ class Order(models.Model):
     DINEIN = "dinein"
     TAKEAWAY = "takeaway"
     DELIVERY = "delivery"
-    MODE_CHOICES = [(DINEIN, "Dine-in"), (TAKEAWAY, "Takeaway"), (DELIVERY, "Delivery")]
+    # Room channel: an in-house guest's order, taken against their folio from
+    # the start — the bill posts to the room, never to a table.
+    ROOM = "room"
+    MODE_CHOICES = [(DINEIN, "Dine-in"), (TAKEAWAY, "Takeaway"),
+                    (DELIVERY, "Delivery"), (ROOM, "Room")]
 
     OPEN = "open"
     KOT_FIRED = "kot_fired"

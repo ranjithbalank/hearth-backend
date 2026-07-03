@@ -141,7 +141,8 @@ class FolioViewSet(ModuleViewSetMixin, viewsets.ModelViewSet):
         room_no = folio.room.number if folio.room else "—"
         with transaction.atomic():
             order = Order.objects.create(
-                mode=Order.DELIVERY,
+                mode=Order.ROOM,
+                folio=folio,
                 captain=f"Room {room_no}",           # destination shown to the kitchen
                 source_platform="roomservice",
                 external_ref=f"folio:{folio.id}",

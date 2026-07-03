@@ -10,7 +10,7 @@ from rest_framework.test import APIClient
 
 from apps.accounts.models import User
 from apps.inventory.models import Ingredient, StockMovement
-from apps.pos.models import Category, MenuItem, Order
+from apps.pos.models import Category, MenuItem, Order, Table
 from apps.procurement.models import PurchaseOrder, PurchaseOrderLine, Supplier
 
 
@@ -189,6 +189,93 @@ class RestaurantE2ETests(TestCase):
         self.assertEqual(r.status_code, 200)
         rice.refresh_from_db()
         self.assertEqual(rice.current_stock, Decimal("4.700"))   # food was cooked; no restock
+
+    def _inhouse_folio(self, room_no="101"):
+        from datetime import date, timedelta
+
+        from apps.frontoffice import services as fo
+        from apps.reservations.models import Reservation
+        from apps.rooms.models import Room, RoomType
+        rt = RoomType.objects.create(code="STD", name="Std", base_rate=Decimal("4000"),
+                                     gst_slab=Decimal("12"))
+        room = Room.objects.create(number=room_no, room_type=rt, floor=1,
+                                   status=Room.VACANT_CLEAN)
+        resv = Reservation.objects.create(
+            guest_name="In House Guest", room_type=rt, checkin_date=date.today(),
+            checkout_date=date.today() + timedelta(days=1), nights=1, rate=Decimal("4000"))
+        return fo.check_in(resv, room)
+
+    def test_room_channel_replaces_table_post_to_room(self):
+        """Loophole fix: a table bill can never land on a guest room — in-house
+        orders go through the Room channel, folio chosen at order start."""
+        folio = self._inhouse_folio()
+        rice = self._material("Rice", stock="5")
+        dish = self._dish("Curd Rice", "120", [{"ingredient": rice.id, "qty": "0.2"}])
+        # A table (dine-in) order can't post to a room at all.
+        t_order = self._order(dish, 1)
+        r = self.client.post(f"/api/pos/orders/{t_order.id}/post_to_room/",
+                             {"folio": folio.id}, format="json")
+        self.assertEqual(r.status_code, 400)
+        self.assertIn("Room channel", r.data["detail"])
+        # A room order must name an open in-house folio up front…
+        r = self.client.post("/api/pos/orders/", {"mode": "room"}, format="json")
+        self.assertEqual(r.status_code, 400)
+        # …picked from the POS's in-house list.
+        r = self.client.get("/api/pos/orders/room_folios/")
+        self.assertIn("101", [x["room"] for x in r.data])
+        r = self.client.post("/api/pos/orders/", {"mode": "room", "folio": folio.id},
+                             format="json")
+        self.assertEqual(r.status_code, 201, r.data)
+        oid = r.data["id"]
+        self.client.post(f"/api/pos/orders/{oid}/add_item/",
+                         {"menu_item": dish.id, "qty": 2}, format="json")
+        self.client.post(f"/api/pos/orders/{oid}/fire_kot/", {}, format="json")
+        order = Order.objects.get(pk=oid)
+        self.assertEqual(order.captain, "Room 101")   # kitchen sees the destination
+        self.assertIsNone(order.token_no)             # no pickup token for rooms
+        # Posting needs no folio argument — it can only go to the preset one.
+        r = self.client.post(f"/api/pos/orders/{oid}/post_to_room/", {}, format="json")
+        self.assertEqual(r.status_code, 200, r.data)
+        folio.refresh_from_db()
+        self.assertEqual(folio.lines.count(), 1)
+        self.assertIn("Curd Rice", folio.lines.get().description)
+        order.refresh_from_db()
+        self.assertEqual(order.status, Order.POSTED_TO_ROOM)
+
+    def test_two_parties_share_a_table_and_bill_separately(self):
+        """A1 seats two separate parties: each has its own order and bill; the
+        table frees only when the last one closes."""
+        rice = self._material("Rice", stock="10")
+        dish = self._dish("Thali", "220", [{"ingredient": rice.id, "qty": "0.2"}], gst="0")
+        table = Table.objects.create(name="A1", seats=4)
+
+        def open_on_table(qty):
+            r = self.client.post("/api/pos/orders/",
+                                 {"mode": "dinein", "table": table.id}, format="json")
+            oid = r.data["id"]
+            self.client.post(f"/api/pos/orders/{oid}/add_item/",
+                             {"menu_item": dish.id, "qty": qty}, format="json")
+            self.client.post(f"/api/pos/orders/{oid}/fire_kot/", {}, format="json")
+            return oid
+
+        a = open_on_table(2)   # party 1
+        b = open_on_table(1)   # party 2
+        # Both live on the same table at once.
+        r = self.client.get(f"/api/pos/orders/?table={table.id}&open=1")
+        self.assertEqual(len(r.data), 2)
+        # Party 1 pays and leaves — the table is still running for party 2.
+        self.client.post(f"/api/pos/orders/{a}/settle/", {"tender": "Cash"}, format="json")
+        table.refresh_from_db()
+        self.assertEqual(table.status, Table.RUNNING)
+        self.assertEqual(Order.objects.get(pk=a).totals()["total"], Decimal("440.00"))
+        # Party 2 pays — now the table frees.
+        self.client.post(f"/api/pos/orders/{b}/settle/", {"tender": "UPI"}, format="json")
+        table.refresh_from_db()
+        self.assertEqual(table.status, Table.FREE)
+        self.assertEqual(Order.objects.get(pk=b).totals()["total"], Decimal("220.00"))
+        # Kitchen-side: both parties drew stock correctly.
+        rice.refresh_from_db()
+        self.assertEqual(rice.current_stock, Decimal("9.400"))   # 10 − 3×0.2
 
     def test_discount_with_reason_flows_into_totals(self):
         rice = self._material("Rice", stock="5")
