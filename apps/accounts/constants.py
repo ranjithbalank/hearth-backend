@@ -144,6 +144,8 @@ MODULE_ENTITLEMENT = {
 # (indent approval) is the store's call — never the requester's own.
 PO_APPROVER_ROLES = {ROLE_SUPER_ADMIN, ROLE_MD, ROLE_GM, ROLE_FINANCE, ROLE_REST_MGR}
 INDENT_APPROVER_ROLES = {ROLE_SUPER_ADMIN, ROLE_MD, ROLE_GM, ROLE_REST_MGR, ROLE_STORE}
+# Marking food ready on the KDS is the kitchen's alone (chef + managers).
+KITCHEN_ROLES = {ROLE_SUPER_ADMIN, ROLE_MD, ROLE_GM, ROLE_REST_MGR, ROLE_CHEF}
 
 
 # --- POS tender mapping (BRD 5.10 role mapping) ---

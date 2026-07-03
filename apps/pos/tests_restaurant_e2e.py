@@ -365,6 +365,26 @@ class RestaurantE2ETests(TestCase):
         self.assertEqual(order.kitchen_status, "served")
         self.assertNotIn(oid, [x["order"] for x in self.client.get("/api/pos/orders/ready/").data])
 
+    def test_only_kitchen_roles_bump_ready(self):
+        """The cashier can WATCH the KDS but never mark food ready; the chef can."""
+        rice = self._material("Rice", stock="5")
+        dish = self._dish("Upma", "90", [{"ingredient": rice.id, "qty": "0.1"}])
+        order = self._order(dish, 1, mode="takeaway")
+        kds = self.client.get("/api/kds/").data
+        ticket = next(t for t in kds if t["kot_no"] == order.kot_no)
+        cashier = APIClient()
+        cashier.force_authenticate(User.objects.create_user(
+            username="cashk", password="Tk9$mZ2pQw!7", role="F&B Cashier"))
+        self.assertEqual(cashier.get("/api/kds/").status_code, 200)      # can watch
+        r = cashier.post(f"/api/kds/{ticket['id']}/bump/")
+        self.assertEqual(r.status_code, 403)                             # can't mark ready
+        chef = APIClient()
+        chef.force_authenticate(User.objects.create_user(
+            username="chefk", password="Tk9$mZ2pQw!7", role="Chef / Kitchen"))
+        self.assertEqual(chef.post(f"/api/kds/{ticket['id']}/bump/").status_code, 200)
+        order.refresh_from_db()
+        self.assertEqual(order.kitchen_status, "ready")
+
     def test_captain_takes_table_orders_only(self):
         captain = APIClient()
         captain.force_authenticate(User.objects.create_user(

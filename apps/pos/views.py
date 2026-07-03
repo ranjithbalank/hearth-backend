@@ -355,7 +355,14 @@ class KdsViewSet(ModuleViewSetMixin, viewsets.ViewSet):
 
     @action(detail=True, methods=["post"])
     def bump(self, request, pk=None):
-        """Advance one KOT round: cooking → ready → served."""
+        """Advance one KOT round: cooking → ready → served.
+
+        Only the kitchen (chef / managers) bumps — the counter watches the
+        board but never marks food ready.
+        """
+        from apps.accounts.constants import KITCHEN_ROLES
+        if getattr(request.user, "role", "") not in KITCHEN_ROLES:
+            return Response({"detail": "only the kitchen marks food ready"}, status=403)
         kot = Kot.objects.filter(pk=pk).select_related("order").first()
         if not kot:
             return Response({"detail": "not found"}, status=404)
@@ -413,6 +420,9 @@ class KdsViewSet(ModuleViewSetMixin, viewsets.ViewSet):
     @action(detail=True, methods=["post"])
     def beo_bump(self, request, pk=None):
         """Advance a banquet BEO prep ticket from the kitchen display (FR-BQT-004)."""
+        from apps.accounts.constants import KITCHEN_ROLES
+        if getattr(request.user, "role", "") not in KITCHEN_ROLES:
+            return Response({"detail": "only the kitchen marks food ready"}, status=403)
         from apps.banquets.models import Event as BqEvent
         e = BqEvent.objects.filter(pk=pk).first()
         if not e:
