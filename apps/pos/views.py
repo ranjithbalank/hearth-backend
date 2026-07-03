@@ -434,6 +434,11 @@ class OrderViewSet(ModuleViewSetMixin, viewsets.ModelViewSet):
         # Every order gets a client_uuid so the public status page can reference it.
         import uuid
         user = self.request.user
+        # Captains work the tables — takeaway/delivery/room are counter flows.
+        if (getattr(user, "role", "") == "Captain"
+                and serializer.validated_data.get("mode", Order.DINEIN) != Order.DINEIN):
+            from rest_framework.exceptions import ValidationError
+            raise ValidationError({"detail": "captains take table orders — counter flows stay with the cashier"})
         extra = {"captain": user.get_full_name() or user.username,
                  "client_uuid": serializer.validated_data.get("client_uuid") or uuid.uuid4().hex}
         if serializer.validated_data.get("mode") == Order.ROOM:

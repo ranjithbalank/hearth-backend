@@ -277,6 +277,18 @@ class RestaurantE2ETests(TestCase):
         rice.refresh_from_db()
         self.assertEqual(rice.current_stock, Decimal("9.400"))   # 10 − 3×0.2
 
+    def test_captain_takes_table_orders_only(self):
+        captain = APIClient()
+        captain.force_authenticate(User.objects.create_user(
+            username="capm", password="Tk9$mZ2pQw!7", role="Captain"))
+        table = Table.objects.create(name="B1", seats=2)
+        for mode in ("takeaway", "delivery"):
+            r = captain.post("/api/pos/orders/", {"mode": mode}, format="json")
+            self.assertEqual(r.status_code, 400, mode)
+        r = captain.post("/api/pos/orders/", {"mode": "dinein", "table": table.id},
+                         format="json")
+        self.assertEqual(r.status_code, 201)
+
     def test_discount_with_reason_flows_into_totals(self):
         rice = self._material("Rice", stock="5")
         dish = self._dish("Meals", "200", [{"ingredient": rice.id, "qty": "0.2"}], gst="0")
