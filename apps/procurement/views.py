@@ -92,6 +92,11 @@ class PurchaseOrderViewSet(ModuleViewSetMixin, viewsets.ViewSet):
 
     @action(detail=True, methods=["post"])
     def approve(self, request, pk=None):
+        from apps.accounts.constants import PO_APPROVER_ROLES
+        if getattr(request.user, "role", "") not in PO_APPROVER_ROLES:
+            return Response(
+                {"detail": "PO approval is a spend decision — it needs the restaurant manager, finance or GM"},
+                status=403)
         po = PurchaseOrder.objects.filter(pk=pk).first()
         if not po or po.status != PurchaseOrder.PENDING:
             return Response({"detail": "PO not pending"}, status=400)

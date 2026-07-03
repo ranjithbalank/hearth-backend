@@ -13,6 +13,7 @@ ROLE_MD = "Managing Director"
 ROLE_CEO = "CEO"
 ROLE_GM = "General Manager"
 ROLE_FINANCE = "Finance"
+ROLE_REST_MGR = "Restaurant Manager"
 ROLE_FRONT_OFFICE = "Front Office"
 ROLE_CASHIER = "F&B Cashier"
 ROLE_CAPTAIN = "Captain"
@@ -27,6 +28,7 @@ ROLE_CHOICES = [
     (ROLE_CEO, ROLE_CEO),
     (ROLE_GM, ROLE_GM),
     (ROLE_FINANCE, ROLE_FINANCE),
+    (ROLE_REST_MGR, ROLE_REST_MGR),
     (ROLE_FRONT_OFFICE, ROLE_FRONT_OFFICE),
     (ROLE_CASHIER, ROLE_CASHIER),
     (ROLE_CAPTAIN, ROLE_CAPTAIN),
@@ -71,6 +73,14 @@ ROLE_ALLOW = {
     ROLE_FINANCE: [
         "dashboard", "accounting", "tax", "gstmaster", "reports",
         "customers", "vendors", "suppliers", "pomanage", "hr", "notifications",
+    ],
+    # Restaurant Manager — runs the whole restaurant side: POS/KDS/online,
+    # the store & supply chain (approves indents and POs), recipes and the
+    # menu/table masters, restaurant reports. No rooms, no books.
+    ROLE_REST_MGR: [
+        "dashboard", "pos", "kds", "online", "inventory", "procurement",
+        "pomanage", "matreq", "recipes", "suppliers", "vendors",
+        "menumaster", "tablemaster", "reports", "notifications",
     ],
     # Front Office / Reception — the guest-facing desk only: front desk, room
     # assignment & status, reservations, folios/cashiering, banquets and guest
@@ -129,6 +139,13 @@ MODULE_ENTITLEMENT = {
 }
 
 
+# --- Approval chains (segregation of duties) ---
+# Spending money (PO approval) is a manager's call; issuing held stock
+# (indent approval) is the store's call — never the requester's own.
+PO_APPROVER_ROLES = {ROLE_SUPER_ADMIN, ROLE_MD, ROLE_GM, ROLE_FINANCE, ROLE_REST_MGR}
+INDENT_APPROVER_ROLES = {ROLE_SUPER_ADMIN, ROLE_MD, ROLE_GM, ROLE_REST_MGR, ROLE_STORE}
+
+
 # --- POS tender mapping (BRD 5.10 role mapping) ---
 # Which tenders each role may accept when settling a bill. "*" == all tenders.
 # Captains take digital payments (UPI / gateway) tableside; cash is counted and
@@ -138,6 +155,7 @@ ROLE_TENDERS = {
     ROLE_MD: "*",
     ROLE_GM: "*",
     ROLE_FINANCE: "*",
+    ROLE_REST_MGR: "*",
     ROLE_CASHIER: "*",
     ROLE_FRONT_OFFICE: "*",
     ROLE_CAPTAIN: ["UPI", "Gateway"],

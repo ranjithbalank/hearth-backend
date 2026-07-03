@@ -20,6 +20,7 @@ from apps.accounts.constants import (
     ROLE_GM,
     ROLE_HOUSEKEEPING,
     ROLE_MD,
+    ROLE_REST_MGR,
     ROLE_STORE,
     ROLE_SUPER_ADMIN,
 )
@@ -92,6 +93,7 @@ class Command(BaseCommand):
             ("ceo", "Ravi", "Chandran", ROLE_CEO, False),
             ("gm", "Meera", "Rao", ROLE_GM, True),
             ("finance", "Divya", "Krishnan", ROLE_FINANCE, False),
+            ("restmanager", "Rekha", "Pillai", ROLE_REST_MGR, False),
             ("frontoffice", "Anil", "Kumar", ROLE_FRONT_OFFICE, False),
             ("cashier", "Priya", "Nair", ROLE_CASHIER, False),
             ("captain", "Vijay", "Menon", ROLE_CAPTAIN, False),

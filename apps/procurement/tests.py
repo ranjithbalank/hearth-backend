@@ -53,6 +53,27 @@ class ProcurementApiTests(TestCase):
             "supplier": self.sup.id,
             "lines": [{"ingredient": self.ing.id, "qty": "-1"}]}, format="json").status_code, 400)
 
+    def test_po_approval_is_a_manager_decision(self):
+        """Store keeper raises but can't approve (spend control); the
+        Restaurant Manager can — then the store receives."""
+        store = APIClient()
+        store.force_authenticate(User.objects.create_user(
+            username="storepo", password="Tk9$mZ2pQw!7", role="Store Keeper"))
+        r = store.post("/api/purchase-orders/", {
+            "supplier": self.sup.id,
+            "lines": [{"ingredient": self.ing.id, "qty": "5", "rate": "80"}],
+        }, format="json")
+        self.assertEqual(r.status_code, 201)
+        po_id = r.data["id"]
+        self.assertEqual(store.post(f"/api/purchase-orders/{po_id}/approve/").status_code, 403)
+        rm = APIClient()
+        rm.force_authenticate(User.objects.create_user(
+            username="rmpo", password="Tk9$mZ2pQw!7", role="Restaurant Manager"))
+        self.assertEqual(rm.post(f"/api/purchase-orders/{po_id}/approve/").status_code, 200)
+        self.assertEqual(store.post(f"/api/purchase-orders/{po_id}/receive/").status_code, 200)
+        self.ing.refresh_from_db()
+        self.assertEqual(self.ing.current_stock, Decimal("15.000"))  # 10 + 5
+
     def test_grn_recosts_material_weighted_average(self):
         """Receiving at a new rate re-costs held stock: (10 kg @60 + 40 kg @90)/50 = 84."""
         self.ing.unit_cost = Decimal("60")

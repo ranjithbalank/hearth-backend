@@ -71,6 +71,11 @@ class MaterialRequestViewSet(ModuleViewSetMixin, viewsets.ViewSet):
         if not r:
             return Response({"detail": "not found"}, status=404)
         if r.status == MaterialRequest.REQUESTED:
+            from apps.accounts.constants import INDENT_APPROVER_ROLES
+            if getattr(request.user, "role", "") not in INDENT_APPROVER_ROLES:
+                return Response(
+                    {"detail": "indent approval needs the store keeper or the restaurant manager"},
+                    status=403)
             if r.requested_by and r.requested_by == request.user.username:
                 return Response(
                     {"detail": "you raised this request — approval needs the store keeper or a manager"},
