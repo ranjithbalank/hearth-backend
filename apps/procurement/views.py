@@ -7,7 +7,7 @@ from apps.accounts.models import log_action
 from apps.accounts.permissions import ModuleViewSetMixin
 from apps.inventory.models import apply_movement
 
-from .models import GoodsReceipt, PurchaseOrder, Supplier, Vendor
+from .models import GoodsReceipt, PurchaseOrder, PurchaseOrderLine, Supplier, Vendor
 
 
 def _po_dict(po):
@@ -55,6 +55,41 @@ class PurchaseOrderViewSet(ModuleViewSetMixin, viewsets.ViewSet):
             qs = qs.filter(status=status_)
         return Response([_po_dict(po) for po in qs])
 
+    def create(self, request):
+        """Raise a purchase order: {supplier, lines: [{ingredient, qty, rate?}]}.
+        Rate defaults to the material's current purchase rate."""
+        from decimal import Decimal, InvalidOperation
+
+        from apps.inventory.models import Ingredient
+
+        supplier = Supplier.objects.filter(pk=request.data.get("supplier")).first()
+        if not supplier:
+            return Response({"detail": "supplier not found"}, status=400)
+        wanted = request.data.get("lines") or []
+        if not wanted:
+            return Response({"detail": "at least one line is required"}, status=400)
+        parsed = []
+        for w in wanted:
+            ing = Ingredient.objects.filter(pk=w.get("ingredient")).first()
+            if not ing:
+                return Response({"detail": "unknown raw material on a line"}, status=400)
+            try:
+                qty = Decimal(str(w.get("qty", 0)))
+                rate = Decimal(str(w.get("rate") or ing.unit_cost or 0))
+            except InvalidOperation:
+                return Response({"detail": "invalid quantity or rate"}, status=400)
+            if qty <= 0:
+                return Response({"detail": "quantities must be positive"}, status=400)
+            parsed.append((ing, qty, rate))
+        with transaction.atomic():
+            po = PurchaseOrder.objects.create(supplier=supplier)
+            for ing, qty, rate in parsed:
+                PurchaseOrderLine.objects.create(purchase_order=po, ingredient=ing,
+                                                 qty=qty, rate=rate)
+        log_action(request.user, "po_create", entity="PurchaseOrder", entity_id=po.id,
+                   after={"supplier": supplier.name, "lines": len(parsed)})
+        return Response(_po_dict(po), status=201)
+
     @action(detail=True, methods=["post"])
     def approve(self, request, pk=None):
         po = PurchaseOrder.objects.filter(pk=pk).first()
@@ -77,7 +112,19 @@ class PurchaseOrderViewSet(ModuleViewSetMixin, viewsets.ViewSet):
                 outstanding = line.qty - line.received_qty
                 if outstanding <= 0:
                     continue
-                apply_movement(line.ingredient, "receipt", outstanding,
+                ing = line.ingredient
+                # Re-cost on receipt (weighted average of held stock + this
+                # consignment) so plate costs track what stock actually cost.
+                if line.rate and line.rate > 0:
+                    from decimal import Decimal
+                    held = max(ing.current_stock or Decimal("0"), Decimal("0"))
+                    total_qty = held + outstanding
+                    if total_qty > 0:
+                        ing.unit_cost = round(
+                            ((held * (ing.unit_cost or Decimal("0")))
+                             + outstanding * line.rate) / total_qty, 2)
+                        ing.save(update_fields=["unit_cost"])
+                apply_movement(ing, "receipt", outstanding,
                                reason="GRN", source=f"PO:{po.id}", user=request.user)
                 line.received_qty = line.qty
                 line.save(update_fields=["received_qty"])

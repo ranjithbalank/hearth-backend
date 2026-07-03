@@ -33,3 +33,32 @@ class ProcurementApiTests(TestCase):
     def test_cannot_receive_before_approval(self):
         r = self.client.post(reverse("po-receive", args=[self.po.id]))
         self.assertEqual(r.status_code, 400)
+
+    def test_create_po_via_api_and_rate_defaults(self):
+        """POs can be raised from the app; rate falls back to the material's cost."""
+        self.ing.unit_cost = Decimal("85")
+        self.ing.save()
+        r = self.client.post("/api/purchase-orders/", {
+            "supplier": self.sup.id,
+            "lines": [{"ingredient": self.ing.id, "qty": "20"}],   # no rate given
+        }, format="json")
+        self.assertEqual(r.status_code, 201, r.data)
+        po = PurchaseOrder.objects.get(pk=r.data["id"])
+        self.assertEqual(po.status, PurchaseOrder.PENDING)
+        self.assertEqual(po.lines.get().rate, Decimal("85"))
+        # Validation: unknown material / empty lines / bad qty.
+        self.assertEqual(self.client.post("/api/purchase-orders/", {
+            "supplier": self.sup.id, "lines": []}, format="json").status_code, 400)
+        self.assertEqual(self.client.post("/api/purchase-orders/", {
+            "supplier": self.sup.id,
+            "lines": [{"ingredient": self.ing.id, "qty": "-1"}]}, format="json").status_code, 400)
+
+    def test_grn_recosts_material_weighted_average(self):
+        """Receiving at a new rate re-costs held stock: (10 kg @60 + 40 kg @90)/50 = 84."""
+        self.ing.unit_cost = Decimal("60")
+        self.ing.save()
+        self.client.post(reverse("po-approve", args=[self.po.id]))
+        self.client.post(reverse("po-receive", args=[self.po.id]))
+        self.ing.refresh_from_db()
+        self.assertEqual(self.ing.current_stock, Decimal("50.000"))
+        self.assertEqual(self.ing.unit_cost, Decimal("84.00"))
