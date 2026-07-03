@@ -168,6 +168,12 @@ def _report_rows(report):
             rows.append([fo.guest_name, fo.room.number if fo.room else "—",
                          fo.id_type, fo.id_number, fo.opened_at.strftime("%Y-%m-%d")])
         return ("Guest Report", ["Guest", "Room", "ID type", "ID number", "Check-in"], rows)
+    restaurant = _restaurant_report(report)
+    if restaurant:
+        # §7 exports reuse the viewer payload: KPI rows then the series.
+        rows = [[k["label"], k["value"]] for k in restaurant["kpis"]]
+        rows += [[b["name"], b["value"]] for b in restaurant["bars"]]
+        return (restaurant["title"], ["Metric / " + restaurant["series_label"], "Value"], rows)
     # occupancy / rooms
     rows = [[r.number, r.room_type_code, r.get_status_display()]
             for r in Room.objects.select_related("room_type")]
@@ -234,6 +240,158 @@ class DayEndView(ModuleAPIView):
         return Response({"tenders": tenders, "total": str(total), "tips": str(tips)})
 
 
+def _item_sales():
+    """Per-menu-item sold qty and revenue across settled/posted orders."""
+    from apps.pos.models import OrderLine
+    rows = {}
+    lines = (OrderLine.objects
+             .filter(order__status__in=[Order.SETTLED, Order.POSTED_TO_ROOM])
+             .select_related("menu_item"))
+    for l in lines:
+        r = rows.setdefault(l.menu_item_id, {
+            "item": l.menu_item, "qty": 0, "revenue": Decimal("0")})
+        r["qty"] += l.qty
+        r["revenue"] += l.unit_price * l.qty
+    return rows
+
+
+def _consumption_cost(days=None):
+    """Total recipe-consumption cost, and per-day / per-ingredient splits (spec §7)."""
+    from django.utils import timezone
+    from datetime import timedelta
+    from apps.inventory.models import StockMovement
+    qs = StockMovement.objects.filter(kind=StockMovement.CONSUMPTION).select_related("ingredient")
+    if days:
+        qs = qs.filter(created_at__gte=timezone.now() - timedelta(days=days))
+    total = Decimal("0")
+    by_day, by_ingredient = {}, {}
+    for m in qs:
+        cost = -m.qty * (m.ingredient.unit_cost or Decimal("0"))
+        total += cost
+        day = m.created_at.date().isoformat()
+        by_day[day] = by_day.get(day, Decimal("0")) + cost
+        by_ingredient[m.ingredient.name] = by_ingredient.get(m.ingredient.name, Decimal("0")) + cost
+    return total, by_day, by_ingredient
+
+
+def _restaurant_report(report):
+    """§7 restaurant analytics: returns the viewer payload, or None if not ours."""
+    from apps.inventory.models import StockMovement
+    from apps.recipes.models import Recipe
+
+    if report == "recipe_consumption":
+        sales = _item_sales()
+        rows = []
+        for r in Recipe.objects.select_related("menu_item").prefetch_related("lines__ingredient"):
+            sold = sales.get(r.menu_item_id, {"qty": 0})["qty"]
+            if not sold:
+                continue
+            rows.append({"name": r.menu_item.name,
+                         "value": float(r.plate_cost * sold)})
+        rows.sort(key=lambda x: -x["value"])
+        return {
+            "title": "Recipe-wise Consumption",
+            "kpis": [
+                {"label": "Recipes consumed", "value": len(rows)},
+                {"label": "Ingredient cost of sales", "value": str(round(sum(Decimal(str(x["value"])) for x in rows), 2)), "money": True},
+            ],
+            "series_label": "Ingredient cost by recipe",
+            "bars": rows[:12],
+        }
+
+    if report == "sales_vs_consumption":
+        from datetime import datetime, timedelta
+        from django.utils import timezone
+        _, by_day, _ = _consumption_cost(days=14)
+        sales_by_day = {}
+        since = timezone.now() - timedelta(days=14)
+        orders = Order.objects.filter(status__in=[Order.SETTLED, Order.POSTED_TO_ROOM],
+                                      created_at__gte=since)
+        for o in orders.prefetch_related("lines__menu_item"):
+            day = o.created_at.date().isoformat()
+            sales_by_day[day] = sales_by_day.get(day, Decimal("0")) + o.totals()["total"]
+        total_sales = sum(sales_by_day.values(), start=Decimal("0"))
+        total_cons = sum(by_day.values(), start=Decimal("0"))
+        pct = round(float(total_cons / total_sales * 100), 1) if total_sales else 0
+        days = sorted(set(by_day) | set(sales_by_day))  # ISO dates sort chronologically
+        return {
+            "title": "Daily Sales vs Consumption",
+            "kpis": [
+                {"label": "F&B sales (14d)", "value": str(total_sales), "money": True},
+                {"label": "Consumption cost (14d)", "value": str(round(total_cons, 2)), "money": True},
+                {"label": "Food cost", "value": f"{pct}%"},
+            ],
+            "series_label": "Consumption cost by day (₹)",
+            "bars": [{"name": datetime.fromisoformat(d).strftime("%d %b"),
+                      "value": float(by_day.get(d, 0))} for d in days],
+        }
+
+    if report == "purchase_vs_consumption":
+        from apps.inventory.models import Ingredient
+        purchased = consumed = Decimal("0")
+        by_ing = {}
+        for m in (StockMovement.objects
+                  .filter(kind__in=[StockMovement.RECEIPT, StockMovement.CONSUMPTION])
+                  .select_related("ingredient")):
+            value = abs(m.qty) * (m.ingredient.unit_cost or Decimal("0"))
+            if m.kind == StockMovement.RECEIPT:
+                purchased += value
+            else:
+                consumed += value
+                by_ing[m.ingredient.name] = by_ing.get(m.ingredient.name, Decimal("0")) + value
+        bars = sorted(({"name": k, "value": float(v)} for k, v in by_ing.items()),
+                      key=lambda x: -x["value"])[:12]
+        return {
+            "title": "Purchase vs Consumption",
+            "kpis": [
+                {"label": "Purchased value", "value": str(round(purchased, 2)), "money": True},
+                {"label": "Consumed value", "value": str(round(consumed, 2)), "money": True},
+            ],
+            "series_label": "Consumption value by material (₹)",
+            "bars": bars,
+        }
+
+    if report == "food_cost":
+        total_cons, _, by_ingredient = _consumption_cost()
+        fnb = Decimal(_fnb_kpis()["fnb_sales"])
+        pct = round(float(total_cons / fnb * 100), 1) if fnb else 0
+        bars = sorted(({"name": k, "value": float(v)} for k, v in by_ingredient.items()),
+                      key=lambda x: -x["value"])[:12]
+        return {
+            "title": "Food Cost",
+            "kpis": [
+                {"label": "F&B revenue", "value": str(fnb), "money": True},
+                {"label": "Ingredient cost", "value": str(round(total_cons, 2)), "money": True},
+                {"label": "Food cost", "value": f"{pct}%"},
+            ],
+            "series_label": "Cost contribution by material (₹)",
+            "bars": bars,
+        }
+
+    if report == "item_profitability":
+        from apps.recipes.models import Recipe
+        sales = _item_sales()
+        recipes = {r.menu_item_id: r for r in
+                   Recipe.objects.select_related("menu_item").prefetch_related("lines__ingredient")}
+        rows, gross = [], Decimal("0")
+        for mid, s in sales.items():
+            cost = recipes[mid].plate_cost * s["qty"] if mid in recipes else Decimal("0")
+            profit = s["revenue"] - cost
+            gross += profit
+            rows.append({"name": s["item"].name, "value": float(profit)})
+        rows.sort(key=lambda x: -x["value"])
+        return {
+            "title": "Menu Item Profitability",
+            "kpis": [
+                {"label": "Gross profit (F&B)", "value": str(round(gross, 2)), "money": True},
+                {"label": "Items sold", "value": len(rows)},
+            ],
+            "series_label": "Gross profit by item (₹, ex-recipe items at full margin)",
+            "bars": rows[:12],
+        }
+    return None
+
+
 class ReportView(ModuleAPIView):
     """In-app report viewer data: KPIs + a chartable series (FR-RPT-001/004)."""
 
@@ -241,6 +399,9 @@ class ReportView(ModuleAPIView):
 
     def get(self, request):
         report = request.query_params.get("report", "sales")
+        restaurant = _restaurant_report(report)
+        if restaurant:
+            return Response(restaurant)
         if report == "sales":
             r, f = _room_kpis(), _fnb_kpis()
             return Response({
@@ -299,6 +460,10 @@ class CatalogueView(ModuleAPIView):
             {"group": "F&B", "tiles": [
                 "F&B Sales Summary", "Item & Category Performance",
                 "Discounts & Voids"]},
+            {"group": "Restaurant Inventory", "tiles": [
+                "Recipe-wise Consumption", "Daily Sales vs Consumption",
+                "Purchase vs Consumption", "Food Cost",
+                "Menu Item Profitability"]},
             {"group": "Finance", "tiles": [
                 "Tax / GST", "City Ledger / AR Aging"]},
             {"group": "Guests", "tiles": ["Guest & Loyalty"]},

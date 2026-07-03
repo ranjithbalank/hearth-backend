@@ -28,6 +28,8 @@ class FolioSerializer(serializers.ModelSerializer):
     paid_total = serializers.DecimalField(max_digits=14, decimal_places=2, read_only=True)
     balance = serializers.DecimalField(max_digits=14, decimal_places=2, read_only=True)
     effective_billing_mode = serializers.SerializerMethodField()
+    pending_charges = serializers.SerializerMethodField()
+    projected_balance = serializers.SerializerMethodField()
 
     class Meta:
         model = Folio
@@ -36,11 +38,24 @@ class FolioSerializer(serializers.ModelSerializer):
             "routing", "opened_at", "settled_at", "invoice_no", "lines",
             "settlements", "charges_total", "paid_total", "balance",
             "guest_type", "company_name", "billing_mode", "effective_billing_mode",
+            "pending_charges", "projected_balance",
         ]
 
     def get_effective_billing_mode(self, obj):
         from . import services
         return services.effective_billing_mode(obj)
+
+    def get_pending_charges(self, obj):
+        """Room nights that will post at check-out — shown so the desk sees
+        real numbers before collecting (they'd otherwise read ₹0 pre-audit)."""
+        from . import services
+        return [{"description": c["description"], "total": str(c["total"])}
+                for c in services.pending_room_charges(obj)]
+
+    def get_projected_balance(self, obj):
+        from . import services
+        pending = sum((c["total"] for c in services.pending_room_charges(obj)), start=0)
+        return str((obj.balance or 0) + pending)
 
 
 class NightAuditRunSerializer(serializers.ModelSerializer):

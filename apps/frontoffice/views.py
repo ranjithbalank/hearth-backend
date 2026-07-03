@@ -84,6 +84,161 @@ class FolioViewSet(ModuleViewSetMixin, viewsets.ModelViewSet):
             return Response({"sent": True, "channel": "sms", "to": mobile})
         return Response({"detail": "No email or mobile on file for this guest"}, status=400)
 
+    @action(detail=False, methods=["get"])
+    def room_service_menu(self, request):
+        """Menu for the front desk's room-service flow.
+
+        Front Office has no POS module (segregation of duties) — this exposes
+        only what ordering needs: available items, nothing about the till.
+        """
+        from apps.accounts.permissions import active_entitlements
+        from apps.pos.models import MenuItem
+        if not active_entitlements().get("restaurant"):
+            return Response({"detail": "the Restaurant edition is not enabled"}, status=403)
+        items = MenuItem.objects.filter(available=True).select_related("category")
+        return Response([
+            {"id": m.id, "name": m.name, "category": m.category.name,
+             "price": str(m.price), "diet": m.diet}
+            for m in items
+        ])
+
+    @action(detail=True, methods=["post"])
+    def room_service(self, request, pk=None):
+        """Front-desk room service (POS-lite): create the guest's F&B order,
+        fire the KOT to the kitchen and post the bill straight to this folio.
+
+        No till, no discounts, no voids — segregation of duties holds while the
+        desk can still feed an in-house guest. Body: {items: [{menu_item, qty}]}.
+        """
+        from django.db import transaction
+
+        from apps.accounts.models import log_action
+        from apps.accounts.permissions import active_entitlements
+        from apps.pos.models import Kot, MenuItem, Order, OrderLine
+        from apps.recipes.services import deduct_for_newly_fired
+        from .models import FolioLine
+
+        if not active_entitlements().get("restaurant"):
+            return Response({"detail": "the Restaurant edition is not enabled"}, status=403)
+        folio = self.get_object()
+        if folio.status != Folio.OPEN:
+            return Response({"detail": "the folio is not open"}, status=400)
+        wanted = request.data.get("items") or []
+        if not wanted:
+            return Response({"detail": "at least one item is required"}, status=400)
+        menu = {m.id: m for m in MenuItem.objects.filter(
+            id__in=[w.get("menu_item") for w in wanted], available=True)}
+        parsed = []
+        for w in wanted:
+            item = menu.get(w.get("menu_item"))
+            qty = int(w.get("qty") or 0)
+            if not item:
+                return Response({"detail": "unknown or unavailable menu item"}, status=400)
+            if qty <= 0:
+                return Response({"detail": "quantities must be positive"}, status=400)
+            parsed.append((item, qty))
+
+        room_no = folio.room.number if folio.room else "—"
+        with transaction.atomic():
+            order = Order.objects.create(
+                mode=Order.DELIVERY,
+                captain=f"Room {room_no}",           # destination shown to the kitchen
+                source_platform="roomservice",
+                external_ref=f"folio:{folio.id}",
+            )
+            lines = [OrderLine.objects.create(order=order, menu_item=item, qty=qty,
+                                              unit_price=item.price)
+                     for item, qty in parsed]
+            # Fire the KOT: stock deducts via recipes, the round appears on the KDS.
+            deduct_for_newly_fired(order, lines)
+            kot = Kot.objects.create(order=order, number=f"KOT-{order.id:05d}/1")
+            order.lines.update(kot_fired=True, kot=kot)
+            # Post every line to the folio at menu price (no discounts at the desk).
+            for line in lines:
+                services.post_charge(
+                    folio, kind=FolioLine.KIND_FNB,
+                    description=f"Room service — {line.qty}× {line.menu_item.name}",
+                    amount=line.unit_price * line.qty,
+                    gst_rate=line.menu_item.gst_rate,
+                    source=f"POS order {order.id}", user=request.user,
+                )
+            order.kot_no = kot.number
+            order.status = Order.POSTED_TO_ROOM
+            order.kitchen_status = "cooking"
+            order.folio = folio
+            order.save(update_fields=["kot_no", "status", "kitchen_status", "folio"])
+        log_action(request.user, "room_service", entity="Order", entity_id=order.id,
+                   after={"folio": folio.id, "kot": kot.number,
+                          "items": [f"{q}× {i.name}" for i, q in parsed]})
+        # Re-fetch: get_object()'s prefetched lines are stale after the writes.
+        fresh = Folio.objects.prefetch_related("lines", "settlements").get(pk=folio.pk)
+        return Response(FolioSerializer(fresh).data, status=201)
+
+    @action(detail=True, methods=["get"])
+    def room_service_orders(self, request, pk=None):
+        """This folio's room-service orders with live kitchen status, so the
+        desk can review what was sent and cancel a mistake before it's served."""
+        folio = self.get_object()
+        orders = (folio.pos_orders.filter(source_platform="roomservice")
+                  .prefetch_related("lines__menu_item", "kots").order_by("-created_at"))
+        out = []
+        for o in orders:
+            kot = o.kots.order_by("-created_at").first()
+            kitchen = kot.status if kot else ("cancelled" if "CANCELLED" in o.discount_reason else "done")
+            out.append({
+                "order": o.id,
+                "kot_no": o.kot_no,
+                "kitchen_status": kitchen,
+                "cancellable": bool(kot and kot.status in ("cooking", "ready")),
+                "items": [f"{l.qty}× {l.menu_item.name}" for l in o.lines.all()],
+                "total": str(o._subtotal()),
+                "created_at": o.created_at,
+            })
+        return Response(out)
+
+    @action(detail=True, methods=["post"])
+    def room_service_cancel(self, request, pk=None):
+        """Cancel a wrongly placed room-service order before it's served.
+
+        Reverses everything: folio lines come off the bill, consumed stock is
+        returned, the KDS ticket disappears, and the order closes as cancelled.
+        Served orders can't be cancelled here — that's a manager void in POS.
+        """
+        from django.db import transaction
+
+        from apps.accounts.models import log_action
+        from apps.inventory.models import StockMovement, apply_movement
+        from apps.pos.models import Order
+
+        folio = self.get_object()
+        order = (Order.objects.filter(pk=request.data.get("order"), folio=folio,
+                                      source_platform="roomservice")
+                 .prefetch_related("kots").first())
+        if not order:
+            return Response({"detail": "room-service order not found on this folio"}, status=400)
+        kot = order.kots.order_by("-created_at").first()
+        if not kot or kot.status not in ("cooking", "ready"):
+            return Response({"detail": "already served or cancelled — ask a manager to void it in POS"},
+                            status=400)
+        reason = (request.data.get("reason") or "").strip() or "wrong order"
+        with transaction.atomic():
+            # Return the ingredients the KOT already consumed.
+            for m in StockMovement.objects.filter(kind=StockMovement.CONSUMPTION,
+                                                  source=f"order:{order.id}").select_related("ingredient"):
+                apply_movement(m.ingredient, StockMovement.RETURN, -m.qty,
+                               reason=f"room service cancelled — {reason}",
+                               source=f"order:{order.id}", user=request.user)
+            # Take the charges off the guest's bill and pull the kitchen ticket.
+            folio.lines.filter(source=f"POS order {order.id}").delete()
+            order.kots.all().delete()
+            order.status = Order.SETTLED  # closed as cancelled (same convention as void)
+            order.discount_reason = f"CANCELLED by {request.user.username} — {reason}"
+            order.save(update_fields=["status", "discount_reason"])
+        log_action(request.user, "room_service_cancel", entity="Order", entity_id=order.id,
+                   after={"folio": folio.id, "reason": reason})
+        fresh = Folio.objects.prefetch_related("lines", "settlements").get(pk=folio.pk)
+        return Response(FolioSerializer(fresh).data)
+
     @action(detail=True, methods=["post"])
     def checkout(self, request, pk=None):
         folio = self.get_object()

@@ -309,7 +309,10 @@ class KdsViewSet(ModuleViewSetMixin, viewsets.ViewSet):
             o = k.order
             out.append({
                 "id": k.id, "type": "order", "kot_no": k.number, "kitchen_status": k.status,
-                "table": o.table.name if o.table else o.get_mode_display(),
+                # Room-service tickets label the destination room, not "Delivery".
+                "table": (o.table.name if o.table
+                          else o.captain if o.source_platform == "roomservice"
+                          else o.get_mode_display()),
                 "created_at": k.created_at,
                 "items": [{"name": l.display_name, "qty": l.qty,
                            "station": l.menu_item.station} for l in k.lines.all()],

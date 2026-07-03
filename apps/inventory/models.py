@@ -15,13 +15,43 @@ UNIT_CHOICES = [
 ]
 
 
+class Uom(models.Model):
+    """Units of Measurement master (spec §6) — seeds from UNIT_CHOICES,
+    extendable at runtime; Ingredient.unit is validated against this table."""
+
+    code = models.CharField(max_length=12, unique=True)
+    name = models.CharField(max_length=60)
+
+    class Meta:
+        ordering = ["code"]
+        verbose_name = "unit of measurement"
+
+    def __str__(self):
+        return f"{self.name} ({self.code})"
+
+
+class IngredientCategory(models.Model):
+    """Raw-material category master (spec §6) — seeds from CATEGORY_SUGGESTIONS."""
+
+    name = models.CharField(max_length=80, unique=True)
+
+    class Meta:
+        ordering = ["name"]
+        verbose_name_plural = "ingredient categories"
+
+    def __str__(self):
+        return self.name
+
+
 class Ingredient(models.Model):
     """Raw-material / ingredient master (BRD 5.17 FR-INV-001, spec §1)."""
 
     code = models.CharField(max_length=20, blank=True, default="",
                             help_text="raw material code, e.g. RM-0001")
     name = models.CharField(max_length=120, unique=True)
-    unit = models.CharField(max_length=12, default="kg", choices=UNIT_CHOICES,
+    # Free CharField validated against the Uom master in the serializer, so
+    # units added at runtime (spec §6) are usable without a schema change.
+    unit = models.CharField(max_length=12, default="kg",
                             help_text="base consumption unit")
     category = models.CharField(max_length=80, blank=True)
     current_stock = models.DecimalField(max_digits=12, decimal_places=3, default=0)

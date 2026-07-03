@@ -110,6 +110,73 @@ class ProductionBatchTests(TestCase):
         self.assertEqual(prep.movements.first().kind, "production")
 
 
+class MenuItemMappingTests(TestCase):
+    """Menu Item Mapping tab (spec §6): list, map (create/replace), unmap."""
+
+    def setUp(self):
+        from apps.accounts.models import User
+        from rest_framework.test import APIClient
+        self.client = APIClient()
+        self.client.force_authenticate(User.objects.create_user(
+            username="gm2", password="Tk9$mZ2pQw!7", role="General Manager"))
+        self.cat = Category.objects.create(name="Main")
+        self.rice = Ingredient.objects.create(name="Rice", unit="kg",
+                                              current_stock=Decimal("20"), unit_cost=Decimal("60"))
+        self.mapped = MenuItem.objects.create(name="Dal", category=self.cat, price=Decimal("120"))
+        rec = Recipe.objects.create(menu_item=self.mapped)
+        RecipeLine.objects.create(recipe=rec, ingredient=self.rice, qty=Decimal("0.1"))
+        self.unmapped = MenuItem.objects.create(name="Fried Rice", category=self.cat,
+                                                price=Decimal("200"))
+
+    def test_mapping_lists_unmapped_items_first(self):
+        from django.urls import reverse
+        r = self.client.get(reverse("recipe-mapping"))
+        self.assertEqual(r.status_code, 200)
+        rows = {x["name"]: x for x in r.data}
+        self.assertIsNone(rows["Fried Rice"]["recipe_id"])
+        self.assertIsNotNone(rows["Dal"]["recipe_id"])
+        self.assertEqual(r.data[0]["name"], "Fried Rice")  # unmapped sort first
+
+    def test_map_creates_recipe_and_replace_updates_lines(self):
+        r = self.client.post("/api/recipes/", {
+            "menu_item": self.unmapped.id,
+            "lines": [{"ingredient": self.rice.id, "qty": "250", "unit": "g",
+                       "wastage_pct": "10"}],
+        }, format="json")
+        self.assertEqual(r.status_code, 201)
+        recipe = Recipe.objects.get(menu_item=self.unmapped)
+        line = recipe.lines.get()
+        self.assertEqual(line.unit, "g")
+        # 0.25 kg × 1.1 wastage × ₹60 = ₹16.50 plate cost
+        self.assertEqual(recipe.plate_cost, Decimal("16.5000000"))
+        # Replacing swaps the BOM, not append
+        r = self.client.post("/api/recipes/", {
+            "menu_item": self.unmapped.id,
+            "lines": [{"ingredient": self.rice.id, "qty": "0.3"}],
+        }, format="json")
+        self.assertEqual(r.status_code, 200)
+        self.assertEqual(recipe.lines.count(), 1)
+        self.assertEqual(recipe.lines.get().qty, Decimal("0.300"))
+
+    def test_map_validation(self):
+        r = self.client.post("/api/recipes/", {"menu_item": self.unmapped.id, "lines": []},
+                             format="json")
+        self.assertEqual(r.status_code, 400)
+        r = self.client.post("/api/recipes/", {
+            "menu_item": self.unmapped.id, "lines": [{"qty": "1"}]}, format="json")
+        self.assertEqual(r.status_code, 400)  # no ingredient or sub-recipe
+        r = self.client.post("/api/recipes/", {
+            "menu_item": self.unmapped.id,
+            "lines": [{"ingredient": self.rice.id, "qty": "-1"}]}, format="json")
+        self.assertEqual(r.status_code, 400)
+
+    def test_unmap_deletes_recipe(self):
+        rid = Recipe.objects.get(menu_item=self.mapped).id
+        r = self.client.delete(f"/api/recipes/{rid}/")
+        self.assertEqual(r.status_code, 204)
+        self.assertFalse(Recipe.objects.filter(menu_item=self.mapped).exists())
+
+
 class GoodsReceiptTests(TestCase):
     def test_grn_posts_stock(self):
         ing = Ingredient.objects.create(name="Butter", unit="kg", current_stock=Decimal("3"), unit_cost=Decimal("480"))

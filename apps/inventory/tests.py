@@ -86,6 +86,58 @@ class InventoryApiTests(TestCase):
         self.assertEqual(len(r.data), 1)
         self.assertEqual(r.data[0]["kind"], "wastage")
 
+    def test_uom_master_seeded_and_crud(self):
+        r = self.client.get(reverse("uom-list"))
+        codes = [u["code"] for u in r.data]
+        for code in ["kg", "g", "l", "ml", "pc", "pkt"]:
+            self.assertIn(code, codes)
+        r = self.client.post(reverse("uom-list"), {"code": "case", "name": "Case of 24"},
+                             format="json")
+        self.assertEqual(r.status_code, 201)
+        # a material can now use the new unit…
+        r = self.client.post(reverse("ingredient-list"),
+                             {"name": "Cola", "unit": "case"}, format="json")
+        self.assertEqual(r.status_code, 201)
+        # …and a unit in use can't be deleted
+        case = next(u for u in self.client.get(reverse("uom-list")).data if u["code"] == "case")
+        r = self.client.delete(reverse("uom-detail", args=[case["id"]]))
+        self.assertEqual(r.status_code, 400)
+
+    def test_unknown_unit_or_category_rejected(self):
+        r = self.client.post(reverse("ingredient-list"),
+                             {"name": "Saffron", "unit": "tola"}, format="json")
+        self.assertEqual(r.status_code, 400)
+        r = self.client.post(reverse("ingredient-list"),
+                             {"name": "Saffron", "unit": "g", "category": "Exotic"},
+                             format="json")
+        self.assertEqual(r.status_code, 400)
+
+    def test_category_master_crud_and_delete_protection(self):
+        r = self.client.post(reverse("ingredient-category-list"), {"name": "Exotic"},
+                             format="json")
+        self.assertEqual(r.status_code, 201)
+        cat_id = r.data["id"]
+        r = self.client.post(reverse("ingredient-list"),
+                             {"name": "Saffron", "unit": "g", "category": "Exotic"},
+                             format="json")
+        self.assertEqual(r.status_code, 201)
+        r = self.client.delete(reverse("ingredient-category-detail", args=[cat_id]))
+        self.assertEqual(r.status_code, 400)  # in use
+
+    def test_movements_register_date_range_and_csv(self):
+        from django.utils import timezone
+        ing = Ingredient.objects.get(name="Rice")
+        self.client.post(reverse("ingredient-adjust", args=[ing.id]),
+                         {"qty": "5", "reason": "opening"}, format="json")
+        today = timezone.localdate().isoformat()
+        r = self.client.get(reverse("ingredient-movements") + f"?from={today}&to={today}")
+        self.assertEqual(len(r.data), 1)
+        r = self.client.get(reverse("ingredient-movements") + "?from=2000-01-01&to=2000-01-02")
+        self.assertEqual(len(r.data), 0)
+        r = self.client.get(reverse("ingredient-movements") + "?fmt=csv")
+        self.assertEqual(r["Content-Type"], "text/csv")
+        self.assertIn("Rice", r.content.decode())
+
     def test_consumption_report_purchase_vs_consumption(self):
         from apps.inventory.models import apply_movement
         ing = Ingredient.objects.get(name="Rice")

@@ -68,6 +68,18 @@ def _build_alerts():
             "detail": "Cleaned & inspected: " + ", ".join(ready),
         })
 
+    # Front desk: room-service food the kitchen has marked ready — send it up.
+    # Clears automatically when the kitchen bumps the ticket to served.
+    from apps.pos.models import Kot
+    rs_ready = (Kot.objects.filter(status="ready", order__source_platform="roomservice")
+                .select_related("order"))
+    for k in rs_ready:
+        alerts.append({
+            "severity": "warning", "module": "frontdesk",
+            "title": f"{k.order.captain or 'Room service'} — food ready",
+            "detail": f"{k.number} is ready in the kitchen — send it up to the guest",
+        })
+
     from apps.housekeeping.models import WorkOrder
     open_wo = WorkOrder.objects.exclude(status=WorkOrder.DONE).count()
     if open_wo:

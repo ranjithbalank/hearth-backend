@@ -1,16 +1,55 @@
+import csv
+import io
 from datetime import timedelta
 from decimal import Decimal
 
+from django.http import HttpResponse
 from django.db.models import Sum
 from django.utils import timezone
+from django.utils.dateparse import parse_date
 from rest_framework import viewsets
 from rest_framework.decorators import action
 from rest_framework.response import Response
 
 from apps.accounts.permissions import ModuleViewSetMixin
 
-from .models import Ingredient, StockMovement, apply_movement
-from .serializers import IngredientSerializer, StockMovementSerializer
+from .models import Ingredient, IngredientCategory, StockMovement, Uom, apply_movement
+from .serializers import (
+    IngredientCategorySerializer,
+    IngredientSerializer,
+    StockMovementSerializer,
+    UomSerializer,
+)
+
+
+class UomViewSet(ModuleViewSetMixin, viewsets.ModelViewSet):
+    """Units of Measurement master (spec §6)."""
+
+    module = "inventory"
+    queryset = Uom.objects.all()
+    serializer_class = UomSerializer
+
+    def destroy(self, request, *args, **kwargs):
+        uom = self.get_object()
+        used = Ingredient.objects.filter(unit=uom.code).count()
+        if used:
+            return Response({"detail": f"'{uom.code}' is used by {used} material(s)"}, status=400)
+        return super().destroy(request, *args, **kwargs)
+
+
+class IngredientCategoryViewSet(ModuleViewSetMixin, viewsets.ModelViewSet):
+    """Raw-material categories master (spec §6)."""
+
+    module = "inventory"
+    queryset = IngredientCategory.objects.all()
+    serializer_class = IngredientCategorySerializer
+
+    def destroy(self, request, *args, **kwargs):
+        cat = self.get_object()
+        used = Ingredient.objects.filter(category=cat.name).count()
+        if used:
+            return Response({"detail": f"'{cat.name}' is used by {used} material(s)"}, status=400)
+        return super().destroy(request, *args, **kwargs)
 
 
 class IngredientViewSet(ModuleViewSetMixin, viewsets.ModelViewSet):
@@ -80,7 +119,8 @@ class IngredientViewSet(ModuleViewSetMixin, viewsets.ModelViewSet):
     @action(detail=False, methods=["get"])
     def movements(self, request):
         """Inventory movements / consumption register (spec §4/§6).
-        Filters: ?kind=consumption&ingredient=<id>&days=30"""
+        Filters: ?kind=consumption&ingredient=<id>&days=30 or an explicit
+        ?from=YYYY-MM-DD&to=YYYY-MM-DD range. ?fmt=csv downloads the register."""
         qs = StockMovement.objects.select_related("ingredient")
         kind = request.query_params.get("kind")
         if kind:
@@ -88,8 +128,28 @@ class IngredientViewSet(ModuleViewSetMixin, viewsets.ModelViewSet):
         ingredient = request.query_params.get("ingredient")
         if ingredient:
             qs = qs.filter(ingredient_id=ingredient)
-        days = int(request.query_params.get("days", 30))
-        qs = qs.filter(created_at__gte=timezone.now() - timedelta(days=days))
+        date_from = parse_date(request.query_params.get("from") or "")
+        date_to = parse_date(request.query_params.get("to") or "")
+        if date_from:
+            qs = qs.filter(created_at__date__gte=date_from)
+        if date_to:
+            qs = qs.filter(created_at__date__lte=date_to)
+        if not (date_from or date_to):
+            days = int(request.query_params.get("days", 30))
+            qs = qs.filter(created_at__gte=timezone.now() - timedelta(days=days))
+
+        if request.query_params.get("fmt") == "csv":
+            buf = io.StringIO()
+            w = csv.writer(buf)
+            w.writerow(["Date", "Material", "Type", "Qty", "Unit", "Balance",
+                        "Reference", "Reason", "By"])
+            for m in qs[:5000]:
+                w.writerow([m.created_at.strftime("%Y-%m-%d %H:%M"), m.ingredient.name,
+                            m.get_kind_display(), m.qty, m.ingredient.unit, m.balance,
+                            m.source, m.reason, m.created_by])
+            resp = HttpResponse(buf.getvalue(), content_type="text/csv")
+            resp["Content-Disposition"] = 'attachment; filename="consumption-register.csv"'
+            return resp
         return Response(StockMovementSerializer(qs[:500], many=True).data)
 
     @action(detail=False, methods=["get"])

@@ -1,6 +1,18 @@
 from rest_framework import serializers
 
-from .models import Ingredient, StockMovement
+from .models import Ingredient, IngredientCategory, StockMovement, Uom
+
+
+class UomSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = Uom
+        fields = ["id", "code", "name"]
+
+
+class IngredientCategorySerializer(serializers.ModelSerializer):
+    class Meta:
+        model = IngredientCategory
+        fields = ["id", "name"]
 
 
 class IngredientSerializer(serializers.ModelSerializer):
@@ -15,6 +27,18 @@ class IngredientSerializer(serializers.ModelSerializer):
             "storage_location", "expiry_date", "below_par", "below_min",
         ]
         read_only_fields = ["code"]
+
+    def validate_unit(self, value):
+        if not Uom.objects.filter(code=value).exists():
+            raise serializers.ValidationError(
+                f"unknown unit '{value}' — add it in the Units of Measurement master first")
+        return value
+
+    def validate_category(self, value):
+        if value and not IngredientCategory.objects.filter(name=value).exists():
+            raise serializers.ValidationError(
+                f"unknown category '{value}' — add it in the Categories master first")
+        return value
 
 
 class StockMovementSerializer(serializers.ModelSerializer):

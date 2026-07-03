@@ -70,18 +70,21 @@ def effective_billing_mode(folio):
 def set_billing_mode(folio, mode, user=None):
     """Switch a folio between tax invoice and bill of supply (BRD 5.23).
 
-    Existing lines are recomputed from their taxable base: without_gst zeroes
-    the tax (guest pays taxable only); with_gst re-applies each line's rate.
+    without_gst applies to ROOM (and incidental) charges only — F&B lines
+    always keep GST, since restaurant food can't go on a bill of supply.
+    Lines are recomputed from their taxable base; with_gst re-applies each
+    line's own rate.
     """
     if mode not in ("with_gst", "without_gst"):
         raise ValueError("mode must be with_gst or without_gst")
     folio.billing_mode = mode
     folio.save(update_fields=["billing_mode"])
     for line in folio.lines.all():
-        if mode == "without_gst":
+        if mode == "without_gst" and line.kind != FolioLine.KIND_FNB:
             line.cgst = line.sgst = Decimal("0")
             line.total = line.taxable
         else:
+            # with_gst, or an F&B line (always taxed — repairs older bills too).
             b = tax.compute(line.taxable, line.gst_rate)
             line.cgst, line.sgst, line.total = b["cgst"], b["sgst"], b["total"]
         line.save(update_fields=["cgst", "sgst", "total"])
@@ -95,10 +98,12 @@ def post_charge(folio, *, kind, description, amount, gst_rate, source="",
     """Post a taxed charge line to a folio. Used by rooms, POS post-to-room, incidentals.
 
     A bill-of-supply folio (without_gst — per-folio override or the property's
-    GST Master mode) posts with zero tax, but the line keeps its real GST rate
-    so switching the bill back to with_gst can re-apply it.
+    GST Master mode) posts ROOM/incidental charges with zero tax; F&B always
+    carries GST. The line keeps its real GST rate so switching the bill back
+    to with_gst can re-apply it.
     """
-    zero_tax = effective_billing_mode(folio) == "without_gst"
+    zero_tax = (effective_billing_mode(folio) == "without_gst"
+                and kind != FolioLine.KIND_FNB)
     breakdown = tax.compute(amount, Decimal("0") if zero_tax else gst_rate,
                             inclusive=inclusive)
     line = FolioLine.objects.create(
@@ -164,6 +169,28 @@ def post_stay_room_charges(folio, user=None):
         )
         posted += line.total
     return posted
+
+
+def pending_room_charges(folio):
+    """Preview of room nights not yet posted (they post at night audit or at
+    check-out) so the desk sees the real amount BEFORE collecting. Read-only —
+    mirrors post_stay_room_charges without writing."""
+    resv = folio.reservation
+    if not resv or folio.status != Folio.OPEN:
+        return []
+    rate = resv.rate or (resv.room_type.base_rate if resv.room_type else Decimal("0"))
+    if rate <= 0:
+        return []
+    nights = max(1, resv.nights or 1)
+    already = folio.lines.filter(kind=FolioLine.KIND_ROOM).count()
+    zero_tax = effective_billing_mode(folio) == "without_gst"
+    gst_rate = tax.room_rate_for(rate)
+    out = []
+    for i in range(already, nights):
+        b = tax.compute(rate, Decimal("0") if zero_tax else gst_rate)
+        out.append({"description": f"Room charge — night {i + 1} (due at check-out)",
+                    "total": b["total"]})
+    return out
 
 
 def company_account(name):

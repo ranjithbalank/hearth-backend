@@ -7,7 +7,7 @@ from rest_framework_simplejwt.views import TokenObtainPairView
 
 from .constants import ALL_MODULES, ROLE_ALLOW, edition_entitlements
 from .models import Entitlement, Property, User, log_action
-from .permissions import ModuleViewSetMixin
+from .permissions import ModulePermission, ModuleViewSetMixin
 from .serializers import (
     EntitlementSerializer,
     HearthTokenSerializer,
@@ -165,10 +165,13 @@ class RoleMatrixView(APIView):
     """Editable role × module permission matrix (BRD FR-USR-002 / 5.10).
 
     GET returns the live matrix (honours RoleConfig overrides). POST toggles a
-    module for a role: {role, module, allowed}. MD/GM are protected (full access).
+    module for a role: {role, module, allowed}. Super Admin/MD/GM are protected
+    (full access). Only roles with the 'roles' module may view or edit —
+    segregation of duties: nobody grants themselves access.
     """
 
-    permission_classes = [IsAuthenticated]
+    permission_classes = [IsAuthenticated, ModulePermission]
+    module = "roles"
 
     def get(self, request):
         from .rbac import allowed_modules_for

@@ -10,12 +10,18 @@ from django.core.management.base import BaseCommand
 from django.db import transaction
 
 from apps.accounts.constants import (
+    ROLE_ADMIN,
     ROLE_CAPTAIN,
     ROLE_CASHIER,
+    ROLE_CEO,
+    ROLE_CHEF,
+    ROLE_FINANCE,
     ROLE_FRONT_OFFICE,
     ROLE_GM,
     ROLE_HOUSEKEEPING,
     ROLE_MD,
+    ROLE_STORE,
+    ROLE_SUPER_ADMIN,
 )
 from apps.accounts.models import Entitlement, Property, User
 from apps.banquets.models import Event, FunctionSpace
@@ -80,12 +86,18 @@ class Command(BaseCommand):
 
     def _users(self):
         people = [
+            ("superadmin", "Sam", "Varghese", ROLE_SUPER_ADMIN, True),
+            ("admin", "Asha", "Iyer", ROLE_ADMIN, True),
             ("md", "Karthik", "Subramanian", ROLE_MD, True),
+            ("ceo", "Ravi", "Chandran", ROLE_CEO, False),
             ("gm", "Meera", "Rao", ROLE_GM, True),
+            ("finance", "Divya", "Krishnan", ROLE_FINANCE, False),
             ("frontoffice", "Anil", "Kumar", ROLE_FRONT_OFFICE, False),
             ("cashier", "Priya", "Nair", ROLE_CASHIER, False),
             ("captain", "Vijay", "Menon", ROLE_CAPTAIN, False),
             ("housekeeping", "Sunita", "Pal", ROLE_HOUSEKEEPING, False),
+            ("chef", "Arun", "Balan", ROLE_CHEF, False),
+            ("store", "Mani", "Velu", ROLE_STORE, False),
         ]
         # Per-user discount caps + manager passcodes (BRD FR-USR-004/006).
         caps = {
@@ -97,7 +109,7 @@ class Command(BaseCommand):
             u, created = User.objects.get_or_create(username=username, defaults={
                 "first_name": first, "last_name": last, "role": role,
                 "is_staff": is_staff or role in (ROLE_MD, ROLE_GM),
-                "is_superuser": role == ROLE_MD,
+                "is_superuser": role in (ROLE_MD, ROLE_SUPER_ADMIN),
                 "email": f"{username}@hearth.example",
             })
             u.first_name, u.last_name, u.role = first, last, role
