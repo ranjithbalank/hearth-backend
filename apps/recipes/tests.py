@@ -194,10 +194,17 @@ class MenuItemMappingTests(TestCase):
         self.assertEqual(self.rice.current_stock, Decimal("19.500"))
         # Duplicate dish names are rejected with a helpful message.
         r = self.client.post("/api/recipes/", {
-            "new_item": {"name": "veg fried rice", "price": "180"},
+            "new_item": {"name": "veg fried rice", "price": "180", "category": "Rice Bowls"},
             "lines": [{"ingredient": self.rice.id, "qty": "1"}],
         }, format="json")
         self.assertEqual(r.status_code, 400)
+        # Category is mandatory for a new dish.
+        r = self.client.post("/api/recipes/", {
+            "new_item": {"name": "Lemon Rice", "price": "150"},
+            "lines": [{"ingredient": self.rice.id, "qty": "1"}],
+        }, format="json")
+        self.assertEqual(r.status_code, 400)
+        self.assertIn("category", r.data["detail"])
 
     def test_menu_categories_listing(self):
         from django.urls import reverse

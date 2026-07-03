@@ -71,7 +71,9 @@ class RecipeViewSet(ModuleViewSetMixin, viewsets.ViewSet):
                 return Response({"detail": "invalid price"}, status=400)
             if price <= 0:
                 return Response({"detail": "the selling price must be positive"}, status=400)
-            cat_name = (new_item.get("category") or "").strip() or "Mains"
+            cat_name = (new_item.get("category") or "").strip()
+            if not cat_name:
+                return Response({"detail": "a menu category is required"}, status=400)
             category, _ = Category.objects.get_or_create(name=cat_name)
             item = MenuItem.objects.create(
                 name=name, category=category, price=price,
