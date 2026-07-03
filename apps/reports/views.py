@@ -406,6 +406,15 @@ def _restaurant_report(report):
             "series_label": "Cumulative sales by platform (₹)",
             "bars": sorted(({"name": k, "value": float(v)} for k, v in by_platform.items()),
                            key=lambda x: -x["value"]),
+            # Order-level records render as a table in the Reports screen.
+            "records": {
+                "columns": ["Date", "Platform", "Reference", "Items", "Total", "Status"],
+                "rows": [[o.created_at.strftime("%d %b %H:%M"), labels[o.source_platform],
+                          o.external_ref or f"order:{o.id}",
+                          sum(l.qty for l in o.lines.all()), str(o.totals()["total"]),
+                          o.get_status_display()]
+                         for o in qs.order_by("-created_at")[:100]],
+            },
         }
 
     if report == "item_profitability":
