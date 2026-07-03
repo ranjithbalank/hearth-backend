@@ -204,6 +204,23 @@ class TableReservationViewSet(ModuleViewSetMixin, viewsets.ModelViewSet):
             r.table.save(update_fields=["status"])
 
     def perform_create(self, serializer):
+        # Clash guard: one table, one booking per ±90-minute window.
+        data = serializer.validated_data
+        tbl, when = data.get("table"), data.get("reserved_for")
+        if data.get("kind", "reservation") == "reservation" and tbl and when:
+            from datetime import timedelta
+
+            from django.utils import timezone as tz
+            window = timedelta(minutes=90)
+            clash = (TableReservation.objects
+                     .filter(table=tbl, kind="reservation", status=TableReservation.BOOKED,
+                             reserved_for__gte=when - window, reserved_for__lte=when + window)
+                     .first())
+            if clash:
+                from rest_framework.exceptions import ValidationError
+                at = tz.localtime(clash.reserved_for).strftime("%H:%M")
+                raise ValidationError(
+                    {"detail": f"{tbl.name} is already booked for {clash.name} at {at} — pick another slot or table"})
         r = serializer.save()
         self._hold(r)
         log_action(self.request.user, "table_reserve", entity="TableReservation",
@@ -222,7 +239,11 @@ class TableReservationViewSet(ModuleViewSetMixin, viewsets.ModelViewSet):
             return Response({"detail": "choose a table to seat this party"}, status=400)
         r.status = TableReservation.SEATED
         r.save(update_fields=["status", "table"])
-        self._release(r)
+        # Seating always hands the table to the POS — even if a later booking
+        # exists, the party sitting NOW must be able to order.
+        if r.table.status == Table.RESERVED:
+            r.table.status = Table.FREE
+            r.table.save(update_fields=["status"])
         log_action(request.user, "reservation_seated", entity="TableReservation", entity_id=r.id)
         return Response(TableReservationSerializer(r).data)
 
@@ -269,6 +290,10 @@ class QrOrderView(APIView):
             return Response({"detail": "invalid table"}, status=404)
         if not active_entitlements().get("restaurant"):
             return Response({"detail": "ordering unavailable"}, status=403)
+        if table.status == Table.RESERVED:
+            return Response(
+                {"detail": "this table is reserved — please ask the staff to seat you first"},
+                status=403)
         with transaction.atomic():
             import uuid as uuid_lib
             order = Order.objects.create(mode=Order.DINEIN, table=table,
@@ -444,6 +469,13 @@ class OrderViewSet(ModuleViewSetMixin, viewsets.ModelViewSet):
                 and serializer.validated_data.get("mode", Order.DINEIN) != Order.DINEIN):
             from rest_framework.exceptions import ValidationError
             raise ValidationError({"detail": "captains take table orders — counter flows stay with the cashier"})
+        # A reserved table belongs to its booking: seat the reservation (which
+        # releases the hold) before anyone can order on it.
+        tbl = serializer.validated_data.get("table")
+        if tbl and tbl.status == Table.RESERVED:
+            from rest_framework.exceptions import ValidationError
+            raise ValidationError(
+                {"detail": f"table {tbl.name} is reserved — seat the booking from the floor, or pick another table"})
         extra = {"captain": user.get_full_name() or user.username,
                  "client_uuid": serializer.validated_data.get("client_uuid") or uuid.uuid4().hex}
         if serializer.validated_data.get("mode") == Order.ROOM:

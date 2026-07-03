@@ -277,6 +277,52 @@ class RestaurantE2ETests(TestCase):
         rice.refresh_from_db()
         self.assertEqual(rice.current_stock, Decimal("9.400"))   # 10 − 3×0.2
 
+    def test_reserved_table_cannot_be_occupied(self):
+        """A booking with a time holds the table: no POS order, no QR order,
+        no overlapping second booking — until the party is seated."""
+        from rest_framework.test import APIClient
+        rice = self._material("Rice", stock="5")
+        dish = self._dish("Pongal", "110", [{"ingredient": rice.id, "qty": "0.1"}])
+        table = Table.objects.create(name="R1", seats=4, qr_token="QR-R1")
+        # Book R1 for 19:30 → the table is held.
+        r = self.client.post("/api/pos/table-reservations/", {
+            "name": "Sharma", "kind": "reservation", "party_size": 4,
+            "table": table.id, "reserved_for": "2026-07-03T19:30:00Z",
+        }, format="json")
+        self.assertEqual(r.status_code, 201, r.data)
+        res_id = r.data["id"]
+        table.refresh_from_db()
+        self.assertEqual(table.status, Table.RESERVED)
+        # 1. A walk-in can't just open an order on it…
+        r = self.client.post("/api/pos/orders/", {"mode": "dinein", "table": table.id},
+                             format="json")
+        self.assertEqual(r.status_code, 400)
+        self.assertIn("reserved", r.data["detail"])
+        # 2. …nor can a guest scanning the table QR.
+        anon = APIClient()
+        r = anon.post("/api/pos/qr-order/",
+                      {"token": "QR-R1", "items": [{"menu_item": dish.id, "qty": 1}]},
+                      format="json")
+        self.assertEqual(r.status_code, 403)
+        # 3. …nor can the desk double-book the same slot (±90 min window)…
+        r = self.client.post("/api/pos/table-reservations/", {
+            "name": "Verma", "kind": "reservation", "party_size": 2,
+            "table": table.id, "reserved_for": "2026-07-03T20:15:00Z",
+        }, format="json")
+        self.assertEqual(r.status_code, 400)
+        self.assertIn("already booked", str(r.data))
+        # …though a clearly later slot on the same table is fine.
+        r = self.client.post("/api/pos/table-reservations/", {
+            "name": "Verma", "kind": "reservation", "party_size": 2,
+            "table": table.id, "reserved_for": "2026-07-03T22:45:00Z",
+        }, format="json")
+        self.assertEqual(r.status_code, 201, r.data)
+        # Seat the party → the hold releases and ordering works normally.
+        self.client.post(f"/api/pos/table-reservations/{res_id}/seat/", {}, format="json")
+        r = self.client.post("/api/pos/orders/", {"mode": "dinein", "table": table.id},
+                             format="json")
+        self.assertEqual(r.status_code, 201)
+
     def test_online_order_ready_belongs_to_the_kitchen(self):
         """Zomato flow: counter accepts + dispatches; ONLY the KDS bump marks
         ready, and dispatch is blocked until the kitchen has done so."""
