@@ -89,6 +89,32 @@ class IngredientViewSet(ModuleViewSetMixin, viewsets.ModelViewSet):
         return Response(IngredientSerializer(ing).data)
 
     @action(detail=True, methods=["post"])
+    def transfer(self, request, pk=None):
+        """Stock transfer (spec §4/§6): move stock out to (or in from) another
+        location/outlet. direction=out issues stock, direction=in receives it;
+        the movement's reference records the counterparty location."""
+        ing = self.get_object()
+        try:
+            qty = abs(Decimal(str(request.data.get("qty", 0))))
+        except Exception:
+            return Response({"detail": "invalid quantity"}, status=400)
+        location = (request.data.get("location") or "").strip()
+        direction = request.data.get("direction", "out")
+        if qty <= 0:
+            return Response({"detail": "quantity must be positive"}, status=400)
+        if not location:
+            return Response({"detail": "the other location is required"}, status=400)
+        if direction not in ("out", "in"):
+            return Response({"detail": "direction must be out or in"}, status=400)
+        if direction == "out" and qty > (ing.current_stock or Decimal("0")):
+            return Response({"detail": "not enough stock to transfer out"}, status=400)
+        signed = -qty if direction == "out" else qty
+        apply_movement(ing, StockMovement.TRANSFER, signed,
+                       reason=("to " if direction == "out" else "from ") + location,
+                       source=f"transfer:{location}", user=request.user)
+        return Response(IngredientSerializer(ing).data)
+
+    @action(detail=True, methods=["post"])
     def count(self, request, pk=None):
         """Physical stock count: book the counted quantity, the difference is
         posted as a 'count' movement so the ledger explains the correction (§4/§6)."""

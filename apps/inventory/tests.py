@@ -86,6 +86,28 @@ class InventoryApiTests(TestCase):
         self.assertEqual(len(r.data), 1)
         self.assertEqual(r.data[0]["kind"], "wastage")
 
+    def test_stock_transfer_out_and_in(self):
+        ing = Ingredient.objects.get(name="Rice")  # 40 in stock
+        r = self.client.post(reverse("ingredient-transfer", args=[ing.id]),
+                             {"qty": "5", "direction": "out", "location": "Banquet kitchen"},
+                             format="json")
+        self.assertEqual(r.status_code, 200)
+        ing.refresh_from_db()
+        self.assertEqual(ing.current_stock, Decimal("35.000"))
+        move = ing.movements.first()
+        self.assertEqual(move.kind, "transfer")
+        self.assertEqual(move.reason, "to Banquet kitchen")
+        # Can't transfer out more than we hold; inbound needs no such check.
+        r = self.client.post(reverse("ingredient-transfer", args=[ing.id]),
+                             {"qty": "999", "direction": "out", "location": "X"}, format="json")
+        self.assertEqual(r.status_code, 400)
+        r = self.client.post(reverse("ingredient-transfer", args=[ing.id]),
+                             {"qty": "2", "direction": "in", "location": "Main store"},
+                             format="json")
+        self.assertEqual(r.status_code, 200)
+        ing.refresh_from_db()
+        self.assertEqual(ing.current_stock, Decimal("37.000"))
+
     def test_uom_master_seeded_and_crud(self):
         r = self.client.get(reverse("uom-list"))
         codes = [u["code"] for u in r.data]
