@@ -347,7 +347,12 @@ class KdsViewSet(ModuleViewSetMixin, viewsets.ViewSet):
         statuses = set(order.kots.values_list("status", flat=True))
         order.kitchen_status = ("cooking" if Kot.COOKING in statuses
                                 else "ready" if Kot.READY in statuses else "served")
-        order.save(update_fields=["kitchen_status"])
+        # The chef's bump is the ONLY source of "ready" for online orders —
+        # it flows to the aggregator board so the counter can dispatch.
+        if (order.source_platform and order.kitchen_status in ("ready", "served")
+                and order.online_status in ("received", "accepted")):
+            order.online_status = "ready"
+        order.save(update_fields=["kitchen_status", "online_status"])
         return Response({"id": kot.id, "kitchen_status": kot.status})
 
     @action(detail=False, methods=["get"])
@@ -511,6 +516,10 @@ class OrderViewSet(ModuleViewSetMixin, viewsets.ModelViewSet):
             "kot": k.id, "kot_no": k.number, "order": k.order_id,
             "table": k.order.table.name if k.order.table else k.order.get_mode_display(),
             "captain": k.order.captain,
+            # Online orders dispatch from the POS once the kitchen marks ready.
+            "online": bool(k.order.source_platform),
+            "platform": k.order.source_platform,
+            "token_no": k.order.token_no,
         } for k in kots])
 
     @action(detail=False, methods=["post"])
@@ -683,19 +692,34 @@ class OrderViewSet(ModuleViewSetMixin, viewsets.ModelViewSet):
 
     @action(detail=True, methods=["post"])
     def online_status(self, request, pk=None):
-        """Update prep/dispatch status back to the customer/aggregator (FR-ONL-003)."""
+        """Update the aggregator lifecycle from the counter (FR-ONL-003).
+
+        Segregation on the line: the POS only ACCEPTS (pushes to kitchen) and
+        DISPATCHES. "Ready" belongs to the kitchen — the chef bumps the ticket
+        on the KDS, which flips the online status here automatically.
+        """
         order = self.get_object()
-        flow = ["received", "accepted", "ready", "dispatched"]
         target = request.data.get("status")
-        if target not in flow:
-            return Response({"detail": "invalid status"}, status=400)
-        order.online_status = target
         if target == "ready":
-            order.kitchen_status = "ready"
-            order.kots.filter(status=Kot.COOKING).update(status=Kot.READY)
+            return Response(
+                {"detail": "only the kitchen marks food ready — bump the ticket on the KDS"},
+                status=403)
+        if target not in ("accepted", "dispatched"):
+            return Response({"detail": "invalid status"}, status=400)
+        if target == "dispatched" and order.kitchen_status not in ("ready", "served"):
+            return Response(
+                {"detail": "the kitchen hasn't marked this order ready yet"},
+                status=400)
+        order.online_status = target
         if target == "dispatched":
+            from django.utils import timezone
             order.status = Order.SETTLED if order.prepaid else order.status
-        order.save(update_fields=["online_status", "kitchen_status", "status"])
+            # The food left the building — close the kitchen ticket too so the
+            # ready strip and KDS drop it.
+            order.kots.filter(status=Kot.READY).update(status=Kot.SERVED,
+                                                       served_at=timezone.now())
+            order.kitchen_status = "served"
+        order.save(update_fields=["online_status", "status", "kitchen_status"])
         return Response(OrderSerializer(order).data)
 
     @action(detail=False, methods=["get"])

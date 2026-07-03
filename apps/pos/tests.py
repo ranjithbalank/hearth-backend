@@ -181,13 +181,25 @@ class DiscountLoyaltyTests(TestCase):
         self.assertEqual(Order.objects.filter(external_ref="SWG-77").count(), 1)
 
     def test_online_status_flow(self):
+        """The counter accepts and dispatches; 'ready' is the kitchen's alone
+        (KDS bump), and dispatch waits for it."""
         self.client.force_authenticate(self.mgr)
         o = Order.objects.create(mode=Order.DELIVERY, source_platform="zomato",
                                  external_ref="Z1", online_status="received")
         r = self.client.post(reverse("order-online-status", args=[o.id]),
                              {"status": "ready"}, format="json")
-        self.assertEqual(r.data["online_status"], "ready")
-        self.assertEqual(r.data["kitchen_status"] if "kitchen_status" in r.data else "ready", "ready")
+        self.assertEqual(r.status_code, 403)          # counter can't mark ready
+        r = self.client.post(reverse("order-online-status", args=[o.id]),
+                             {"status": "accepted"}, format="json")
+        self.assertEqual(r.data["online_status"], "accepted")
+        r = self.client.post(reverse("order-online-status", args=[o.id]),
+                             {"status": "dispatched"}, format="json")
+        self.assertEqual(r.status_code, 400)          # kitchen hasn't finished
+        o.kitchen_status = "ready"                    # (KDS bump does this)
+        o.save(update_fields=["kitchen_status"])
+        r = self.client.post(reverse("order-online-status", args=[o.id]),
+                             {"status": "dispatched"}, format="json")
+        self.assertEqual(r.data["online_status"], "dispatched")
 
     def test_qr_order_public(self):
         from .models import Table

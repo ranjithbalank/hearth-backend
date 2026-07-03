@@ -277,6 +277,48 @@ class RestaurantE2ETests(TestCase):
         rice.refresh_from_db()
         self.assertEqual(rice.current_stock, Decimal("9.400"))   # 10 − 3×0.2
 
+    def test_online_order_ready_belongs_to_the_kitchen(self):
+        """Zomato flow: counter accepts + dispatches; ONLY the KDS bump marks
+        ready, and dispatch is blocked until the kitchen has done so."""
+        rice = self._material("Rice", stock="5")
+        dish = self._dish("Veg Biryani", "220", [{"ingredient": rice.id, "qty": "0.2"}])
+        r = self.client.post("/api/pos/orders/aggregator/", {
+            "platform": "zomato", "external_id": "Z-9001", "prepaid": True,
+            "items": [{"menu_item": dish.id, "qty": 1}],
+        }, format="json")
+        self.assertEqual(r.status_code, 201, r.data)
+        oid = r.data["id"]
+        # Counter can't mark ready…
+        r = self.client.post(f"/api/pos/orders/{oid}/online_status/", {"status": "ready"},
+                             format="json")
+        self.assertEqual(r.status_code, 403)
+        # …and can't dispatch food the kitchen hasn't finished.
+        self.client.post(f"/api/pos/orders/{oid}/online_status/", {"status": "accepted"},
+                         format="json")
+        r = self.client.post(f"/api/pos/orders/{oid}/online_status/", {"status": "dispatched"},
+                             format="json")
+        self.assertEqual(r.status_code, 400)
+        self.assertIn("kitchen", r.data["detail"])
+        # The chef bumps the ticket on the KDS → the board turns ready by itself.
+        kds = self.client.get("/api/kds/").data
+        ticket = next(t for t in kds if t["kot_no"].startswith("AGG-Z-9001"[:10]))
+        self.client.post(f"/api/kds/{ticket['id']}/bump/")
+        order = Order.objects.get(pk=oid)
+        self.assertEqual(order.online_status, "ready")
+        # The ready strip in the POS offers the dispatch…
+        strip = self.client.get("/api/pos/orders/ready/").data
+        entry = next(x for x in strip if x["order"] == oid)
+        self.assertTrue(entry["online"])
+        self.assertEqual(entry["platform"], "zomato")
+        # …and dispatching closes the order AND its kitchen ticket.
+        r = self.client.post(f"/api/pos/orders/{oid}/online_status/", {"status": "dispatched"},
+                             format="json")
+        self.assertEqual(r.status_code, 200)
+        order.refresh_from_db()
+        self.assertEqual(order.status, Order.SETTLED)   # prepaid closes on dispatch
+        self.assertEqual(order.kitchen_status, "served")
+        self.assertNotIn(oid, [x["order"] for x in self.client.get("/api/pos/orders/ready/").data])
+
     def test_captain_takes_table_orders_only(self):
         captain = APIClient()
         captain.force_authenticate(User.objects.create_user(
