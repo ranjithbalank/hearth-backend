@@ -11,10 +11,14 @@ from .models import MaterialRequest
 
 
 def _dict(r):
+    from apps.accounts.constants import indent_approvers_for
     return {
         "id": r.id, "department": r.department, "requested_by": r.requested_by,
         "status": r.status, "created_at": r.created_at,
         "lines": [{"ingredient": l.ingredient.name, "qty": str(l.qty)} for l in r.lines.all()],
+        # Who approves THIS department's indent — shown on the card so the
+        # requester knows whose desk it's waiting on.
+        "approver_roles": sorted(indent_approvers_for(r.department)),
     }
 
 
@@ -22,8 +26,41 @@ class MaterialRequestViewSet(ModuleViewSetMixin, viewsets.ViewSet):
     module = "matreq"
 
     def list(self, request):
+        """Segregated by design: nobody sees every department's indents dumped
+        together. ?view=mine → what I raised (to track its status).
+        ?view=queue (default) → what's actually mine to act on right now
+        (my department's pending approvals + anything approved and awaiting
+        issue, since issuing is a store-wide job). GM/MD/Super Admin are
+        universal approvers+issuers, so their queue naturally becomes
+        everything — no separate "all" view needed.
+        """
+        from apps.accounts.constants import INDENT_ISSUER_ROLES, indent_approvers_for
+        role = getattr(request.user, "role", "")
+        username = request.user.username
         qs = MaterialRequest.objects.prefetch_related("lines__ingredient")
+        if request.query_params.get("view") == "mine":
+            qs = qs.filter(requested_by=username)
+        else:
+            actionable_ids = [
+                r.id for r in qs
+                if (r.status == MaterialRequest.REQUESTED and role in indent_approvers_for(r.department))
+                or (r.status == MaterialRequest.APPROVED and role in INDENT_ISSUER_ROLES)
+            ]
+            qs = qs.filter(id__in=actionable_ids)
         return Response([_dict(r) for r in qs])
+
+    @action(detail=False, methods=["get"])
+    def materials(self, request):
+        """Read-only material picklist for the request form. Every role that
+        can raise an indent needs this — but most of them (Housekeeping,
+        Front Office, Cashier…) don't have the full 'inventory' module, so
+        this can't just proxy to /inventory/. No cost, no CRUD — just enough
+        to pick an item and see what's in stock."""
+        from apps.inventory.models import Ingredient
+        return Response([
+            {"id": i.id, "name": i.name, "unit": i.unit, "current_stock": str(i.current_stock)}
+            for i in Ingredient.objects.all().order_by("name")
+        ])
 
     def create(self, request):
         """A department raises an indent: {department, lines: [{ingredient, qty}]}."""
@@ -62,23 +99,30 @@ class MaterialRequestViewSet(ModuleViewSetMixin, viewsets.ViewSet):
 
     @action(detail=True, methods=["post"])
     def advance(self, request, pk=None):
-        """Requested → Approved → Issued. Issuing deducts stock (FR-STR-002).
+        """Requested → Approved → Issued (FR-STR-002).
 
-        Segregation of duties: you can't approve your own indent — a second
-        pair of eyes (store keeper / manager) moves it forward.
+        Every department has its own approver — the head who actually knows
+        whether the indent makes sense (Kitchen/Bar → Restaurant Manager,
+        Housekeeping/Banquets/Front Office → Front Office, Maintenance →
+        Housekeeping — see DEPARTMENT_APPROVERS), plus GM/MD/Super Admin as a
+        universal override. You can never approve your own request. Issuing
+        the approved stock is always the Store Keeper's job (or a manager's)
+        — a physical handover, regardless of which department it's for.
         """
+        from apps.accounts.constants import indent_approvers_for, INDENT_ISSUER_ROLES
         r = MaterialRequest.objects.prefetch_related("lines__ingredient").filter(pk=pk).first()
         if not r:
             return Response({"detail": "not found"}, status=404)
+        role = getattr(request.user, "role", "")
         if r.status == MaterialRequest.REQUESTED:
-            from apps.accounts.constants import INDENT_APPROVER_ROLES
-            if getattr(request.user, "role", "") not in INDENT_APPROVER_ROLES:
+            approvers = indent_approvers_for(r.department)
+            if role not in approvers:
                 return Response(
-                    {"detail": "indent approval needs the store keeper or the restaurant manager"},
+                    {"detail": f"a {' or '.join(sorted(approvers))} must approve {r.department} indents"},
                     status=403)
             if r.requested_by and r.requested_by == request.user.username:
                 return Response(
-                    {"detail": "you raised this request — approval needs the store keeper or a manager"},
+                    {"detail": "you raised this request — someone else must approve it"},
                     status=403)
             # Issuing more than the store holds fails later; flag it early.
             short = [l.ingredient.name for l in r.lines.all()
@@ -91,6 +135,10 @@ class MaterialRequestViewSet(ModuleViewSetMixin, viewsets.ViewSet):
             r.save(update_fields=["status"])
             log_action(request.user, "indent_approved", entity="MaterialRequest", entity_id=r.id)
         elif r.status == MaterialRequest.APPROVED:
+            if role not in INDENT_ISSUER_ROLES:
+                return Response(
+                    {"detail": "only the store keeper (or a manager) can issue approved stock"},
+                    status=403)
             with transaction.atomic():
                 for line in r.lines.all():
                     # Department issue is a stock transfer, not recipe consumption (spec §4).

@@ -57,22 +57,24 @@ ROLE_ALLOW = {
     ROLE_GM: "*",
     # Admin — system administration: configuration masters, staff/user
     # management and settings. No day-to-day operations, no guest money.
+    # Can still raise a general-supplies indent (office stationery etc.).
     ROLE_ADMIN: [
         "dashboard", "settings", "roles", "employees", "roommaster",
         "tablemaster", "menumaster", "gstmaster", "cateringmaster",
-        "customers", "vendors", "suppliers", "notifications",
+        "customers", "vendors", "suppliers", "notifications", "matreq",
     ],
     # CEO — executive oversight, read-heavy: dashboards, reports, revenue
     # strategy and CRM. No floor operations, no configuration.
     ROLE_CEO: [
         "execdashboard", "dashboard", "reports", "revenue", "channel",
-        "booking", "crm", "accounting", "tax", "hr", "notifications",
+        "booking", "crm", "accounting", "tax", "hr", "notifications", "matreq",
     ],
     # Finance — books and statutory: accounting, tax/GST, AR (customers),
     # payables (vendors/suppliers/POs), payroll and reports. No floor ops.
     ROLE_FINANCE: [
         "dashboard", "accounting", "tax", "gstmaster", "reports",
         "customers", "vendors", "suppliers", "pomanage", "hr", "notifications",
+        "matreq",
     ],
     # Restaurant Manager — runs the whole restaurant side: POS/KDS/online,
     # the store & supply chain (approves indents and POs), recipes and the
@@ -85,22 +87,29 @@ ROLE_ALLOW = {
     # Front Office / Reception — the guest-facing desk only: front desk, room
     # assignment & status, reservations, folios/cashiering, banquets and guest
     # records. NO back-office (accounting, tax, reports, HR, CRM campaigns).
+    # matreq: raises indents for its own supplies (stationery, amenities) and
+    # is the approver for Housekeeping/Banquets/Front-Office indents below.
     ROLE_FRONT_OFFICE: [
         "dashboard", "frontdesk", "checkin", "checkout", "livegrid", "folio",
         "reservations", "housekeeping", "banquets", "customers", "notifications",
+        "matreq",
     ],
     # F&B Cashier — POS & KOT; capped discounts; no rooms, no back-office.
+    # Can raise indents for counter supplies; approval still routes elsewhere.
     ROLE_CASHIER: [
-        "pos", "kds", "online", "notifications",
+        "pos", "kds", "online", "notifications", "matreq",
     ],
-    # Captain / steward — tableside ordering on mobile: POS only.
+    # Captain / steward — tableside ordering on mobile: POS only, plus raising
+    # a material request when the section runs short of something.
     # Settlement is tender-restricted (see ROLE_TENDERS).
     ROLE_CAPTAIN: [
-        "pos",
+        "pos", "matreq",
     ],
-    # Housekeeping — room status board and maintenance work orders.
+    # Housekeeping — room status board, maintenance work orders, and indents
+    # for its own supplies (linen, amenities, cleaning agents); also approves
+    # Maintenance-department indents (it already owns the engineering module).
     ROLE_HOUSEKEEPING: [
-        "housekeeping", "livegrid", "engineering", "notifications",
+        "housekeeping", "livegrid", "engineering", "notifications", "matreq",
     ],
     # Chef / Kitchen — kitchen display, recipes/BOM, kitchen stock and
     # material requests to the store. No sales, no purchasing.
@@ -131,9 +140,11 @@ MODULE_ENTITLEMENT = {
     "cateringmaster": "banquets",
     # Restaurant (restaurant)
     "pos": "restaurant", "kds": "restaurant", "online": "restaurant", "inventory": "restaurant",
-    "procurement": "restaurant", "pomanage": "restaurant", "matreq": "restaurant",
+    "procurement": "restaurant", "pomanage": "restaurant",
     "recipes": "restaurant", "tablemaster": "restaurant", "menumaster": "restaurant",
     "suppliers": "restaurant",
+    # matreq (material requests) is a shared service: hotel-only properties
+    # use it for housekeeping/front-office/maintenance indents too.
     # dashboard, tax, gstmaster, crm, customers, vendors, employees, roles,
     # notifications, reports, settings -> no specific entitlement (shared services)
 }
@@ -143,7 +154,33 @@ MODULE_ENTITLEMENT = {
 # Spending money (PO approval) is a manager's call; issuing held stock
 # (indent approval) is the store's call — never the requester's own.
 PO_APPROVER_ROLES = {ROLE_SUPER_ADMIN, ROLE_MD, ROLE_GM, ROLE_FINANCE, ROLE_REST_MGR}
-INDENT_APPROVER_ROLES = {ROLE_SUPER_ADMIN, ROLE_MD, ROLE_GM, ROLE_REST_MGR, ROLE_STORE}
+
+# Material requests: every department has its own approver — the head who
+# actually knows whether that indent makes sense — plus GM/MD/Super Admin as
+# a universal override. The Store Keeper never approves (they're the
+# custodian who hands over stock at the ISSUE step, not the requester's boss).
+DEPARTMENT_APPROVERS = {
+    "Kitchen": {ROLE_REST_MGR},
+    "Bar": {ROLE_REST_MGR},
+    "Banquets": {ROLE_FRONT_OFFICE},       # Front Office owns the banquets module
+    "Housekeeping": {ROLE_FRONT_OFFICE},   # "frontdesk manager" per house convention
+    "Front Office": {ROLE_FRONT_OFFICE},
+    "Maintenance": {ROLE_HOUSEKEEPING},    # Housekeeping owns engineering/work-orders
+}
+UNIVERSAL_INDENT_APPROVERS = {ROLE_SUPER_ADMIN, ROLE_MD, ROLE_GM}
+# Any department not listed above (Other/general office supplies) still needs
+# a real approver — GM+ only, so it can never fall through unapproved.
+
+
+def indent_approvers_for(department: str) -> set:
+    """Who may approve (not issue) an indent for this department."""
+    return DEPARTMENT_APPROVERS.get(department, set()) | UNIVERSAL_INDENT_APPROVERS
+
+
+# Issuing approved stock is always the store's job — it's a physical handover
+# from the shelf, regardless of which department the indent was for.
+INDENT_ISSUER_ROLES = {ROLE_SUPER_ADMIN, ROLE_MD, ROLE_GM, ROLE_REST_MGR, ROLE_STORE}
+
 # Marking food ready on the KDS is the kitchen's alone (chef + managers).
 KITCHEN_ROLES = {ROLE_SUPER_ADMIN, ROLE_MD, ROLE_GM, ROLE_REST_MGR, ROLE_CHEF}
 
