@@ -35,7 +35,11 @@ class FolioViewSet(ModuleViewSetMixin, viewsets.ModelViewSet):
         if not payments:
             return Response({"detail": "payments required"}, status=400)
         services.settle_folio(folio, payments, user=request.user)
-        return Response(FolioSerializer(folio).data)
+        # settle_folio() creates new Settlement rows — the queryset that fetched
+        # `folio` already prefetched (and cached) the old, empty settlements list,
+        # so re-fetch before serializing or the response would show stale data.
+        fresh = Folio.objects.prefetch_related("lines", "settlements").get(pk=folio.pk)
+        return Response(FolioSerializer(fresh).data)
 
     @action(detail=True, methods=["post"])
     def billing_mode(self, request, pk=None):
@@ -277,7 +281,10 @@ class FolioViewSet(ModuleViewSetMixin, viewsets.ModelViewSet):
             services.check_out(folio, tender=tender, user=request.user)
         except ValueError as e:
             return Response({"detail": str(e)}, status=400)
-        return Response(FolioSerializer(folio).data)
+        # check_out() posts new room-charge lines and a settlement — re-fetch so
+        # the response isn't served from the stale pre-checkout prefetch cache.
+        fresh = Folio.objects.prefetch_related("lines", "settlements").get(pk=folio.pk)
+        return Response(FolioSerializer(fresh).data)
 
 
 class CheckInView(ModuleViewSetMixin, viewsets.ViewSet):

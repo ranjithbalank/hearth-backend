@@ -234,6 +234,90 @@ class MenuItemMappingTests(TestCase):
         self.assertFalse(Recipe.objects.filter(menu_item=self.mapped).exists())
 
 
+class CostVisibilityTests(TestCase):
+    """Plate cost / margin % is ownership-level P&L info (COST_VISIBLE_ROLES
+    = Super Admin/MD/GM only) — Chef and Restaurant Manager build and run
+    recipes without seeing it. Chef additionally never sees a raw material's
+    purchase rate anywhere, since their only reason to browse Inventory is
+    picking ingredients or checking stock, not procurement figures."""
+
+    def setUp(self):
+        from rest_framework.test import APIClient
+
+        from apps.accounts.models import User
+        cat = Category.objects.create(name="Main")
+        self.rice = Ingredient.objects.create(name="Rice", unit="kg",
+                                              current_stock=Decimal("10"), unit_cost=Decimal("60"))
+        self.dish = MenuItem.objects.create(name="Fried Rice", category=cat, price=Decimal("200"))
+        recipe = Recipe.objects.create(menu_item=self.dish)
+        RecipeLine.objects.create(recipe=recipe, ingredient=self.rice, qty=Decimal("0.25"))
+        order = Order.objects.create(mode=Order.TAKEAWAY, status=Order.SETTLED)
+        OrderLine.objects.create(order=order, menu_item=self.dish, qty=2,
+                                 unit_price=Decimal("200"), kot_fired=True)
+        apply_movement(self.rice, "consumption", Decimal("-0.5"), source=f"order:{order.id}")
+
+        self.gm = APIClient()
+        self.gm.force_authenticate(User.objects.create_user(
+            username="gmcost", password="Tk9$mZ2pQw!7", role="General Manager"))
+        self.chef = APIClient()
+        self.chef.force_authenticate(User.objects.create_user(
+            username="chefcost", password="Tk9$mZ2pQw!7", role="Chef / Kitchen"))
+        self.rm = APIClient()
+        self.rm.force_authenticate(User.objects.create_user(
+            username="rmcost", password="Tk9$mZ2pQw!7", role="Restaurant Manager"))
+
+    def test_recipe_list_hides_cost_from_chef_and_restaurant_manager(self):
+        gm_row = self.gm.get("/api/recipes/").data[0]
+        self.assertIn("plate_cost", gm_row)
+        self.assertIn("margin_pct", gm_row)
+        for client in (self.chef, self.rm):
+            row = client.get("/api/recipes/").data[0]
+            self.assertNotIn("plate_cost", row)
+            self.assertNotIn("margin_pct", row)
+
+    def test_menu_item_mapping_hides_cost_from_chef(self):
+        gm_row = next(r for r in self.gm.get("/api/recipes/mapping/").data if r["name"] == "Fried Rice")
+        self.assertIsNotNone(gm_row["plate_cost"])
+        chef_row = next(r for r in self.chef.get("/api/recipes/mapping/").data if r["name"] == "Fried Rice")
+        self.assertIsNone(chef_row["plate_cost"])
+
+    def test_recipe_wise_consumption_hides_cost_from_chef(self):
+        gm_row = next(r for r in self.gm.get("/api/recipes/consumption/").data["rows"] if r["item"] == "Fried Rice")
+        self.assertIsNotNone(gm_row["cost"])
+        chef_row = next(r for r in self.chef.get("/api/recipes/consumption/").data["rows"] if r["item"] == "Fried Rice")
+        self.assertIsNone(chef_row["cost"])
+        self.assertTrue(all(l["cost"] is None for l in chef_row["lines"]))
+
+    def test_create_recipe_response_omits_cost_for_chef(self):
+        dish2 = MenuItem.objects.create(name="Plain Rice", category=Category.objects.get(name="Main"),
+                                        price=Decimal("100"))
+        r = self.chef.post("/api/recipes/", {
+            "menu_item": dish2.id, "lines": [{"ingredient": self.rice.id, "qty": "0.2"}],
+        }, format="json")
+        self.assertEqual(r.status_code, 201)
+        self.assertNotIn("plate_cost", r.data)
+
+    def test_chef_never_sees_ingredient_purchase_rate(self):
+        chef_row = next(i for i in self.chef.get("/api/inventory/").data if i["name"] == "Rice")
+        self.assertNotIn("unit_cost", chef_row)
+        # Restaurant Manager and GM still see it — they buy/cost the store.
+        for client in (self.gm, self.rm):
+            row = next(i for i in client.get("/api/inventory/").data if i["name"] == "Rice")
+            self.assertIn("unit_cost", row)
+            self.assertEqual(row["unit_cost"], "60.00")
+
+    def test_consumption_report_hides_cost_from_chef_only(self):
+        chef_row = next(r for r in self.chef.get("/api/inventory/consumption_report/").data["rows"]
+                        if r["ingredient"] == "Rice")
+        self.assertIsNone(chef_row["consumption_cost"])
+        gm_row = next(r for r in self.gm.get("/api/inventory/consumption_report/").data["rows"]
+                     if r["ingredient"] == "Rice")
+        self.assertEqual(Decimal(str(gm_row["consumption_cost"])), Decimal("30"))  # 0.5 kg × ₹60
+        rm_row = next(r for r in self.rm.get("/api/inventory/consumption_report/").data["rows"]
+                     if r["ingredient"] == "Rice")
+        self.assertIsNotNone(rm_row["consumption_cost"])  # RM buys/costs the store, unlike Chef
+
+
 class GoodsReceiptTests(TestCase):
     def test_grn_posts_stock(self):
         ing = Ingredient.objects.create(name="Butter", unit="kg", current_stock=Decimal("3"), unit_cost=Decimal("480"))

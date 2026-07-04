@@ -1,5 +1,7 @@
 from rest_framework import serializers
 
+from apps.accounts.constants import ROLE_CHEF
+
 from .models import Ingredient, IngredientCategory, StockMovement, Uom
 
 
@@ -27,6 +29,16 @@ class IngredientSerializer(serializers.ModelSerializer):
             "storage_location", "expiry_date", "below_par", "below_min",
         ]
         read_only_fields = ["code"]
+
+    def to_representation(self, instance):
+        """Chef's only reason to browse Inventory is picking ingredients for a
+        recipe or checking kitchen stock — not the purchase rate (that's a
+        procurement figure for Store Keeper / Restaurant Manager to see)."""
+        data = super().to_representation(instance)
+        request = self.context.get("request")
+        if request is not None and getattr(request.user, "role", "") == ROLE_CHEF:
+            data.pop("unit_cost", None)
+        return data
 
     def validate_unit(self, value):
         if not Uom.objects.filter(code=value).exists():

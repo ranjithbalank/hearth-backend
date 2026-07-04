@@ -257,6 +257,8 @@ class IngredientViewSet(ModuleViewSetMixin, viewsets.ModelViewSet):
     @action(detail=False, methods=["get"])
     def consumption_report(self, request):
         """Raw-material consumption + purchase-vs-consumption over ?days= (spec §7)."""
+        from apps.accounts.constants import ROLE_CHEF
+        show_cost = getattr(request.user, "role", "") != ROLE_CHEF
         days = int(request.query_params.get("days", 30))
         since = timezone.now() - timedelta(days=days)
         rows = []
@@ -270,11 +272,17 @@ class IngredientViewSet(ModuleViewSetMixin, viewsets.ModelViewSet):
             purchased = by_kind.get(StockMovement.RECEIPT, Decimal("0"))
             if not (consumed or wasted or purchased):
                 continue
+            cost = consumed * (ing.unit_cost or Decimal("0"))
             rows.append({
                 "ingredient": ing.name, "code": ing.code, "unit": ing.unit,
                 "consumed": consumed, "wasted": wasted, "purchased": purchased,
-                "consumption_cost": consumed * (ing.unit_cost or Decimal("0")),
+                # Chef's reason to be here is tracking usage/wastage, not the
+                # cost — same rule as the ingredient rate (see IngredientSerializer).
+                "consumption_cost": (cost if show_cost else None),
                 "in_stock": ing.current_stock,
+                "_sort_cost": cost,
             })
-        rows.sort(key=lambda r: -r["consumption_cost"])
+        rows.sort(key=lambda r: -r["_sort_cost"])
+        for r in rows:
+            del r["_sort_cost"]
         return Response({"days": days, "rows": rows})

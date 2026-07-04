@@ -4,10 +4,16 @@ from rest_framework import viewsets
 from rest_framework.decorators import action
 from rest_framework.response import Response
 
+from apps.accounts.constants import COST_VISIBLE_ROLES
 from apps.accounts.models import log_action
 from apps.accounts.permissions import ModuleViewSetMixin
 
 from .models import ProductionBatch, Recipe, RecipeLine
+
+
+def _can_see_cost(user):
+    """Plate cost / margin % is ownership-level P&L info — see COST_VISIBLE_ROLES."""
+    return getattr(user, "role", "") in COST_VISIBLE_ROLES
 
 
 class RecipeViewSet(ModuleViewSetMixin, viewsets.ViewSet):
@@ -18,6 +24,7 @@ class RecipeViewSet(ModuleViewSetMixin, viewsets.ViewSet):
         """Menu Item Mapping (spec §6): every POS item with its recipe, or
         flagged unmapped — unmapped items skip stock deduction silently."""
         from apps.pos.models import MenuItem
+        show_cost = _can_see_cost(request.user)
         items = (MenuItem.objects.select_related("category")
                  .prefetch_related("recipe__lines__ingredient", "recipe__lines__sub_recipe"))
         out = []
@@ -30,7 +37,7 @@ class RecipeViewSet(ModuleViewSetMixin, viewsets.ViewSet):
                 "price": str(m.price),
                 "available": m.available,
                 "recipe_id": recipe.id if recipe else None,
-                "plate_cost": str(recipe.plate_cost) if recipe else None,
+                "plate_cost": (str(recipe.plate_cost) if recipe else None) if show_cost else None,
                 "lines": [
                     {"ingredient": l.ingredient_id, "sub_recipe": l.sub_recipe_id,
                      "name": l.ingredient.name if l.ingredient_id else f"[prep] {l.sub_recipe.name}",
@@ -80,6 +87,11 @@ class RecipeViewSet(ModuleViewSetMixin, viewsets.ViewSet):
             rows.append({"item": r.menu_item.name, "plates": plates,
                          "cost": str(round(cost, 2)), "lines": lines})
         rows.sort(key=lambda x: -Decimal(x["cost"] or "0"))
+        if not _can_see_cost(request.user):
+            for row in rows:
+                row["cost"] = None
+                for l in row["lines"]:
+                    l["cost"] = None
         return Response({"days": days, "rows": rows})
 
     @action(detail=False, methods=["get"])
@@ -154,10 +166,11 @@ class RecipeViewSet(ModuleViewSetMixin, viewsets.ViewSet):
         log_action(request.user, "recipe_mapped", entity="Recipe", entity_id=recipe.id,
                    after={"menu_item": item.name, "lines": len(parsed),
                           "menu_item_created": bool(new_item)})
-        return Response({"id": recipe.id, "menu_item": item.id, "item": item.name,
-                         "menu_item_created": bool(new_item),
-                         "plate_cost": str(recipe.plate_cost)},
-                        status=201 if created else 200)
+        body = {"id": recipe.id, "menu_item": item.id, "item": item.name,
+                "menu_item_created": bool(new_item)}
+        if _can_see_cost(request.user):
+            body["plate_cost"] = str(recipe.plate_cost)
+        return Response(body, status=201 if created else 200)
 
     def destroy(self, request, pk=None):
         """Unmap: delete the recipe so the item no longer draws stock."""
@@ -172,25 +185,27 @@ class RecipeViewSet(ModuleViewSetMixin, viewsets.ViewSet):
 
     def list(self, request):
         out = []
+        show_cost = _can_see_cost(request.user)
         for r in Recipe.objects.select_related("menu_item").prefetch_related(
                 "lines__ingredient", "lines__sub_recipe"):
-            cost = r.plate_cost
             price = r.menu_item.price
-            margin = round(float((price - cost) / price * 100), 1) if price else 0
-            out.append({
+            row = {
                 "id": r.id,
                 "menu_item": r.menu_item_id,
                 "item": r.menu_item.name,
                 "price": str(price),
-                "plate_cost": str(cost),
-                "margin_pct": margin,
                 "ingredients": [
                     {"name": l.ingredient.name if l.ingredient_id else f"[prep] {l.sub_recipe.name}",
                      "qty": str(l.qty),
                      "unit": (l.unit or l.ingredient.unit) if l.ingredient_id else "portion"}
                     for l in r.lines.all()
                 ],
-            })
+            }
+            if show_cost:
+                cost = r.plate_cost
+                row["plate_cost"] = str(cost)
+                row["margin_pct"] = round(float((price - cost) / price * 100), 1) if price else 0
+            out.append(row)
         return Response(out)
 
     @action(detail=True, methods=["post"])

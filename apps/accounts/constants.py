@@ -155,6 +155,10 @@ MODULE_ENTITLEMENT = {
 # (indent approval) is the store's call — never the requester's own.
 PO_APPROVER_ROLES = {ROLE_SUPER_ADMIN, ROLE_MD, ROLE_GM, ROLE_FINANCE, ROLE_REST_MGR}
 
+# Menu/recipe costing (plate cost, margin %) is ownership-level P&L information —
+# Chef and Restaurant Manager build and run recipes without needing to see it.
+COST_VISIBLE_ROLES = {ROLE_SUPER_ADMIN, ROLE_MD, ROLE_GM}
+
 # Material requests: every department has its own approver — the head who
 # actually knows whether that indent makes sense — plus GM/MD/Super Admin as
 # a universal override. The Store Keeper never approves (they're the

@@ -521,6 +521,12 @@ class OrderViewSet(ModuleViewSetMixin, viewsets.ModelViewSet):
             qs = qs.filter(status__in=[Order.OPEN, Order.KOT_FIRED, Order.BILLED])
         return qs
 
+    def _reload(self, order):
+        """Re-fetch after mutating `order.lines` in this request — the queryset
+        that fetched `order` already prefetched (and cached) the pre-mutation
+        lines, so serializing `order` directly would show stale data."""
+        return Order.objects.prefetch_related("lines__menu_item").select_related("table").get(pk=order.pk)
+
     def perform_create(self, serializer):
         # Stamp who took the order — the captain owns delivery for their tables.
         # Every order gets a client_uuid so the public status page can reference it.
@@ -692,12 +698,12 @@ class OrderViewSet(ModuleViewSetMixin, viewsets.ModelViewSet):
             if existing and not existing.addons:
                 existing.qty += qty
                 existing.save(update_fields=["qty"])
-                return Response(OrderSerializer(order).data)
+                return Response(OrderSerializer(self._reload(order)).data)
         OrderLine.objects.create(
             order=order, menu_item=item, variant=variant, addons=addons,
             qty=qty, unit_price=unit_price, note=request.data.get("note", ""),
         )
-        return Response(OrderSerializer(order).data)
+        return Response(OrderSerializer(self._reload(order)).data)
 
     @action(detail=True, methods=["post"])
     def set_qty(self, request, pk=None):
@@ -727,7 +733,7 @@ class OrderViewSet(ModuleViewSetMixin, viewsets.ModelViewSet):
         else:
             line.qty = qty
             line.save(update_fields=["qty"])
-        return Response(OrderSerializer(order).data)
+        return Response(OrderSerializer(self._reload(order)).data)
 
     def _free_table_if_idle(self, table):
         """Free the table only when nothing on it is still unpaid (incl. printed bills)."""
