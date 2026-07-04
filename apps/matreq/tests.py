@@ -187,6 +187,113 @@ class MaterialRequestTests(TestCase):
         store_queue_ids = [r["id"] for r in store.get("/api/material-requests/").data]
         self.assertIn(r_hk["id"], store_queue_ids)
 
+    def test_restaurant_manager_cannot_request_the_department_it_approves(self):
+        """The exact bug the user caught: Restaurant Manager both requesting
+        AND approving Kitchen/Bar meant one person effectively self-served —
+        the only thing standing in the way was a same-username check on a
+        role most properties have exactly one account for. Now blocked at
+        creation, not just at approval time."""
+        rm = APIClient()
+        rm.force_authenticate(User.objects.create_user(
+            username="rmreq", password="Tk9$mZ2pQw!7", role="Restaurant Manager"))
+        r = rm.post("/api/material-requests/", {
+            "department": "Kitchen", "lines": [{"ingredient": self.ing.id, "qty": "1"}],
+        }, format="json")
+        self.assertEqual(r.status_code, 400)
+        self.assertIn("approve Kitchen indents yourself", r.data["detail"])
+        r = rm.post("/api/material-requests/", {
+            "department": "Bar", "lines": [{"ingredient": self.ing.id, "qty": "1"}],
+        }, format="json")
+        self.assertEqual(r.status_code, 400)
+        # But Restaurant Manager can still request departments it doesn't approve.
+        r = rm.post("/api/material-requests/", {
+            "department": "Housekeeping", "lines": [{"ingredient": self.ing.id, "qty": "1"}],
+        }, format="json")
+        self.assertEqual(r.status_code, 201)
+
+    def test_housekeeping_cannot_request_maintenance_it_approves(self):
+        hk = APIClient()
+        hk.force_authenticate(User.objects.create_user(
+            username="hkself", password="Tk9$mZ2pQw!7", role="Housekeeping"))
+        r = hk.post("/api/material-requests/", {
+            "department": "Maintenance", "lines": [{"ingredient": self.ing.id, "qty": "1"}],
+        }, format="json")
+        self.assertEqual(r.status_code, 400)
+        # Its own department is fine — Front Office approves that, not Housekeeping.
+        r = hk.post("/api/material-requests/", {
+            "department": "Housekeeping", "lines": [{"ingredient": self.ing.id, "qty": "1"}],
+        }, format="json")
+        self.assertEqual(r.status_code, 201)
+
+    def test_banquets_and_front_office_departments_route_to_gm_not_front_office(self):
+        """Front Office is the only role that would ever raise these two —
+        so it can't also be the approver. GM/MD/Super Admin sign off instead."""
+        fo = APIClient()
+        fo.force_authenticate(User.objects.create_user(
+            username="foself", password="Tk9$mZ2pQw!7", role="Front Office"))
+        r = fo.post("/api/material-requests/", {
+            "department": "Banquets", "lines": [{"ingredient": self.ing.id, "qty": "1"}],
+        }, format="json")
+        self.assertEqual(r.status_code, 201, r.data)
+        self.assertEqual(r.data["approver_roles"],
+                         ["General Manager", "Managing Director", "Super Admin"])
+        req_id = r.data["id"]
+        # Front Office can't approve its own Banquets indent…
+        r = fo.post(f"/api/material-requests/{req_id}/advance/")
+        self.assertEqual(r.status_code, 403)
+        # …GM does.
+        self.assertEqual(self.client.post(f"/api/material-requests/{req_id}/advance/").data["status"],
+                         "approved")
+        # Same story for the Front Office department's own supplies.
+        r = fo.post("/api/material-requests/", {
+            "department": "Front Office", "lines": [{"ingredient": self.ing.id, "qty": "1"}],
+        }, format="json")
+        self.assertEqual(r.data["approver_roles"],
+                         ["General Manager", "Managing Director", "Super Admin"])
+
+    def test_universal_roles_exempt_from_the_self_request_block(self):
+        """GM/MD/Super Admin can still request anything — they're already
+        full-access executives everywhere else in the system."""
+        r = self.client.post("/api/material-requests/", {   # self.client == GM
+            "department": "Kitchen", "lines": [{"ingredient": self.ing.id, "qty": "1"}],
+        }, format="json")
+        self.assertEqual(r.status_code, 201)
+
+    def test_super_admin_md_gm_get_full_oversight_including_issued_history(self):
+        """Universal roles see EVERY request, every department, every status
+        — not just what's actionable — since they already have full
+        authority everywhere. Department-scoped roles only see their queue."""
+        chef = APIClient()
+        chef.force_authenticate(User.objects.create_user(
+            username="chefover", password="Tk9$mZ2pQw!7", role="Chef / Kitchen"))
+        r = chef.post("/api/material-requests/", {
+            "department": "Kitchen", "lines": [{"ingredient": self.ing.id, "qty": "1"}],
+        }, format="json").data
+        # Fully complete the lifecycle so it's ISSUED — normally invisible to
+        # anyone once there's nothing left to action.
+        rm = APIClient()
+        rm.force_authenticate(User.objects.create_user(
+            username="rmover", password="Tk9$mZ2pQw!7", role="Restaurant Manager"))
+        rm.post(f"/api/material-requests/{r['id']}/advance/")
+        store = APIClient()
+        store.force_authenticate(User.objects.create_user(
+            username="storeover", password="Tk9$mZ2pQw!7", role="Store Keeper"))
+        store.post(f"/api/material-requests/{r['id']}/advance/")
+
+        # Store Keeper's own queue no longer shows it (nothing left to do).
+        self.assertNotIn(r["id"], [x["id"] for x in store.get("/api/material-requests/").data])
+        # GM (self.client) sees it anyway — full oversight, any status.
+        gm_ids = [x["id"] for x in self.client.get("/api/material-requests/").data]
+        self.assertIn(r["id"], gm_ids)
+        issued = next(x for x in self.client.get("/api/material-requests/").data if x["id"] == r["id"])
+        self.assertEqual(issued["status"], "issued")
+
+        for role, uname in [("Managing Director", "mdover"), ("Super Admin", "saover")]:
+            u = APIClient()
+            u.force_authenticate(User.objects.create_user(
+                username=uname, password="Tk9$mZ2pQw!7", role=role))
+            self.assertIn(r["id"], [x["id"] for x in u.get("/api/material-requests/").data])
+
     def test_materials_picklist_available_without_inventory_module(self):
         """Housekeeping has 'matreq' but not the full 'inventory' module — it
         still needs to browse materials to build a request."""

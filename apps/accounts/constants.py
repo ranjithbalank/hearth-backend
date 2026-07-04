@@ -159,22 +159,47 @@ PO_APPROVER_ROLES = {ROLE_SUPER_ADMIN, ROLE_MD, ROLE_GM, ROLE_FINANCE, ROLE_REST
 # actually knows whether that indent makes sense — plus GM/MD/Super Admin as
 # a universal override. The Store Keeper never approves (they're the
 # custodian who hands over stock at the ISSUE step, not the requester's boss).
+#
+# The pattern that MUST hold for every department: requester role ≠ approver
+# role (Housekeeping requests → Front Office approves is the model). Kitchen
+# and Bar have no separate floor role that "owns" requesting the way
+# Housekeeping does, so Chef/Cashier/Captain do the requesting and Restaurant
+# Manager stays approver-ONLY there (see role_can_request_department below —
+# Restaurant Manager is blocked from picking Kitchen/Bar, otherwise the same
+# person could raise a request no one else could sign off on).
+# Banquets and the Front Office's own supplies have the mirror problem: Front
+# Office is the only role that operates there, so IT must be the requester —
+# meaning the approver can't be Front Office too. Those two route to GM/MD/
+# Super Admin only, same as any unlisted department.
 DEPARTMENT_APPROVERS = {
     "Kitchen": {ROLE_REST_MGR},
     "Bar": {ROLE_REST_MGR},
-    "Banquets": {ROLE_FRONT_OFFICE},       # Front Office owns the banquets module
     "Housekeeping": {ROLE_FRONT_OFFICE},   # "frontdesk manager" per house convention
-    "Front Office": {ROLE_FRONT_OFFICE},
     "Maintenance": {ROLE_HOUSEKEEPING},    # Housekeeping owns engineering/work-orders
+    # "Banquets" and "Front Office" intentionally absent — Front Office is the
+    # only role that would ever raise those, so it can't also approve them;
+    # they fall through to the universal GM/MD/Super Admin approvers below.
 }
 UNIVERSAL_INDENT_APPROVERS = {ROLE_SUPER_ADMIN, ROLE_MD, ROLE_GM}
-# Any department not listed above (Other/general office supplies) still needs
-# a real approver — GM+ only, so it can never fall through unapproved.
+# Any department not listed above (Banquets, Front Office, Other/general
+# office supplies) still needs a real approver — GM+ only, never unapproved.
 
 
 def indent_approvers_for(department: str) -> set:
     """Who may approve (not issue) an indent for this department."""
     return DEPARTMENT_APPROVERS.get(department, set()) | UNIVERSAL_INDENT_APPROVERS
+
+
+def role_can_request_department(role: str, department: str) -> bool:
+    """A role can't raise a request for a department it ALSO approves — that
+    would let the same person be both sides of the approval (the Restaurant
+    Manager requesting Kitchen stock and then being the only one who could
+    sign off on it). Universal approvers (GM/MD/Super Admin) are exempt —
+    they're already full-access executives everywhere else in this system.
+    """
+    if role in UNIVERSAL_INDENT_APPROVERS:
+        return True
+    return role not in DEPARTMENT_APPROVERS.get(department, set())
 
 
 # Issuing approved stock is always the store's job — it's a physical handover

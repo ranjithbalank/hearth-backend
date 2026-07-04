@@ -30,16 +30,25 @@ class MaterialRequestViewSet(ModuleViewSetMixin, viewsets.ViewSet):
         together. ?view=mine → what I raised (to track its status).
         ?view=queue (default) → what's actually mine to act on right now
         (my department's pending approvals + anything approved and awaiting
-        issue, since issuing is a store-wide job). GM/MD/Super Admin are
-        universal approvers+issuers, so their queue naturally becomes
-        everything — no separate "all" view needed.
+        issue, since issuing is a store-wide job).
+
+        Super Admin / MD / GM are the exception: they're universal approvers
+        and issuers everywhere already, so instead of just their actionable
+        subset they get the full oversight view — every department, every
+        status (including already-issued history), across the whole property.
         """
-        from apps.accounts.constants import INDENT_ISSUER_ROLES, indent_approvers_for
+        from apps.accounts.constants import (
+            INDENT_ISSUER_ROLES,
+            UNIVERSAL_INDENT_APPROVERS,
+            indent_approvers_for,
+        )
         role = getattr(request.user, "role", "")
         username = request.user.username
         qs = MaterialRequest.objects.prefetch_related("lines__ingredient")
         if request.query_params.get("view") == "mine":
             qs = qs.filter(requested_by=username)
+        elif role in UNIVERSAL_INDENT_APPROVERS:
+            pass   # full oversight — every department, every status
         else:
             actionable_ids = [
                 r.id for r in qs
@@ -70,9 +79,19 @@ class MaterialRequestViewSet(ModuleViewSetMixin, viewsets.ViewSet):
 
         from .models import MaterialRequestLine
 
+        from apps.accounts.constants import indent_approvers_for, role_can_request_department
+
         department = (request.data.get("department") or "").strip()
         if not department:
             return Response({"detail": "department is required"}, status=400)
+        role = getattr(request.user, "role", "")
+        if not role_can_request_department(role, department):
+            approvers = ", ".join(sorted(indent_approvers_for(department) - {role}))
+            return Response(
+                {"detail": f"you approve {department} indents yourself — ask someone on the floor "
+                           f"to raise this one (or pick a different department); it'll still land "
+                           f"in your own approval queue" + (f", alongside {approvers}" if approvers else "")},
+                status=400)
         wanted = request.data.get("lines") or []
         if not wanted:
             return Response({"detail": "at least one material line is required"}, status=400)
