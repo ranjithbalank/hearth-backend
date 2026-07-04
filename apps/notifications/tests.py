@@ -39,6 +39,40 @@ class NotificationTests(TestCase):
         titles = [a["title"] for a in resp.data["alerts"]]
         self.assertFalse(any("Low stock" in t for t in titles))
 
+    def test_store_keeper_notified_when_indent_approved_chef_is_not(self):
+        """Chef requests chicken → Restaurant Manager approves → the Store
+        Keeper gets pinged to issue it. The chef who raised it, and other
+        matreq-holders with no issuing authority, don't need this alert."""
+        chicken = Ingredient.objects.create(name="Chicken", unit="kg",
+                                            current_stock=Decimal("10"))
+        chef = User.objects.create_user(username="chefnotif", password="Tk9$mZ2pQw!7",
+                                        role="Chef / Kitchen")
+        chef_client = APIClient()
+        chef_client.force_authenticate(chef)
+        r = chef_client.post("/api/material-requests/", {
+            "department": "Kitchen", "lines": [{"ingredient": chicken.id, "qty": "2"}],
+        }, format="json")
+        req_id = r.data["id"]
+
+        rm = User.objects.create_user(username="rmnotif", password="Tk9$mZ2pQw!7",
+                                      role="Restaurant Manager")
+        rm_client = APIClient()
+        rm_client.force_authenticate(rm)
+        rm_client.post(f"/api/material-requests/{req_id}/advance/")
+
+        self._login("Store Keeper")
+        titles = [a["title"] for a in self.client.get(reverse("notifications")).data["alerts"]]
+        self.assertTrue(any("approved — ready to issue" in t for t in titles), titles)
+
+        # The chef who raised it doesn't need the "go issue it" alert.
+        titles_chef = [a["title"] for a in chef_client.get("/api/notifications/").data["alerts"]]
+        self.assertFalse(any("ready to issue" in t for t in titles_chef))
+
+        # Front Office has matreq access too, but issues nothing.
+        self._login("Front Office")
+        titles_fo = [a["title"] for a in self.client.get(reverse("notifications")).data["alerts"]]
+        self.assertFalse(any("ready to issue" in t for t in titles_fo))
+
     def test_housekeeping_sees_cleaning_alert_after_checkout(self):
         # A vacated (dirty) room surfaces a housekeeping cleaning alert.
         from apps.rooms.models import Room, RoomType

@@ -107,6 +107,23 @@ def _build_alerts():
             "detail": "Awaiting manager approval",
         })
 
+    # Chef requests chicken → Restaurant Manager approves → the Store Keeper
+    # needs to know it's ready to hand over. "roles" narrows this past the
+    # module gate: every role can raise a matreq now, but only the actual
+    # issuers (Store Keeper + managers) should be pinged to go issue it —
+    # the chef who requested it doesn't need this alert.
+    from apps.accounts.constants import INDENT_ISSUER_ROLES
+    from apps.matreq.models import MaterialRequest
+    approved = MaterialRequest.objects.filter(status=MaterialRequest.APPROVED)
+    if approved.exists():
+        depts = sorted(set(approved.values_list("department", flat=True)))
+        alerts.append({
+            "severity": "warning", "module": "matreq",
+            "title": f"{approved.count()} material request(s) approved — ready to issue",
+            "detail": "Departments: " + ", ".join(depts),
+            "roles": sorted(INDENT_ISSUER_ROLES),
+        })
+
     from apps.banquets.models import Event
     tentative = Event.objects.filter(status=Event.TENTATIVE).count()
     if tentative:
@@ -141,6 +158,10 @@ class NotificationView(APIView):
         visible = [
             a for a in _build_alerts()
             if role_can_access(role, a["module"]) and entitlement_allows(ent, a["module"])
+            # Some alerts narrow further than the module gate — e.g. every
+            # role can open Material Requests now, but "ready to issue" is
+            # only useful to whoever actually does the issuing.
+            and ("roles" not in a or role in a["roles"])
         ]
         order = {"critical": 0, "warning": 1, "info": 2}
         visible.sort(key=lambda a: order.get(a["severity"], 3))
