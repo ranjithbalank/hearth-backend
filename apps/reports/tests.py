@@ -71,7 +71,13 @@ class RestaurantReportsTests(TestCase):
         self.assertEqual(Decimal(kpis["Gross profit (F&B)"]), Decimal("370"))
 
     def test_aggregator_report_and_records(self):
-        """Zomato/Swiggy cumulative report + order-level records export."""
+        """Zomato/Swiggy cumulative report shows GROSS, commission taken and
+        NET realization — the number owners actually care about."""
+        from apps.accounts.views import get_property
+        prop = get_property()
+        prop.zomato_commission_pct = Decimal("20")
+        prop.swiggy_commission_pct = Decimal("25")
+        prop.save()
         z = Order.objects.create(mode=Order.DELIVERY, status=Order.SETTLED,
                                  source_platform="zomato", external_ref="Z-1001")
         OrderLine.objects.create(order=z, menu_item=self.item, qty=1,
@@ -85,11 +91,20 @@ class RestaurantReportsTests(TestCase):
                              source_platform="zomato", external_ref="Z-1002")
         data = self._view("aggregator")
         kpis = {k["label"]: k["value"] for k in data["kpis"]}
-        self.assertEqual(Decimal(kpis["Online sales (settled)"]), Decimal("600"))
+        # Gross: 200 (zomato) + 400 (swiggy) = 600
+        self.assertEqual(Decimal(kpis["Gross sales (settled)"]), Decimal("600"))
+        # Net: 200×0.80 + 400×0.75 = 160 + 300 = 460; commission = 140
+        self.assertEqual(Decimal(kpis["Net realization"]), Decimal("460.00"))
+        self.assertEqual(Decimal(kpis["Commission taken"]), Decimal("140.00"))
         self.assertEqual(kpis["Orders received"], 3)
         bars = {b["name"]: b["value"] for b in data["bars"]}
-        self.assertEqual(bars["Swiggy"], 400.0)
-        self.assertEqual(bars["Zomato"], 200.0)
+        self.assertEqual(bars["Swiggy"], 300.0)   # net, not gross
+        self.assertEqual(bars["Zomato"], 160.0)
+        # Records carry gross/commission/net per order.
+        row = next(r for r in data["records"]["rows"] if r[2] == "Z-1001")
+        self.assertEqual(row[4], "200.00")   # gross
+        self.assertEqual(row[5], "20.00")    # commission %
+        self.assertEqual(row[6], "160.00")   # net
         # Records export: one row per order with its reference.
         r = self.client.get("/api/reports/export/?report=aggregator&fmt=csv")
         body = r.content.decode()

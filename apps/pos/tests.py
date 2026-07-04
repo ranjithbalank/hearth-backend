@@ -534,10 +534,13 @@ class KotBillFlowTests(TestCase):
         self.assertIsNone(Order.objects.get(pk=r2.data["id"]).token_no)
 
     def test_table_reservation_holds_and_seats(self):
-        """Booked reservation holds the table (RESERVED); seating releases it."""
+        """A booking inside the 15-min window holds the table; seating releases it."""
+        from datetime import timedelta
+        from django.utils import timezone
+        soon = (timezone.now() + timedelta(minutes=10)).isoformat()
         r = self.client.post(reverse("tablereservation-list"),
                              {"kind": "reservation", "table": self.table.id, "name": "Ramesh",
-                              "party_size": 4, "reserved_for": "2026-07-02T19:30:00Z"},
+                              "party_size": 4, "reserved_for": soon},
                              format="json")
         self.assertEqual(r.status_code, 201)
         rid = r.data["id"]
@@ -565,9 +568,12 @@ class KotBillFlowTests(TestCase):
         self.assertEqual(r.data["table_name"], "T1")
 
     def test_reservation_cancel_releases_hold(self):
+        from datetime import timedelta
+        from django.utils import timezone
+        soon = (timezone.now() + timedelta(minutes=5)).isoformat()
         r = self.client.post(reverse("tablereservation-list"),
                              {"kind": "reservation", "table": self.table.id, "name": "NoCome",
-                              "party_size": 2, "reserved_for": "2026-07-02T20:00:00Z"},
+                              "party_size": 2, "reserved_for": soon},
                              format="json")
         self.client.post(reverse("tablereservation-cancel", args=[r.data["id"]]), format="json")
         self.table.refresh_from_db()

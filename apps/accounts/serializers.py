@@ -59,7 +59,8 @@ class PropertySerializer(serializers.ModelSerializer):
         fields = [
             "id", "name", "edition", "setup_done", "business_date",
             "gstin", "address", "phone", "logo", "doc_header", "doc_footer",
-            "currency", "entitlement",
+            "currency", "entitlement", "gst_billing_mode",
+            "zomato_commission_pct", "swiggy_commission_pct",
         ]
 
 

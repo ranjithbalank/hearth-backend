@@ -283,11 +283,24 @@ class RestaurantE2ETests(TestCase):
         from rest_framework.test import APIClient
         rice = self._material("Rice", stock="5")
         dish = self._dish("Pongal", "110", [{"ingredient": rice.id, "qty": "0.1"}])
+        from datetime import timedelta
+
+        from django.utils import timezone
         table = Table.objects.create(name="R1", seats=4, qr_token="QR-R1")
-        # Book R1 for 19:30 → the table is held.
+        now = timezone.now()
+        # A booking for TOMORROW doesn't block walk-ins today…
+        r = self.client.post("/api/pos/table-reservations/", {
+            "name": "Tomorrow Guy", "kind": "reservation", "party_size": 2,
+            "table": table.id, "reserved_for": (now + timedelta(days=1)).isoformat(),
+        }, format="json")
+        self.assertEqual(r.status_code, 201, r.data)
+        table.refresh_from_db()
+        self.assertEqual(table.status, Table.FREE)      # held only 15 min before
+        self.client.post(f"/api/pos/table-reservations/{r.data['id']}/cancel/")
+        # …but a booking 10 minutes out holds the table.
         r = self.client.post("/api/pos/table-reservations/", {
             "name": "Sharma", "kind": "reservation", "party_size": 4,
-            "table": table.id, "reserved_for": "2026-07-03T19:30:00Z",
+            "table": table.id, "reserved_for": (now + timedelta(minutes=10)).isoformat(),
         }, format="json")
         self.assertEqual(r.status_code, 201, r.data)
         res_id = r.data["id"]
@@ -307,16 +320,27 @@ class RestaurantE2ETests(TestCase):
         # 3. …nor can the desk double-book the same slot (±90 min window)…
         r = self.client.post("/api/pos/table-reservations/", {
             "name": "Verma", "kind": "reservation", "party_size": 2,
-            "table": table.id, "reserved_for": "2026-07-03T20:15:00Z",
+            "table": table.id, "reserved_for": (now + timedelta(minutes=70)).isoformat(),
         }, format="json")
         self.assertEqual(r.status_code, 400)
         self.assertIn("already booked", str(r.data))
-        # …though a clearly later slot on the same table is fine.
+        # …though a clearly later slot on the same table is fine (and doesn't hold yet).
         r = self.client.post("/api/pos/table-reservations/", {
             "name": "Verma", "kind": "reservation", "party_size": 2,
-            "table": table.id, "reserved_for": "2026-07-03T22:45:00Z",
+            "table": table.id, "reserved_for": (now + timedelta(hours=4)).isoformat(),
         }, format="json")
         self.assertEqual(r.status_code, 201, r.data)
+        # A booking 40 minutes past its slot auto-no-shows and frees the table.
+        ghost_table = Table.objects.create(name="R2", seats=2)
+        gr = self.client.post("/api/pos/table-reservations/", {
+            "name": "Ghost", "kind": "reservation", "party_size": 2,
+            "table": ghost_table.id, "reserved_for": (now - timedelta(minutes=40)).isoformat(),
+        }, format="json")
+        self.client.get("/api/pos/tables/")             # floor read runs the sweep
+        ghost_table.refresh_from_db()
+        self.assertEqual(ghost_table.status, Table.FREE)
+        gres = self.client.get(f"/api/pos/table-reservations/{gr.data['id']}/").data
+        self.assertEqual(gres["status"], "no_show")
         # Seat the party → the hold releases and ordering works normally.
         self.client.post(f"/api/pos/table-reservations/{res_id}/seat/", {}, format="json")
         r = self.client.post("/api/pos/orders/", {"mode": "dinein", "table": table.id},

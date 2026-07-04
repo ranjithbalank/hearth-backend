@@ -93,6 +93,10 @@ class TableViewSet(ModuleViewSetMixin, viewsets.ModelViewSet):
     queryset = Table.objects.all()
     serializer_class = TableSerializer
 
+    def list(self, request, *args, **kwargs):
+        refresh_reservation_holds()   # time-based holds without a scheduler
+        return super().list(request, *args, **kwargs)
+
 
 class CounterOnlyMixin:
     """Cash controls (till, reconciliation) belong to counter roles — captains
@@ -176,6 +180,46 @@ class TillViewSet(CounterOnlyMixin, ModuleViewSetMixin, viewsets.ViewSet):
         return Response(TillSessionSerializer(s).data)
 
 
+# A booking blocks its table only NEAR the slot: from HOLD_BEFORE ahead of the
+# reserved time until NO_SHOW_GRACE past it (then it auto-no-shows and frees).
+HOLD_BEFORE_MIN = 15
+NO_SHOW_GRACE_MIN = 30
+
+
+def refresh_reservation_holds():
+    """Lazy time-based sweep (no cron): apply/release holds and expire
+    no-shows. Called from the floor reads and the order/QR guards."""
+    from datetime import timedelta
+
+    from django.utils import timezone
+    now = timezone.now()
+    hold_from = now + timedelta(minutes=HOLD_BEFORE_MIN)
+    grace = now - timedelta(minutes=NO_SHOW_GRACE_MIN)
+
+    # Expire bookings whose slot passed the grace period — party never showed.
+    for r in TableReservation.objects.filter(
+            kind="reservation", status=TableReservation.BOOKED,
+            reserved_for__isnull=False, reserved_for__lt=grace).select_related("table"):
+        r.status = TableReservation.NO_SHOW
+        r.save(update_fields=["status"])
+
+    active = (TableReservation.objects
+              .filter(kind="reservation", status=TableReservation.BOOKED,
+                      table__isnull=False, reserved_for__isnull=False,
+                      reserved_for__lte=hold_from, reserved_for__gte=grace)
+              .select_related("table"))
+    active_table_ids = set()
+    for r in active:
+        active_table_ids.add(r.table_id)
+        if r.table.status == Table.FREE:
+            r.table.status = Table.RESERVED
+            r.table.save(update_fields=["status"])
+    # Release held tables whose booking is not in its window anymore.
+    for t in Table.objects.filter(status=Table.RESERVED).exclude(id__in=active_table_ids):
+        t.status = Table.FREE
+        t.save(update_fields=["status"])
+
+
 class TableReservationViewSet(ModuleViewSetMixin, viewsets.ModelViewSet):
     """Restaurant table bookings + walk-in waitlist (competitor parity)."""
 
@@ -190,9 +234,15 @@ class TableReservationViewSet(ModuleViewSetMixin, viewsets.ModelViewSet):
         return qs
 
     def _hold(self, r):
-        """A booked reservation with a table holds it while it's free."""
+        """A booked reservation holds its table only within the 15-minute
+        pre-slot window — a booking for tomorrow doesn't block walk-ins today."""
+        from datetime import timedelta
+
+        from django.utils import timezone
         if (r.kind == "reservation" and r.status == TableReservation.BOOKED
-                and r.table and r.table.status == Table.FREE):
+                and r.table and r.table.status == Table.FREE
+                and r.reserved_for
+                and r.reserved_for <= timezone.now() + timedelta(minutes=HOLD_BEFORE_MIN)):
             r.table.status = Table.RESERVED
             r.table.save(update_fields=["status"])
 
@@ -290,6 +340,8 @@ class QrOrderView(APIView):
             return Response({"detail": "invalid table"}, status=404)
         if not active_entitlements().get("restaurant"):
             return Response({"detail": "ordering unavailable"}, status=403)
+        refresh_reservation_holds()
+        table.refresh_from_db()
         if table.status == Table.RESERVED:
             return Response(
                 {"detail": "this table is reserved — please ask the staff to seat you first"},
@@ -482,6 +534,9 @@ class OrderViewSet(ModuleViewSetMixin, viewsets.ModelViewSet):
         # A reserved table belongs to its booking: seat the reservation (which
         # releases the hold) before anyone can order on it.
         tbl = serializer.validated_data.get("table")
+        if tbl:
+            refresh_reservation_holds()
+            tbl.refresh_from_db()
         if tbl and tbl.status == Table.RESERVED:
             from rest_framework.exceptions import ValidationError
             raise ValidationError(

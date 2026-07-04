@@ -198,6 +198,31 @@ class FolioViewSet(ModuleViewSetMixin, viewsets.ModelViewSet):
         return Response(out)
 
     @action(detail=True, methods=["post"])
+    def room_service_delivered(self, request, pk=None):
+        """Front desk confirms the tray reached the room — closes the kitchen
+        ticket (clears the KDS + the 'food ready' alert) and the audit trail."""
+        from django.utils import timezone
+
+        from apps.accounts.models import log_action
+        from apps.pos.models import Kot, Order
+
+        folio = self.get_object()
+        order = (Order.objects.filter(pk=request.data.get("order"), folio=folio,
+                                      source_platform="roomservice")
+                 .prefetch_related("kots").first())
+        if not order:
+            return Response({"detail": "room-service order not found on this folio"}, status=400)
+        ready = order.kots.filter(status=Kot.READY)
+        if not ready.exists():
+            return Response({"detail": "the kitchen hasn't marked this order ready yet"}, status=400)
+        ready.update(status=Kot.SERVED, served_at=timezone.now())
+        order.kitchen_status = "served"
+        order.save(update_fields=["kitchen_status"])
+        log_action(request.user, "room_service_delivered", entity="Order", entity_id=order.id,
+                   after={"folio": folio.id})
+        return Response({"delivered": True})
+
+    @action(detail=True, methods=["post"])
     def room_service_cancel(self, request, pk=None):
         """Cancel a wrongly placed room-service order before it's served.
 

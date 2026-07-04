@@ -152,6 +152,63 @@ class FrontOfficeFlowTests(TestCase):
                         {"items": [{"menu_item": dish.id, "qty": 1}]}, format="json")
         self.assertEqual(r.status_code, 400)
 
+    def test_front_desk_confirms_room_service_delivered(self):
+        """Tweak #5: front desk taps 'Delivered' once the kitchen marks ready —
+        closes the ticket (clears the alert), can't be confirmed twice, and
+        can't be confirmed before the kitchen is actually ready."""
+        from django.urls import reverse
+
+        from rest_framework.test import APIClient
+
+        from apps.accounts.models import User
+        from apps.inventory.models import Ingredient
+        from apps.pos.models import Category, Kot, MenuItem
+        from apps.recipes.models import Recipe, RecipeLine
+
+        cat = Category.objects.create(name="Room Service")
+        paneer = Ingredient.objects.create(name="Paneer2", unit="kg",
+                                           current_stock=Decimal("5"), unit_cost=Decimal("320"))
+        dish = MenuItem.objects.create(name="Paneer Tikka 2", category=cat,
+                                       price=Decimal("400"), gst_rate=Decimal("5"))
+        RecipeLine.objects.create(recipe=Recipe.objects.create(menu_item=dish),
+                                  ingredient=paneer, qty=Decimal("0.2"))
+        folio = services.check_in(self.resv, self.room)
+        client = APIClient()
+        client.force_authenticate(User.objects.create_user(
+            username="fo2", password="Tk9$mZ2pQw!7", role="Front Office"))
+        r = client.post(reverse("folio-room-service", args=[folio.id]),
+                        {"items": [{"menu_item": dish.id, "qty": 1}]}, format="json")
+        self.assertEqual(r.status_code, 201)
+        from apps.pos.models import Order
+        order = Order.objects.get(external_ref=f"folio:{folio.id}")
+        kot = Kot.objects.get(order=order)
+
+        # Can't confirm delivery before the kitchen has marked it ready.
+        r = client.post(reverse("folio-room-service-delivered", args=[folio.id]),
+                        {"order": order.id}, format="json")
+        self.assertEqual(r.status_code, 400)
+
+        kot.status = "ready"
+        kot.save(update_fields=["status"])
+        titles = [a["title"] for a in client.get("/api/notifications/").data["alerts"]]
+        self.assertTrue(any("food ready" in t for t in titles))
+
+        r = client.post(reverse("folio-room-service-delivered", args=[folio.id]),
+                        {"order": order.id}, format="json")
+        self.assertEqual(r.status_code, 200)
+        self.assertTrue(r.data["delivered"])
+        kot.refresh_from_db()
+        self.assertEqual(kot.status, "served")
+        order.refresh_from_db()
+        self.assertEqual(order.kitchen_status, "served")
+        titles = [a["title"] for a in client.get("/api/notifications/").data["alerts"]]
+        self.assertFalse(any("food ready" in t for t in titles))
+
+        # Can't confirm delivery twice.
+        r = client.post(reverse("folio-room-service-delivered", args=[folio.id]),
+                        {"order": order.id}, format="json")
+        self.assertEqual(r.status_code, 400)
+
     def test_corporate_checkout_posts_to_company_ar(self):
         from apps.crm.models import Customer
         folio = services.check_in(self.resv, self.room)

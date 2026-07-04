@@ -33,6 +33,10 @@ class Property(models.Model):
     currency = models.CharField(max_length=8, default="INR")
     # GST Master: with_gst (tax invoice) vs without_gst (bill of supply) — BRD 5.23.
     gst_billing_mode = models.CharField(max_length=12, default="with_gst")
+    # Aggregator commission %, so the Zomato/Swiggy report can show net
+    # realization after the platform's cut, not just gross sales.
+    zomato_commission_pct = models.DecimalField(max_digits=5, decimal_places=2, default=25)
+    swiggy_commission_pct = models.DecimalField(max_digits=5, decimal_places=2, default=23)
     created_at = models.DateTimeField(auto_now_add=True)
 
     class Meta:

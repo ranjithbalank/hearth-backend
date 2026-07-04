@@ -169,16 +169,10 @@ def _report_rows(report):
                          fo.id_type, fo.id_number, fo.opened_at.strftime("%Y-%m-%d")])
         return ("Guest Report", ["Guest", "Room", "ID type", "ID number", "Check-in"], rows)
     if report == "aggregator":
-        # Order-level records — one row per Zomato/Swiggy/website/QR order.
-        qs = (Order.objects.filter(source_platform__in=["zomato", "swiggy", "website", "qr"])
-              .prefetch_related("lines__menu_item").order_by("-created_at"))
-        rows = [[o.created_at.strftime("%Y-%m-%d %H:%M"), o.source_platform,
-                 o.external_ref or f"order:{o.id}",
-                 sum(l.qty for l in o.lines.all()), str(o.totals()["total"]),
-                 o.get_status_display()]
-                for o in qs]
-        return ("Aggregator Order Records",
-                ["Date", "Platform", "Reference", "Items", "Total", "Status"], rows)
+        # Reuse the viewer's records (already carry gross/commission/net).
+        data = _restaurant_report(report)
+        return ("Aggregator Order Records (Gross / Commission / Net)",
+                data["records"]["columns"], data["records"]["rows"])
     restaurant = _restaurant_report(report)
     if restaurant:
         # §7 exports reuse the viewer payload: KPI rows then the series.
@@ -380,38 +374,56 @@ def _restaurant_report(report):
         }
 
     if report == "aggregator":
+        from apps.accounts.views import get_property
         labels = {"zomato": "Zomato", "swiggy": "Swiggy",
                   "website": "Website", "qr": "QR ordering"}
+        prop = get_property()
+        commission_pct = {
+            "zomato": prop.zomato_commission_pct or Decimal("0"),
+            "swiggy": prop.swiggy_commission_pct or Decimal("0"),
+            "website": Decimal("0"), "qr": Decimal("0"),
+        }
         qs = (Order.objects.filter(source_platform__in=labels)
               .prefetch_related("lines__menu_item"))
         received = 0
         settled_total = Decimal("0")
+        net_total = Decimal("0")
         by_platform = {}
+        net_by_platform = {}
         for o in qs:
             received += 1
             if o.status in (Order.SETTLED, Order.POSTED_TO_ROOM):
                 t = o.totals()["total"]
+                pct = commission_pct.get(o.source_platform, Decimal("0"))
+                net = t * (Decimal("1") - pct / Decimal("100"))
                 settled_total += t
+                net_total += net
                 name = labels[o.source_platform]
                 by_platform[name] = by_platform.get(name, Decimal("0")) + t
+                net_by_platform[name] = net_by_platform.get(name, Decimal("0")) + net
         settled_count = sum(1 for o in qs if o.status in (Order.SETTLED, Order.POSTED_TO_ROOM))
         avg = round(settled_total / settled_count, 2) if settled_count else Decimal("0")
+        commission_taken = settled_total - net_total
         return {
             "title": "Zomato / Swiggy — Aggregator Orders",
             "kpis": [
-                {"label": "Online sales (settled)", "value": str(settled_total), "money": True},
+                {"label": "Gross sales (settled)", "value": str(settled_total), "money": True},
+                {"label": "Commission taken", "value": str(round(commission_taken, 2)), "money": True},
+                {"label": "Net realization", "value": str(round(net_total, 2)), "money": True},
                 {"label": "Orders received", "value": received},
                 {"label": "Avg order value", "value": str(avg), "money": True},
             ],
-            "series_label": "Cumulative sales by platform (₹)",
-            "bars": sorted(({"name": k, "value": float(v)} for k, v in by_platform.items()),
+            "series_label": "Net realization by platform, after commission (₹)",
+            "bars": sorted(({"name": k, "value": float(v)} for k, v in net_by_platform.items()),
                            key=lambda x: -x["value"]),
             # Order-level records render as a table in the Reports screen.
             "records": {
-                "columns": ["Date", "Platform", "Reference", "Items", "Total", "Status"],
+                "columns": ["Date", "Platform", "Reference", "Items", "Gross", "Commission %", "Net", "Status"],
                 "rows": [[o.created_at.strftime("%d %b %H:%M"), labels[o.source_platform],
                           o.external_ref or f"order:{o.id}",
                           sum(l.qty for l in o.lines.all()), str(o.totals()["total"]),
+                          str(commission_pct.get(o.source_platform, Decimal("0"))),
+                          str(round(o.totals()["total"] * (Decimal("1") - commission_pct.get(o.source_platform, Decimal("0")) / Decimal("100")), 2)),
                           o.get_status_display()]
                          for o in qs.order_by("-created_at")[:100]],
             },
