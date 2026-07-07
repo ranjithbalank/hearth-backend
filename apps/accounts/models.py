@@ -77,6 +77,95 @@ class Entitlement(models.Model):
         return f"Entitlements for {self.property}"
 
 
+class Branch(models.Model):
+    """One physical location of the property's group (BRD 5.1 multi-branch).
+
+    `Property` stays the group-level record (brand name, letterhead, currency);
+    a `Branch` is a location under it — its own address/GSTIN (GST registration
+    is state-specific in India), its own edition/entitlement flags (a branch
+    can be restaurant-only while another is hotel+restaurant), and its own
+    invoice numbering so two branches never collide on a series.
+
+    Table/room names only need to be unique *within* a branch, not group-wide.
+    """
+
+    EDITION_CHOICES = Property.EDITION_CHOICES
+
+    STATUS_ONBOARDING = "onboarding"
+    STATUS_ACTIVE = "active"
+    STATUS_CLOSED = "closed"
+    STATUS_CHOICES = [
+        (STATUS_ONBOARDING, "Onboarding"),
+        (STATUS_ACTIVE, "Active"),
+        (STATUS_CLOSED, "Closed"),
+    ]
+
+    property = models.ForeignKey(Property, on_delete=models.CASCADE, related_name="branches")
+    name = models.CharField(max_length=200)
+    code = models.CharField(max_length=10, unique=True, help_text="Short code, e.g. DTN — used in invoice/table numbering")
+    address = models.CharField(max_length=300, blank=True)
+    city = models.CharField(max_length=80, blank=True)
+    state = models.CharField(max_length=80, blank=True)
+    gstin = models.CharField(max_length=20, blank=True)
+    edition = models.CharField(max_length=20, choices=EDITION_CHOICES, default="both")
+    # Inline entitlement flags rather than a separate table — one branch, one row.
+    hms = models.BooleanField(default=True)
+    restaurant = models.BooleanField(default=True)
+    banquets = models.BooleanField(default=True)
+    rms = models.BooleanField(default=True)
+    invoice_prefix = models.CharField(max_length=10, blank=True)
+    status = models.CharField(max_length=12, choices=STATUS_CHOICES, default=STATUS_ONBOARDING)
+    logo = models.TextField(blank=True, help_text="branch logo as a data URL; falls back to the group logo")
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ["name"]
+
+    def __str__(self):
+        return f"{self.name} ({self.code})"
+
+    def as_entitlement_dict(self):
+        return {"hms": self.hms, "restaurant": self.restaurant,
+                "banquets": self.banquets, "rms": self.rms}
+
+
+class UserBranchAccess(models.Model):
+    """Which branch a person operates in, and in what role there (BRD 5.1).
+
+    Additive layer, not a replacement: `User.role` still drives WHAT a role can
+    do everywhere (the existing ROLE_ALLOW engine is untouched); this table
+    drives WHERE — which branch's data a login actually sees. Super Admin/MD/GM
+    need no rows here at all — they get every branch implicitly, same as their
+    existing "*" module access.
+
+    `end_date` supports a temporary loan (e.g. a chef covering another branch
+    for a season) that reverts on its own without anyone remembering to undo it.
+    """
+
+    user = models.ForeignKey("accounts.User", on_delete=models.CASCADE, related_name="branch_access")
+    branch = models.ForeignKey(Branch, on_delete=models.CASCADE, related_name="staff_access")
+    role = models.CharField(max_length=40, choices=ROLE_CHOICES)
+    start_date = models.DateField(null=True, blank=True)
+    end_date = models.DateField(null=True, blank=True, help_text="Temporary assignment — leave blank for a standing one")
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ["branch__name"]
+        constraints = [
+            models.UniqueConstraint(fields=["user", "branch", "role"], name="unique_user_branch_role"),
+        ]
+
+    def __str__(self):
+        return f"{self.user} — {self.role} @ {self.branch}"
+
+    def is_active_on(self, day):
+        if self.start_date and day < self.start_date:
+            return False
+        if self.end_date and day > self.end_date:
+            return False
+        return True
+
+
 class User(AbstractUser):
     """System operator. Adds role, POS passcode and discount-cap (BRD FR-USR)."""
 

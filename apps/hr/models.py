@@ -1,13 +1,28 @@
+from django.conf import settings
 from django.db import models
 
 
 class Employee(models.Model):
-    """Staff record (BRD 5.8 FR-HRM-001)."""
+    """Staff record (BRD 5.8 FR-HRM-001).
+
+    Deliberately separate from `User`: payroll/attendance covers everyone on
+    the roster (kitchen helpers, cleaners) whether or not they ever get a
+    system login. `user` links the subset who do; `branch` is this person's
+    home base for attendance and payroll regardless of that.
+    """
 
     name = models.CharField(max_length=160)
     department = models.CharField(max_length=80)
     role = models.CharField(max_length=80)
     phone = models.CharField(max_length=20, blank=True)
+    branch = models.ForeignKey(
+        "accounts.Branch", null=True, blank=True, on_delete=models.SET_NULL,
+        related_name="employees", help_text="Home branch for attendance/payroll/rostering",
+    )
+    user = models.OneToOneField(
+        settings.AUTH_USER_MODEL, null=True, blank=True, on_delete=models.SET_NULL,
+        related_name="employee_record", help_text="Linked login, if this person has system access",
+    )
     # Weekly shift pattern, one code per day (M=morning, E=evening, N=night, O=off).
     shifts = models.JSONField(default=list, blank=True)
     status = models.CharField(max_length=20, default="Active")

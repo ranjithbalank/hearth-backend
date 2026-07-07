@@ -27,9 +27,16 @@ class Table(models.Model):
     status = models.CharField(max_length=12, choices=STATUS_CHOICES, default=FREE)
     qr_token = models.CharField(max_length=20, blank=True, default="", db_index=True,
                                 help_text="token embedded in the table QR for guest ordering")
+    location = models.ForeignKey(
+        "accounts.Branch", null=True, blank=True, on_delete=models.PROTECT,
+        related_name="tables", help_text="Which of the group's branches this table belongs to",
+    )
 
     class Meta:
         ordering = ["section", "name"]
+        constraints = [
+            models.UniqueConstraint(fields=["location", "name"], name="unique_table_name_per_location"),
+        ]
 
     def __str__(self):
         return self.name
@@ -50,9 +57,16 @@ class BarTable(models.Model):
     seats = models.PositiveSmallIntegerField(default=4)
     shape = models.CharField(max_length=20, default="square")
     status = models.CharField(max_length=12, choices=STATUS_CHOICES, default=FREE)
+    location = models.ForeignKey(
+        "accounts.Branch", null=True, blank=True, on_delete=models.PROTECT,
+        related_name="bar_tables", help_text="Which of the group's branches this bar table belongs to",
+    )
 
     class Meta:
         ordering = ["section", "name"]
+        constraints = [
+            models.UniqueConstraint(fields=["location", "name"], name="unique_bartable_name_per_location"),
+        ]
 
     def __str__(self):
         return f"Bar: {self.name}"

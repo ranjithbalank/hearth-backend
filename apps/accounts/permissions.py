@@ -13,7 +13,7 @@ from rest_framework.permissions import BasePermission
 
 from .constants import entitlement_allows
 from .models import Property
-from .rbac import can_access
+from .rbac import PROTECTED, can_access
 
 
 def active_entitlements():
@@ -22,6 +22,45 @@ def active_entitlements():
         return prop.entitlement.as_dict()
     # No setup yet — default everything on so setup/login flows work.
     return {"hms": True, "restaurant": True, "banquets": True, "rms": True}
+
+
+def user_branch_ids(user):
+    """Which Branch ids this login may operate in today.
+
+    Returns "*" for Super Admin/MD/GM (implicit all-branch access, same as
+    their existing module "*" access) or a set of Branch ids drawn from their
+    active UserBranchAccess rows (respecting start_date/end_date loans).
+    """
+    if getattr(user, "role", None) in PROTECTED:
+        return "*"
+    from datetime import date
+
+    today = date.today()
+    return {
+        a.branch_id for a in user.branch_access.select_related("branch").all()
+        if a.is_active_on(today)
+    }
+
+
+def resolve_active_branch(request):
+    """The branch the client asked to operate in, if any and if allowed.
+
+    Read from the `X-Branch-Id` header (the frontend's branch switcher sends
+    this). Returns None when the header is absent, not a valid int, or the
+    user has no access to it — callers treat None as "don't filter" for
+    all-branch roles, or "no branch selected yet" otherwise.
+    """
+    raw = request.headers.get("X-Branch-Id")
+    if not raw:
+        return None
+    try:
+        branch_id = int(raw)
+    except (TypeError, ValueError):
+        return None
+    allowed = user_branch_ids(request.user)
+    if allowed != "*" and branch_id not in allowed:
+        return None
+    return branch_id
 
 
 class ModulePermission(BasePermission):
@@ -79,3 +118,25 @@ class AnyModuleViewSetMixin:
 
     permission_classes = [AnyModulePermission]
     modules = []
+
+
+class BranchScopedMixin:
+    """Filter a viewset's queryset to the caller's active branch.
+
+    Mix in on top of ModuleViewSetMixin/AnyModuleViewSetMixin. The model must
+    have a `location` FK to `accounts.Branch` (see Room/Table/BarTable). If the
+    caller has all-branch access (Super Admin/MD/GM) and sends no X-Branch-Id,
+    every branch's rows are returned — that's the group-oversight view, not a
+    bug. A branch-restricted user with no valid X-Branch-Id sees nothing,
+    rather than silently leaking every branch's data.
+    """
+
+    def get_queryset(self):
+        qs = super().get_queryset()
+        allowed = user_branch_ids(self.request.user)
+        branch_id = resolve_active_branch(self.request)
+        if branch_id is not None:
+            return qs.filter(location_id=branch_id)
+        if allowed == "*":
+            return qs
+        return qs.filter(location_id__in=allowed) if allowed else qs.none()

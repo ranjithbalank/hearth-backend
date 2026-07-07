@@ -41,7 +41,11 @@ class Room(models.Model):
     SELLABLE = {VACANT_CLEAN, INSPECTED}
 
     number = models.CharField(max_length=12)
-    branch = models.CharField(max_length=80, default="Main")
+    branch = models.CharField(max_length=80, default="Main", help_text="Building/wing label within this location, e.g. Main vs Annexe")
+    location = models.ForeignKey(
+        "accounts.Branch", null=True, blank=True, on_delete=models.PROTECT,
+        related_name="rooms", help_text="Which of the group's branches this room belongs to",
+    )
     room_type = models.ForeignKey(RoomType, on_delete=models.PROTECT, related_name="rooms")
     floor = models.PositiveSmallIntegerField(default=1)
     view = models.CharField(max_length=40, blank=True)
