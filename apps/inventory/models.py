@@ -44,11 +44,22 @@ class IngredientCategory(models.Model):
 
 
 class Ingredient(models.Model):
-    """Raw-material / ingredient master (BRD 5.17 FR-INV-001, spec §1)."""
+    """Raw-material / ingredient master (BRD 5.17 FR-INV-001, spec §1).
+
+    Blank `location` = a shared item with one central stock count (today's
+    behaviour, unchanged — dry goods bought and pooled centrally, say). Set
+    it to give one branch its own exclusive item with its own separate
+    `current_stock` — e.g. a branch-only consumable, or splitting a shared
+    item into genuinely separate per-branch stock rooms.
+    """
 
     code = models.CharField(max_length=20, blank=True, default="",
                             help_text="raw material code, e.g. RM-0001")
-    name = models.CharField(max_length=120, unique=True)
+    name = models.CharField(max_length=120)
+    location = models.ForeignKey(
+        "accounts.Branch", null=True, blank=True, on_delete=models.SET_NULL,
+        related_name="ingredients",
+    )
     # Free CharField validated against the Uom master in the serializer, so
     # units added at runtime (spec §6) are usable without a schema change.
     unit = models.CharField(max_length=12, default="kg",
@@ -67,6 +78,16 @@ class Ingredient(models.Model):
 
     class Meta:
         ordering = ["name"]
+        # Same shape as Room: a plain (location, name) unique_together would
+        # let two NULL-location rows collide (NULL != NULL in SQL), weaker
+        # than the old plain-unique guarantee for anyone not using branches
+        # yet. Two explicit constraints keep both cases correct.
+        constraints = [
+            models.UniqueConstraint(fields=["name"], condition=models.Q(location__isnull=True),
+                                    name="unique_ingredient_name_no_location"),
+            models.UniqueConstraint(fields=["location", "name"], condition=models.Q(location__isnull=False),
+                                    name="unique_ingredient_name_with_location"),
+        ]
 
     def __str__(self):
         return f"{self.name} ({self.unit})"

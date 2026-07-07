@@ -15,6 +15,13 @@ class MaterialRequest(models.Model):
     requested_by = models.CharField(max_length=120, blank=True)
     status = models.CharField(max_length=12, choices=STATUS_CHOICES, default=REQUESTED)
     created_at = models.DateTimeField(auto_now_add=True)
+    # Which branch this indent is for — set at creation from the requester's
+    # own branch (same single-assignment auto-scoping as POS orders). An
+    # approver/issuer only ever sees their own branch's indents unless
+    # they're a universal (all-branch) role.
+    location = models.ForeignKey(
+        "accounts.Branch", null=True, blank=True, on_delete=models.SET_NULL, related_name="material_requests",
+    )
 
     class Meta:
         ordering = ["-created_at"]

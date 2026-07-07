@@ -157,6 +157,19 @@ class BranchScopedMixin:
         return qs.filter(location_id__in=visible) if visible else qs.none()
 
 
+def shared_or_visible(qs, request):
+    """For a model where a blank `location` means shared by every branch
+    (see Category/MenuItem/Ingredient) rather than exclusive to one: a
+    scoped caller sees "mine + shared", never another branch's exclusives.
+    An unscoped caller (all-branch role, or nobody's assigned branches yet)
+    still sees everything — unchanged from before this feature existed."""
+    from django.db.models import Q
+    visible = visible_branch_ids(request)
+    if visible == "*":
+        return qs
+    return qs.filter(Q(location__isnull=True) | Q(location_id__in=visible))
+
+
 class BranchUniqueFriendlyMixin:
     """Turn the DB-level per-location uniqueness constraint's IntegrityError
     into a clean 400 instead of a 500.

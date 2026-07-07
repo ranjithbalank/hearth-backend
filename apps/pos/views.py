@@ -15,6 +15,8 @@ from apps.accounts.permissions import (
     BranchUniqueFriendlyMixin,
     ModuleViewSetMixin,
     active_entitlements,
+    resolve_active_branch,
+    shared_or_visible,
     visible_branch_ids,
 )
 from apps.frontoffice import services as fo_services
@@ -510,18 +512,6 @@ class KdsViewSet(ModuleViewSetMixin, viewsets.ViewSet):
         return Response({"id": e.id, "kitchen_status": e.beo_status})
 
 
-def _shared_or_visible(qs, request):
-    """A blank `location` means shared by every branch; an explicit one
-    means exclusive to it. So a scoped caller sees "mine + shared", never
-    another branch's exclusives — and an unscoped caller (all-branch role,
-    or nobody's assigned branches yet) still sees everything, unchanged
-    from before this feature existed."""
-    visible = visible_branch_ids(request)
-    if visible == "*":
-        return qs
-    return qs.filter(models.Q(location__isnull=True) | models.Q(location_id__in=visible))
-
-
 class CategoryViewSet(AnyModuleViewSetMixin, viewsets.ModelViewSet):
     # Bar Captain reads/manages categories too (Beverages live in the same
     # catalogue as the restaurant menu — see MenuItem.station).
@@ -530,7 +520,7 @@ class CategoryViewSet(AnyModuleViewSetMixin, viewsets.ModelViewSet):
     serializer_class = CategorySerializer
 
     def get_queryset(self):
-        qs = _shared_or_visible(super().get_queryset(), self.request)
+        qs = shared_or_visible(super().get_queryset(), self.request)
         # ?is_bar=1 → just the bar's own categories (Beer, Wine, Cocktails…);
         # ?is_bar=0 → just the restaurant's (Starters, Rice Bowls…). Keeps
         # the two pickers from mixing even though it's one shared table.
@@ -546,7 +536,7 @@ class MenuItemViewSet(AnyModuleViewSetMixin, viewsets.ModelViewSet):
     serializer_class = MenuItemSerializer
 
     def get_queryset(self):
-        qs = _shared_or_visible(super().get_queryset(), self.request)
+        qs = shared_or_visible(super().get_queryset(), self.request)
         cat = self.request.query_params.get("category")
         if cat:
             qs = qs.filter(category_id=cat)
@@ -582,7 +572,7 @@ class OrderViewSet(AnyModuleViewSetMixin, viewsets.ModelViewSet):
         # An F&B Cashier assigned only to one branch never sees another
         # branch's till — same "mine + not-yet-branch-tagged" rule as the
         # menu, so pre-existing orders don't vanish for anyone.
-        qs = _shared_or_visible(qs, self.request)
+        qs = shared_or_visible(qs, self.request)
         status_ = self.request.query_params.get("status")
         if status_:
             qs = qs.filter(status=status_)
@@ -656,7 +646,6 @@ class OrderViewSet(AnyModuleViewSetMixin, viewsets.ModelViewSet):
         # is only ever assigned to the one branch, that one — same
         # single-assignment auto-scoping the reads already get, so a cashier
         # who only works Bhavani Road never has to pick it explicitly.
-        from apps.accounts.permissions import resolve_active_branch, visible_branch_ids
         order_location = resolve_active_branch(self.request)
         if order_location is None:
             order_location = getattr(tbl, "location_id", None) or getattr(bar_tbl, "location_id", None)
