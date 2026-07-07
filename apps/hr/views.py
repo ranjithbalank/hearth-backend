@@ -7,21 +7,50 @@ from rest_framework.decorators import action
 from rest_framework.response import Response
 
 from apps.accounts.models import log_action
-from apps.accounts.permissions import ModuleViewSetMixin
+from apps.accounts.permissions import ModuleViewSetMixin, resolve_active_branch, shared_or_visible
 
 from .models import Attendance, Employee
+
+
+def _employee_dict(e):
+    return {
+        "id": e.id, "name": e.name, "department": e.department, "role": e.role,
+        "phone": e.phone, "shifts": e.shifts, "status": e.status,
+        "monthly_salary": str(e.monthly_salary),
+        "branch": e.branch_id, "branch_name": e.branch.name if e.branch_id else None,
+        "user": e.user_id,
+    }
 
 
 class HrViewSet(ModuleViewSetMixin, viewsets.ViewSet):
     module = "hr"
 
     def list(self, request):
-        return Response([
-            {"id": e.id, "name": e.name, "department": e.department, "role": e.role,
-             "phone": e.phone, "shifts": e.shifts, "status": e.status,
-             "monthly_salary": str(e.monthly_salary)}
-            for e in Employee.objects.all()
-        ])
+        # Payroll/attendance covers everyone on the roster whether or not
+        # they have a branch yet — unassigned rows stay visible to all,
+        # same "mine + not-yet-tagged" rule used everywhere else.
+        qs = shared_or_visible(Employee.objects.select_related("branch"), request, field="branch")
+        return Response([_employee_dict(e) for e in qs])
+
+    def create(self, request):
+        """Add a staff record: {name, department, role, phone?, monthly_salary?, branch?}.
+        `branch` defaults to the caller's own branch when they're only ever
+        assigned to one — no picker needed for the common case."""
+        name = (request.data.get("name") or "").strip()
+        department = (request.data.get("department") or "").strip()
+        role = (request.data.get("role") or "").strip()
+        if not name or not department or not role:
+            return Response({"detail": "name, department and role are required"}, status=400)
+        branch_id = request.data.get("branch") or resolve_active_branch(request)
+        e = Employee.objects.create(
+            name=name, department=department, role=role,
+            phone=request.data.get("phone", ""),
+            monthly_salary=request.data.get("monthly_salary") or 0,
+            branch_id=branch_id,
+        )
+        log_action(request.user, "employee_add", entity="Employee", entity_id=e.id,
+                   after={"name": name, "department": department, "branch": branch_id})
+        return Response(_employee_dict(e), status=201)
 
     @action(detail=False, methods=["get"])
     def attendance(self, request):

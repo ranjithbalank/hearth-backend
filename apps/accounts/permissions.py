@@ -157,17 +157,22 @@ class BranchScopedMixin:
         return qs.filter(location_id__in=visible) if visible else qs.none()
 
 
-def shared_or_visible(qs, request):
+def shared_or_visible(qs, request, field="location"):
     """For a model where a blank `location` means shared by every branch
     (see Category/MenuItem/Ingredient) rather than exclusive to one: a
     scoped caller sees "mine + shared", never another branch's exclusives.
     An unscoped caller (all-branch role, or nobody's assigned branches yet)
-    still sees everything — unchanged from before this feature existed."""
+    still sees everything — unchanged from before this feature existed.
+
+    `field` lets a model with no `location` of its own scope via a related
+    one instead — e.g. GoodsReceipt has none, but its PO does:
+    `shared_or_visible(qs, request, field="purchase_order__location")`.
+    """
     from django.db.models import Q
     visible = visible_branch_ids(request)
     if visible == "*":
         return qs
-    return qs.filter(Q(location__isnull=True) | Q(location_id__in=visible))
+    return qs.filter(Q(**{f"{field}__isnull": True}) | Q(**{f"{field}_id__in": visible}))
 
 
 class BranchUniqueFriendlyMixin:

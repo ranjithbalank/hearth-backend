@@ -4,7 +4,12 @@ from rest_framework.decorators import action
 from rest_framework.response import Response
 
 from apps.accounts.models import log_action
-from apps.accounts.permissions import ModuleViewSetMixin
+from apps.accounts.permissions import (
+    ModuleViewSetMixin,
+    resolve_active_branch,
+    shared_or_visible,
+    visible_branch_ids,
+)
 from apps.inventory.models import apply_movement
 
 from .models import GoodsReceipt, PurchaseOrder, PurchaseOrderLine, Supplier, Vendor
@@ -13,6 +18,7 @@ from .models import GoodsReceipt, PurchaseOrder, PurchaseOrderLine, Supplier, Ve
 def _po_dict(po):
     return {
         "id": po.id, "supplier": po.supplier.name, "status": po.status,
+        "location": po.location_id, "location_name": po.location.name if po.location_id else None,
         "total": str(po.total), "created_at": po.created_at,
         "lines": [
             {"ingredient": l.ingredient.name, "qty": str(l.qty),
@@ -22,15 +28,28 @@ def _po_dict(po):
     }
 
 
+def _requester_branch(request):
+    """Active branch header if sent, else the caller's own branch when
+    they're only ever assigned to one — same fallback as POS orders and
+    material requests, so a single-branch login never has to pick it."""
+    location = resolve_active_branch(request)
+    if location is None:
+        visible = visible_branch_ids(request)
+        if isinstance(visible, set) and len(visible) == 1:
+            location = next(iter(visible))
+    return location
+
+
 class SupplierViewSet(ModuleViewSetMixin, viewsets.ViewSet):
     module = "suppliers"
 
     def list(self, request):
+        qs = shared_or_visible(Supplier.objects.all(), request)
         return Response([
             {"id": s.id, "name": s.name, "gstin": s.gstin, "contact": s.contact,
              "payment_terms": s.payment_terms, "lead_time_days": s.lead_time_days,
-             "rating": str(s.rating)}
-            for s in Supplier.objects.all()
+             "rating": str(s.rating), "location": s.location_id}
+            for s in qs
         ])
 
 
@@ -38,10 +57,11 @@ class VendorViewSet(ModuleViewSetMixin, viewsets.ViewSet):
     module = "vendors"
 
     def list(self, request):
+        qs = shared_or_visible(Vendor.objects.all(), request)
         return Response([
             {"id": v.id, "name": v.name, "category": v.category, "contact": v.contact,
-             "payment_terms": v.payment_terms, "status": v.status}
-            for v in Vendor.objects.all()
+             "payment_terms": v.payment_terms, "status": v.status, "location": v.location_id}
+            for v in qs
         ])
 
 
@@ -49,7 +69,13 @@ class PurchaseOrderViewSet(ModuleViewSetMixin, viewsets.ViewSet):
     module = "procurement"
 
     def list(self, request):
-        qs = PurchaseOrder.objects.select_related("supplier").prefetch_related("lines__ingredient")
+        # A PO is exclusive to the branch that raised it, not shared like a
+        # supplier — same "mine + not-yet-branch-tagged" rule as orders and
+        # indents, so a pre-existing PO doesn't vanish for anyone.
+        qs = shared_or_visible(
+            PurchaseOrder.objects.select_related("supplier").prefetch_related("lines__ingredient"),
+            request,
+        )
         status_ = request.query_params.get("status")
         if status_:
             qs = qs.filter(status=status_)
@@ -62,15 +88,17 @@ class PurchaseOrderViewSet(ModuleViewSetMixin, viewsets.ViewSet):
 
         from apps.inventory.models import Ingredient
 
-        supplier = Supplier.objects.filter(pk=request.data.get("supplier")).first()
+        supplier = shared_or_visible(Supplier.objects.all(), request).filter(
+            pk=request.data.get("supplier")).first()
         if not supplier:
             return Response({"detail": "supplier not found"}, status=400)
         wanted = request.data.get("lines") or []
         if not wanted:
             return Response({"detail": "at least one line is required"}, status=400)
+        ingredient_qs = shared_or_visible(Ingredient.objects.all(), request)
         parsed = []
         for w in wanted:
-            ing = Ingredient.objects.filter(pk=w.get("ingredient")).first()
+            ing = ingredient_qs.filter(pk=w.get("ingredient")).first()
             if not ing:
                 return Response({"detail": "unknown raw material on a line"}, status=400)
             try:
@@ -82,7 +110,7 @@ class PurchaseOrderViewSet(ModuleViewSetMixin, viewsets.ViewSet):
                 return Response({"detail": "quantities must be positive"}, status=400)
             parsed.append((ing, qty, rate))
         with transaction.atomic():
-            po = PurchaseOrder.objects.create(supplier=supplier)
+            po = PurchaseOrder.objects.create(supplier=supplier, location_id=_requester_branch(request))
             for ing, qty, rate in parsed:
                 PurchaseOrderLine.objects.create(purchase_order=po, ingredient=ing,
                                                  qty=qty, rate=rate)
@@ -97,7 +125,7 @@ class PurchaseOrderViewSet(ModuleViewSetMixin, viewsets.ViewSet):
             return Response(
                 {"detail": "PO approval is a spend decision — it needs the restaurant manager, finance or GM"},
                 status=403)
-        po = PurchaseOrder.objects.filter(pk=pk).first()
+        po = shared_or_visible(PurchaseOrder.objects.all(), request).filter(pk=pk).first()
         if not po or po.status != PurchaseOrder.PENDING:
             return Response({"detail": "PO not pending"}, status=400)
         po.status = PurchaseOrder.APPROVED
@@ -108,7 +136,8 @@ class PurchaseOrderViewSet(ModuleViewSetMixin, viewsets.ViewSet):
     @action(detail=True, methods=["post"])
     def receive(self, request, pk=None):
         """Goods receipt: post each line's qty to stock and mark the PO received."""
-        po = PurchaseOrder.objects.filter(pk=pk).prefetch_related("lines__ingredient").first()
+        po = shared_or_visible(PurchaseOrder.objects.all(), request).prefetch_related(
+            "lines__ingredient").filter(pk=pk).first()
         if not po or po.status != PurchaseOrder.APPROVED:
             return Response({"detail": "PO must be approved before receipt"}, status=400)
         with transaction.atomic():
@@ -144,8 +173,13 @@ class GoodsReceiptViewSet(ModuleViewSetMixin, viewsets.ViewSet):
     module = "procurement"
 
     def list(self, request):
+        # GoodsReceipt has no location of its own — it follows its PO's.
+        qs = shared_or_visible(
+            GoodsReceipt.objects.select_related("purchase_order__supplier"),
+            request, field="purchase_order__location",
+        )
         return Response([
             {"id": g.id, "po": g.purchase_order_id, "supplier": g.purchase_order.supplier.name,
              "note": g.note, "created_at": g.created_at}
-            for g in GoodsReceipt.objects.select_related("purchase_order__supplier")[:30]
+            for g in qs[:30]
         ])
