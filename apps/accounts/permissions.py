@@ -157,6 +157,22 @@ class BranchScopedMixin:
         return qs.filter(location_id__in=visible) if visible else qs.none()
 
 
+def requester_branch(request):
+    """Which branch a row being created right now should be tagged with:
+    the active branch header if sent, else the caller's own branch when
+    they're only ever assigned to one — so a single-branch login never has
+    to pick it explicitly. None for all-branch roles with no header (their
+    rows stay shared/untagged) — used by POS orders, indents, POs,
+    reservations."""
+    branch_id = resolve_active_branch(request)
+    if branch_id is not None:
+        return branch_id
+    visible = user_branch_ids(request.user)
+    if isinstance(visible, set) and len(visible) == 1:
+        return next(iter(visible))
+    return None
+
+
 def shared_or_visible(qs, request, field="location"):
     """For a model where a blank `location` means shared by every branch
     (see Category/MenuItem/Ingredient) rather than exclusive to one: a

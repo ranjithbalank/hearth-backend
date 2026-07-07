@@ -46,6 +46,8 @@ def check_in(reservation, room, user=None):
         reservation=reservation,
         guest_name=reservation.guest_name,
         room=room,
+        # The bill lives at the stay's branch (falling back to the room's).
+        location_id=reservation.location_id or room.location_id,
     )
     # Pre-load the OTA prepayment so the guest is not charged twice (persona Anil).
     if reservation.prepaid and reservation.deposit:

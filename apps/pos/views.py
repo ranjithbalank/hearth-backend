@@ -680,10 +680,13 @@ class OrderViewSet(AnyModuleViewSetMixin, viewsets.ModelViewSet):
         if not active_entitlements().get("hms"):
             return Response([])
         from apps.frontoffice.models import Folio
+        # Only this branch's in-house rooms — a cashier can't post a bill
+        # onto another branch's folio.
+        qs = shared_or_visible(
+            Folio.objects.filter(status=Folio.OPEN, room__isnull=False), request)
         return Response([
             {"folio": f.id, "room": f.room.number, "guest": f.guest_name}
-            for f in Folio.objects.filter(status=Folio.OPEN, room__isnull=False)
-            .select_related("room").order_by("room__number")
+            for f in qs.select_related("room").order_by("room__number")
         ])
 
     def _assign_token(self, order):

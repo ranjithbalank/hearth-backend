@@ -4,7 +4,7 @@ from rest_framework import status, viewsets
 from rest_framework.decorators import action
 from rest_framework.response import Response
 
-from apps.accounts.permissions import ModuleViewSetMixin
+from apps.accounts.permissions import ModuleViewSetMixin, shared_or_visible
 from apps.reservations.models import Reservation
 from apps.rooms.models import Room
 
@@ -19,7 +19,8 @@ class FolioViewSet(ModuleViewSetMixin, viewsets.ModelViewSet):
     serializer_class = FolioSerializer
 
     def get_queryset(self):
-        qs = super().get_queryset()
+        # Each desk sees its own branch's bills (+ legacy untagged rows).
+        qs = shared_or_visible(super().get_queryset(), self.request)
         status_ = self.request.query_params.get("status")
         room = self.request.query_params.get("room")
         if status_:
@@ -297,10 +298,19 @@ class CheckInView(ModuleViewSetMixin, viewsets.ViewSet):
         if not resv:
             return Response({"detail": "reservation not found"}, status=404)
         room = Room.objects.filter(pk=room_id).first() if room_id else None
+        # A stay can only go into a room at its own branch — catch a stale
+        # or cross-branch room id before opening the folio against it.
+        if room and resv.location_id and room.location_id and room.location_id != resv.location_id:
+            return Response({"detail": "that room is at a different branch than this reservation"},
+                            status=400)
         if room is None:
-            room = Room.objects.filter(
-                room_type=resv.room_type, status__in=Room.SELLABLE
-            ).first()
+            sellable = Room.objects.filter(room_type=resv.room_type, status__in=Room.SELLABLE)
+            if resv.location_id:
+                # Prefer the stay's own branch; fall back to untagged rooms.
+                room = (sellable.filter(location_id=resv.location_id).first()
+                        or sellable.filter(location__isnull=True).first())
+            else:
+                room = shared_or_visible(sellable, request).first()
         if room is None:
             return Response({"detail": "no sellable room available"}, status=400)
         # ID proof is mandatory for check-in (KYC — BRD FR-PMS-004).

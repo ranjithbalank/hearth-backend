@@ -32,6 +32,13 @@ class Reservation(models.Model):
     guest = models.ForeignKey(
         Customer, on_delete=models.PROTECT, related_name="reservations", null=True, blank=True
     )
+    # Which branch the stay is at — set at creation from the booker's active
+    # branch (walk-in desk, booking engine, OTA ingest). Blank = legacy /
+    # single-property rows, visible to everyone as before.
+    location = models.ForeignKey(
+        "accounts.Branch", on_delete=models.SET_NULL, null=True, blank=True,
+        related_name="reservations",
+    )
     guest_name = models.CharField(max_length=200)
     room_type = models.ForeignKey(RoomType, on_delete=models.PROTECT, related_name="reservations")
     rate_plan = models.ForeignKey(
