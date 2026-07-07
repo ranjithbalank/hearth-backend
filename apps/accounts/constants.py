@@ -20,6 +20,12 @@ ROLE_CAPTAIN = "Captain"
 ROLE_HOUSEKEEPING = "Housekeeping"
 ROLE_CHEF = "Chef / Kitchen"
 ROLE_STORE = "Store Keeper"
+# Bar runs as its own operation, separate from the restaurant floor — its own
+# tables, its own login, never the restaurant POS (and vice versa). Mirrors
+# the restaurant's Cashier/Captain split: Bar Cashier handles cash at the bar
+# counter, Bar Captain is tableside/digital-tenders-only.
+ROLE_BAR_CAPTAIN = "Bar Captain"
+ROLE_BAR_CASHIER = "Bar Cashier"
 
 ROLE_CHOICES = [
     (ROLE_SUPER_ADMIN, ROLE_SUPER_ADMIN),
@@ -35,13 +41,15 @@ ROLE_CHOICES = [
     (ROLE_HOUSEKEEPING, ROLE_HOUSEKEEPING),
     (ROLE_CHEF, ROLE_CHEF),
     (ROLE_STORE, ROLE_STORE),
+    (ROLE_BAR_CAPTAIN, ROLE_BAR_CAPTAIN),
+    (ROLE_BAR_CASHIER, ROLE_BAR_CASHIER),
 ]
 
 # Module keys used across nav, RBAC and entitlement gating.
 ALL_MODULES = [
     "execdashboard", "dashboard", "frontdesk", "checkin", "checkout", "livegrid",
     "folio", "reservations", "housekeeping", "banquets", "revenue", "channel",
-    "booking", "pos", "inventory", "procurement", "pomanage", "matreq", "recipes",
+    "booking", "pos", "barpos", "inventory", "procurement", "pomanage", "matreq", "recipes",
     "accounting", "tax", "gstmaster", "roommaster", "tablemaster", "menumaster",
     "employees", "roles", "customers", "vendors", "suppliers", "hr", "engineering",
     "crm", "notifications", "reports", "settings", "cateringmaster",
@@ -65,22 +73,30 @@ ROLE_ALLOW = {
     ],
     # CEO — executive oversight, read-heavy: dashboards, reports, revenue
     # strategy and CRM. No floor operations, no configuration.
+    # CEO uses Executive Overview (with its own Hotel/Restaurant toggle) rather
+    # than the operational Dashboard — that's for the two sector managers.
     ROLE_CEO: [
-        "execdashboard", "dashboard", "reports", "revenue", "channel",
+        "execdashboard", "reports", "revenue", "channel",
         "booking", "crm", "accounting", "tax", "hr", "notifications", "matreq",
     ],
     # Finance — books and statutory: accounting, tax/GST, AR (customers),
     # payables (vendors/suppliers/POs), payroll and reports. No floor ops.
+    # Dashboard is now the two sector managers' own view (Front Office = hotel,
+    # Restaurant Manager = restaurant) plus Admin and Super Admin/MD/GM — not
+    # Finance by default. If Finance genuinely needs it, grant it per-property
+    # via the Role Matrix rather than hardcoding it here.
     ROLE_FINANCE: [
-        "dashboard", "accounting", "tax", "gstmaster", "reports",
+        "accounting", "tax", "gstmaster", "reports",
         "customers", "vendors", "suppliers", "pomanage", "hr", "notifications",
         "matreq",
     ],
     # Restaurant Manager — runs the whole restaurant side: POS/KDS/online,
     # the store & supply chain (approves indents and POs), recipes and the
     # menu/table masters, restaurant reports. No rooms, no books.
+    # barpos: oversight of the bar operation too, same as every other manager
+    # who sees both sides — Bar Captain themselves only ever sees "barpos".
     ROLE_REST_MGR: [
-        "dashboard", "pos", "kds", "online", "inventory", "procurement",
+        "dashboard", "pos", "barpos", "kds", "online", "inventory", "procurement",
         "pomanage", "matreq", "recipes", "suppliers", "vendors",
         "menumaster", "tablemaster", "reports", "notifications",
     ],
@@ -122,6 +138,16 @@ ROLE_ALLOW = {
         "inventory", "procurement", "pomanage", "matreq", "suppliers",
         "vendors", "notifications",
     ],
+    # Bar Captain — runs the bar as its own desk: bar tables, bar tabs. Never
+    # the restaurant POS/tables, and the restaurant floor never sees "barpos".
+    ROLE_BAR_CAPTAIN: [
+        "barpos", "matreq", "notifications",
+    ],
+    # Bar Cashier — the bar counter's cash handler, same split as F&B Cashier
+    # vs Captain on the restaurant side.
+    ROLE_BAR_CASHIER: [
+        "barpos", "matreq", "notifications",
+    ],
 }
 
 # Which entitlement flag each module requires. Modules absent here need none.
@@ -139,7 +165,8 @@ MODULE_ENTITLEMENT = {
     "banquets": "banquets",
     "cateringmaster": "banquets",
     # Restaurant (restaurant)
-    "pos": "restaurant", "kds": "restaurant", "online": "restaurant", "inventory": "restaurant",
+    "pos": "restaurant", "barpos": "restaurant", "kds": "restaurant", "online": "restaurant",
+    "inventory": "restaurant",
     "procurement": "restaurant", "pomanage": "restaurant",
     "recipes": "restaurant", "tablemaster": "restaurant", "menumaster": "restaurant",
     "suppliers": "restaurant",
@@ -158,6 +185,11 @@ PO_APPROVER_ROLES = {ROLE_SUPER_ADMIN, ROLE_MD, ROLE_GM, ROLE_FINANCE, ROLE_REST
 # Menu/recipe costing (plate cost, margin %) is ownership-level P&L information —
 # Chef and Restaurant Manager build and run recipes without needing to see it.
 COST_VISIBLE_ROLES = {ROLE_SUPER_ADMIN, ROLE_MD, ROLE_GM}
+
+# A Chef-proposed new dish needs sign-off before it's orderable — the direct
+# manager, with GM/MD/Super Admin as a universal override (same shape as
+# PO_APPROVER_ROLES / indent approval below).
+MENU_APPROVER_ROLES = {ROLE_SUPER_ADMIN, ROLE_MD, ROLE_GM, ROLE_REST_MGR}
 
 # Material requests: every department has its own approver — the head who
 # actually knows whether that indent makes sense — plus GM/MD/Super Admin as
@@ -227,6 +259,8 @@ ROLE_TENDERS = {
     ROLE_CASHIER: "*",
     ROLE_FRONT_OFFICE: "*",
     ROLE_CAPTAIN: ["UPI", "Gateway"],
+    ROLE_BAR_CAPTAIN: ["UPI", "Gateway"],
+    ROLE_BAR_CASHIER: "*",
 }
 
 

@@ -1,10 +1,11 @@
 from decimal import Decimal
 
+from django.utils import timezone
 from rest_framework import viewsets
 from rest_framework.decorators import action
 from rest_framework.response import Response
 
-from apps.accounts.constants import COST_VISIBLE_ROLES
+from apps.accounts.constants import COST_VISIBLE_ROLES, MENU_APPROVER_ROLES, ROLE_CHEF
 from apps.accounts.models import log_action
 from apps.accounts.permissions import ModuleViewSetMixin
 
@@ -36,6 +37,8 @@ class RecipeViewSet(ModuleViewSetMixin, viewsets.ViewSet):
                 "category": m.category.name,
                 "price": str(m.price),
                 "available": m.available,
+                "approval_status": m.approval_status,
+                "reject_reason": m.reject_reason,
                 "recipe_id": recipe.id if recipe else None,
                 "plate_cost": (str(recipe.plate_cost) if recipe else None) if show_cost else None,
                 "lines": [
@@ -128,11 +131,21 @@ class RecipeViewSet(ModuleViewSetMixin, viewsets.ViewSet):
             if not cat_name:
                 return Response({"detail": "a menu category is required"}, status=400)
             category, _ = Category.objects.get_or_create(name=cat_name)
+            # Chef proposes; a manager (MENU_APPROVER_ROLES) has to approve
+            # before it's orderable. Anyone else creating a dish here is
+            # already trusted, so theirs goes live immediately.
+            needs_approval = getattr(request.user, "role", "") == ROLE_CHEF
+            username = getattr(request.user, "username", "") or ""
+            now = timezone.now()
             item = MenuItem.objects.create(
                 name=name, category=category, price=price,
                 gst_rate=Decimal(str(new_item.get("gst_rate") or 5)),
                 diet=new_item.get("diet") or MenuItem.VEG,
-                available=True,
+                available=not needs_approval,
+                approval_status=MenuItem.PENDING if needs_approval else MenuItem.APPROVED,
+                created_by=username,
+                approved_by="" if needs_approval else username,
+                approved_at=None if needs_approval else now,
             )
         else:
             item = MenuItem.objects.filter(pk=request.data.get("menu_item")).first()
@@ -167,10 +180,85 @@ class RecipeViewSet(ModuleViewSetMixin, viewsets.ViewSet):
                    after={"menu_item": item.name, "lines": len(parsed),
                           "menu_item_created": bool(new_item)})
         body = {"id": recipe.id, "menu_item": item.id, "item": item.name,
-                "menu_item_created": bool(new_item)}
+                "menu_item_created": bool(new_item),
+                "approval_status": item.approval_status}
         if _can_see_cost(request.user):
             body["plate_cost"] = str(recipe.plate_cost)
         return Response(body, status=201 if created else 200)
+
+    @action(detail=False, methods=["get"])
+    def pending_dishes(self, request):
+        """Chef-proposed dishes awaiting a manager's sign-off before they're
+        orderable. Only MENU_APPROVER_ROLES can see this — and since they're
+        the ones deciding, they see plate cost/margin here regardless of the
+        general cost-visibility rule (they need it to judge the dish)."""
+        from apps.pos.models import MenuItem
+        if getattr(request.user, "role", "") not in MENU_APPROVER_ROLES:
+            return Response({"detail": "only a manager can review pending dishes"}, status=403)
+        items = (MenuItem.objects.filter(approval_status=MenuItem.PENDING)
+                 .select_related("category")
+                 .prefetch_related("recipe__lines__ingredient", "recipe__lines__sub_recipe")
+                 .order_by("id"))
+        out = []
+        for m in items:
+            recipe = getattr(m, "recipe", None)
+            cost = recipe.plate_cost if recipe else Decimal("0")
+            margin = round(float((m.price - cost) / m.price * 100), 1) if m.price else 0
+            out.append({
+                "menu_item": m.id, "name": m.name, "category": m.category.name,
+                "price": str(m.price), "created_by": m.created_by,
+                "plate_cost": str(cost), "margin_pct": margin,
+                "lines": [
+                    {"name": l.ingredient.name if l.ingredient_id else f"[prep] {l.sub_recipe.name}",
+                     "qty": str(l.qty),
+                     "unit": (l.unit or l.ingredient.unit) if l.ingredient_id else "portion"}
+                    for l in (recipe.lines.all() if recipe else [])
+                ],
+            })
+        return Response(out)
+
+    @action(detail=True, methods=["post"])
+    def approve_dish(self, request, pk=None):
+        """pk is the menu_item id (the thing being approved, not the recipe)."""
+        from apps.pos.models import MenuItem
+        if getattr(request.user, "role", "") not in MENU_APPROVER_ROLES:
+            return Response({"detail": "only a manager can approve a new dish"}, status=403)
+        item = MenuItem.objects.filter(pk=pk, approval_status=MenuItem.PENDING).first()
+        if not item:
+            return Response({"detail": "no pending dish with that id"}, status=404)
+        item.approval_status = MenuItem.APPROVED
+        item.available = True
+        item.approved_by = request.user.username
+        item.approved_at = timezone.now()
+        item.save(update_fields=["approval_status", "available", "approved_by", "approved_at"])
+        log_action(request.user, "dish_approved", entity="MenuItem", entity_id=item.id,
+                   after={"name": item.name, "approved_by": item.approved_by})
+        return Response({"menu_item": item.id, "approval_status": item.approval_status,
+                         "approved_by": item.approved_by})
+
+    @action(detail=True, methods=["post"])
+    def reject_dish(self, request, pk=None):
+        """pk is the menu_item id. Requires a reason so Chef knows why."""
+        from apps.pos.models import MenuItem
+        if getattr(request.user, "role", "") not in MENU_APPROVER_ROLES:
+            return Response({"detail": "only a manager can reject a new dish"}, status=403)
+        reason = (request.data.get("reason") or "").strip()
+        if not reason:
+            return Response({"detail": "a reason is required to reject a dish"}, status=400)
+        item = MenuItem.objects.filter(pk=pk, approval_status=MenuItem.PENDING).first()
+        if not item:
+            return Response({"detail": "no pending dish with that id"}, status=404)
+        item.approval_status = MenuItem.REJECTED
+        item.available = False
+        item.reject_reason = reason
+        item.approved_by = request.user.username
+        item.approved_at = timezone.now()
+        item.save(update_fields=["approval_status", "available", "reject_reason",
+                                 "approved_by", "approved_at"])
+        log_action(request.user, "dish_rejected", entity="MenuItem", entity_id=item.id,
+                   after={"name": item.name, "reason": reason, "rejected_by": request.user.username})
+        return Response({"menu_item": item.id, "approval_status": item.approval_status,
+                         "reject_reason": item.reject_reason})
 
     def destroy(self, request, pk=None):
         """Unmap: delete the recipe so the item no longer draws stock."""

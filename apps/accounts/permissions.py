@@ -48,3 +48,34 @@ class ModuleViewSetMixin:
 
     permission_classes = [ModulePermission]
     module = None
+
+
+class AnyModulePermission(BasePermission):
+    """Like ModulePermission, but passes if the role/entitlement combo allows
+    ANY of `view.modules` — for shared endpoints (Orders, menu, tables) that
+    both the restaurant floor ("pos") and the bar ("barpos") use. Which
+    specific rows a role may act on is then narrowed further by the
+    viewset's own queryset scoping, not by this permission."""
+
+    message = "You do not have access to this module."
+
+    def has_permission(self, request, view):
+        modules = getattr(view, "modules", None) or []
+        if not modules:
+            return True
+        user = request.user
+        if not (user and user.is_authenticated):
+            return False
+        ent = active_entitlements()
+        for module in modules:
+            if can_access(user.role, module) and entitlement_allows(ent, module):
+                return True
+        self.message = f"Role '{user.role}' cannot access any of {modules}."
+        return False
+
+
+class AnyModuleViewSetMixin:
+    """Mix into any viewset and set `modules = ['<key1>', '<key2>']`."""
+
+    permission_classes = [AnyModulePermission]
+    modules = []

@@ -7,13 +7,15 @@ from rest_framework.permissions import AllowAny
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
+from apps.accounts.constants import ROLE_BAR_CAPTAIN, ROLE_BAR_CASHIER
 from apps.accounts.models import log_action
-from apps.accounts.permissions import ModuleViewSetMixin, active_entitlements
+from apps.accounts.permissions import AnyModuleViewSetMixin, ModuleViewSetMixin, active_entitlements
 from apps.frontoffice import services as fo_services
 from apps.frontoffice.models import Folio, FolioLine, Settlement
 
 from .models import (
     AddOn,
+    BarTable,
     Category,
     Coupon,
     Feedback,
@@ -28,6 +30,7 @@ from .models import (
     Variant,
 )
 from .serializers import (
+    BarTableSerializer,
     CategorySerializer,
     MenuItemSerializer,
     OrderSerializer,
@@ -96,6 +99,15 @@ class TableViewSet(ModuleViewSetMixin, viewsets.ModelViewSet):
     def list(self, request, *args, **kwargs):
         refresh_reservation_holds()   # time-based holds without a scheduler
         return super().list(request, *args, **kwargs)
+
+
+class BarTableViewSet(ModuleViewSetMixin, viewsets.ModelViewSet):
+    """The bar's own floor plan — separate master from the restaurant's
+    Table Master (spec: bar runs as its own operation)."""
+
+    module = "barpos"
+    queryset = BarTable.objects.all()
+    serializer_class = BarTableSerializer
 
 
 class CounterOnlyMixin:
@@ -379,15 +391,20 @@ class KdsViewSet(ModuleViewSetMixin, viewsets.ViewSet):
         # One ticket per KOT round: a table's second round is its own ticket,
         # so serving round 1 never hides (or re-shows) other rounds (FR-POS-004).
         kots = (Kot.objects.filter(status__in=["cooking", "ready"])
-                .select_related("order__table")
+                .select_related("order__table", "order__bar_table")
                 .prefetch_related("lines__menu_item").order_by("created_at"))
         out = []
         for k in kots:
             o = k.order
+            # A bar tab's side dish still fires here — tag it "Bar: <table>" (or
+            # "Bar takeaway" with no table) so the kitchen can tell it apart from
+            # the restaurant's own tables/takeaways, not just "Takeaway" either way.
             out.append({
                 "id": k.id, "type": "order", "kot_no": k.number, "kitchen_status": k.status,
                 # Room-service tickets label the destination room, not "Delivery".
                 "table": (o.table.name if o.table
+                          else f"Bar: {o.bar_table.name}" if o.bar_table
+                          else "Bar takeaway" if o.department == Order.BAR
                           else o.captain if o.source_platform == "roomservice"
                           else o.get_mode_display()),
                 "created_at": k.created_at,
@@ -484,14 +501,26 @@ class KdsViewSet(ModuleViewSetMixin, viewsets.ViewSet):
         return Response({"id": e.id, "kitchen_status": e.beo_status})
 
 
-class CategoryViewSet(ModuleViewSetMixin, viewsets.ModelViewSet):
-    module = "pos"
+class CategoryViewSet(AnyModuleViewSetMixin, viewsets.ModelViewSet):
+    # Bar Captain reads/manages categories too (Beverages live in the same
+    # catalogue as the restaurant menu — see MenuItem.station).
+    modules = ["pos", "barpos"]
     queryset = Category.objects.all()
     serializer_class = CategorySerializer
 
+    def get_queryset(self):
+        qs = super().get_queryset()
+        # ?is_bar=1 → just the bar's own categories (Beer, Wine, Cocktails…);
+        # ?is_bar=0 → just the restaurant's (Starters, Rice Bowls…). Keeps
+        # the two pickers from mixing even though it's one shared table.
+        is_bar = self.request.query_params.get("is_bar")
+        if is_bar is not None:
+            qs = qs.filter(is_bar=is_bar in ("1", "true", "True"))
+        return qs
 
-class MenuItemViewSet(ModuleViewSetMixin, viewsets.ModelViewSet):
-    module = "pos"
+
+class MenuItemViewSet(AnyModuleViewSetMixin, viewsets.ModelViewSet):
+    modules = ["pos", "barpos"]
     queryset = MenuItem.objects.select_related("category").all()
     serializer_class = MenuItemSerializer
 
@@ -500,22 +529,44 @@ class MenuItemViewSet(ModuleViewSetMixin, viewsets.ModelViewSet):
         cat = self.request.query_params.get("category")
         if cat:
             qs = qs.filter(category_id=cat)
+        # Bar POS asks for ?bar_menu=1 — the bar's own dedicated menu, never
+        # the full restaurant catalogue (a kitchen dish must be explicitly
+        # added to the bar menu to show up here).
+        if self.request.query_params.get("bar_menu"):
+            qs = qs.filter(bar_menu=True)
         return qs
 
 
-class OrderViewSet(ModuleViewSetMixin, viewsets.ModelViewSet):
-    module = "pos"
-    queryset = Order.objects.prefetch_related("lines__menu_item").select_related("table").all()
+class OrderViewSet(AnyModuleViewSetMixin, viewsets.ModelViewSet):
+    # Shared by the restaurant floor ("pos") and the bar ("barpos") — which
+    # specific orders a role may see/touch is narrowed by department scoping
+    # in get_queryset(), not by this module gate.
+    modules = ["pos", "barpos"]
+    queryset = (Order.objects.prefetch_related("lines__menu_item")
+                .select_related("table", "bar_table").all())
     serializer_class = OrderSerializer
 
     def get_queryset(self):
+        from apps.accounts.rbac import can_access
         qs = super().get_queryset()
+        role = getattr(self.request.user, "role", "")
+        can_pos = can_access(role, "pos")
+        can_bar = can_access(role, "barpos")
+        # Bar Captain only ever sees bar tabs; restaurant-only roles only ever
+        # see food orders. Roles with both (managers, Super Admin/MD/GM) see everything.
+        if can_bar and not can_pos:
+            qs = qs.filter(department=Order.BAR)
+        elif can_pos and not can_bar:
+            qs = qs.filter(department=Order.FOOD)
         status_ = self.request.query_params.get("status")
         if status_:
             qs = qs.filter(status=status_)
         table = self.request.query_params.get("table")
         if table:
             qs = qs.filter(table_id=table)
+        bar_table = self.request.query_params.get("bar_table")
+        if bar_table:
+            qs = qs.filter(bar_table_id=bar_table)
         # ?open=1 → orders still on the floor (so the POS resumes a running table).
         if self.request.query_params.get("open"):
             qs = qs.filter(status__in=[Order.OPEN, Order.KOT_FIRED, Order.BILLED])
@@ -525,29 +576,57 @@ class OrderViewSet(ModuleViewSetMixin, viewsets.ModelViewSet):
         """Re-fetch after mutating `order.lines` in this request — the queryset
         that fetched `order` already prefetched (and cached) the pre-mutation
         lines, so serializing `order` directly would show stale data."""
-        return Order.objects.prefetch_related("lines__menu_item").select_related("table").get(pk=order.pk)
+        return (Order.objects.prefetch_related("lines__menu_item")
+                .select_related("table", "bar_table").get(pk=order.pk))
 
     def perform_create(self, serializer):
         # Stamp who took the order — the captain owns delivery for their tables.
         # Every order gets a client_uuid so the public status page can reference it.
         import uuid
+        from rest_framework.exceptions import ValidationError
         user = self.request.user
-        # Captains work the tables — takeaway/delivery/room are counter flows.
-        if (getattr(user, "role", "") == "Captain"
-                and serializer.validated_data.get("mode", Order.DINEIN) != Order.DINEIN):
-            from rest_framework.exceptions import ValidationError
-            raise ValidationError({"detail": "captains take table orders — counter flows stay with the cashier"})
-        # A reserved table belongs to its booking: seat the reservation (which
-        # releases the hold) before anyone can order on it.
+        role = getattr(user, "role", "")
+
+        department = serializer.validated_data.get("department", Order.FOOD)
+        bar_tbl = serializer.validated_data.get("bar_table")
         tbl = serializer.validated_data.get("table")
-        if tbl:
-            refresh_reservation_holds()
-            tbl.refresh_from_db()
-        if tbl and tbl.status == Table.RESERVED:
-            from rest_framework.exceptions import ValidationError
-            raise ValidationError(
-                {"detail": f"table {tbl.name} is reserved — seat the booking from the floor, or pick another table"})
-        extra = {"captain": user.get_full_name() or user.username,
+        # Bar Captain / Bar Cashier only ever run the bar — never the restaurant floor.
+        if role in (ROLE_BAR_CAPTAIN, ROLE_BAR_CASHIER):
+            department = Order.BAR
+
+        if department == Order.BAR:
+            mode = serializer.validated_data.get("mode", Order.DINEIN)
+            if mode not in (Order.DINEIN, Order.TAKEAWAY):
+                raise ValidationError({"detail": "the bar only takes table tabs or takeaway — not room/delivery"})
+            # Bar Captain runs tabs on bar tables; walk-up counter orders
+            # (no table) stay with the Bar Cashier, same split as the
+            # restaurant's Captain vs F&B Cashier.
+            if role == ROLE_BAR_CAPTAIN and mode != Order.DINEIN:
+                raise ValidationError({"detail": "bar captains take table tabs — takeaway stays with the bar cashier"})
+            if tbl:
+                raise ValidationError({"detail": "a bar order can't have a restaurant table"})
+            if mode == Order.DINEIN:
+                if not bar_tbl:
+                    raise ValidationError({"detail": "pick a bar table for a bar order"})
+            elif bar_tbl:
+                raise ValidationError({"detail": "a takeaway order doesn't have a bar table"})
+        else:
+            if bar_tbl:
+                raise ValidationError({"detail": "a food order can't have a bar table"})
+            # Captains work the tables — takeaway/delivery/room are counter flows.
+            if role == "Captain" and serializer.validated_data.get("mode", Order.DINEIN) != Order.DINEIN:
+                raise ValidationError({"detail": "captains take table orders — counter flows stay with the cashier"})
+            # A reserved table belongs to its booking: seat the reservation (which
+            # releases the hold) before anyone can order on it.
+            if tbl:
+                refresh_reservation_holds()
+                tbl.refresh_from_db()
+            if tbl and tbl.status == Table.RESERVED:
+                raise ValidationError(
+                    {"detail": f"table {tbl.name} is reserved — seat the booking from the floor, or pick another table"})
+
+        extra = {"department": department,
+                 "captain": user.get_full_name() or user.username,
                  "client_uuid": serializer.validated_data.get("client_uuid") or uuid.uuid4().hex}
         if serializer.validated_data.get("mode") == Order.ROOM:
             # Room channel: the guest's room is chosen up front, so the bill can
@@ -609,15 +688,28 @@ class OrderViewSet(ModuleViewSetMixin, viewsets.ModelViewSet):
     @action(detail=False, methods=["get"])
     def ready(self, request):
         """KOT rounds the kitchen marked ready, for the floor's serve board.
-        ?mine=1 → only orders this captain took (their tables to run)."""
+        ?mine=1 → only orders this captain took (their tables to run).
+        Scoped by department like the order list itself — a bar role only
+        sees bar tickets ready to collect, a restaurant role only sees theirs."""
+        from apps.accounts.rbac import can_access
         kots = (Kot.objects.filter(status=Kot.READY)
-                .select_related("order__table").order_by("created_at"))
+                .select_related("order__table", "order__bar_table").order_by("created_at"))
+        role = getattr(request.user, "role", "")
+        can_pos = can_access(role, "pos")
+        can_bar = can_access(role, "barpos")
+        if can_bar and not can_pos:
+            kots = kots.filter(order__department=Order.BAR)
+        elif can_pos and not can_bar:
+            kots = kots.filter(order__department=Order.FOOD)
         if request.query_params.get("mine"):
             me = request.user.get_full_name() or request.user.username
             kots = kots.filter(order__captain=me)
         return Response([{
             "kot": k.id, "kot_no": k.number, "order": k.order_id,
-            "table": k.order.table.name if k.order.table else k.order.get_mode_display(),
+            "table": (k.order.table.name if k.order.table
+                     else f"Bar: {k.order.bar_table.name}" if k.order.bar_table
+                     else "Bar takeaway" if k.order.department == Order.BAR
+                     else k.order.get_mode_display()),
             "captain": k.order.captain,
             # Online orders dispatch from the POS once the kitchen marks ready.
             "online": bool(k.order.source_platform),
@@ -627,11 +719,18 @@ class OrderViewSet(ModuleViewSetMixin, viewsets.ModelViewSet):
 
     @action(detail=False, methods=["post"])
     def serve(self, request):
-        """Captain confirms the ready round reached the table (kitchen→floor loop)."""
+        """Whoever's picking it up (captain, or bar staff collecting a side
+        dish for a bar tab) confirms the ready round actually reached them —
+        the kitchen→floor (or kitchen→bar) handoff loop."""
+        from apps.accounts.rbac import can_access
         kot = Kot.objects.filter(pk=request.data.get("kot"), status=Kot.READY)\
                          .select_related("order").first()
         if not kot:
             return Response({"detail": "ready KOT not found"}, status=404)
+        role = getattr(request.user, "role", "")
+        needed = "barpos" if kot.order.department == Order.BAR else "pos"
+        if not can_access(role, needed):
+            return Response({"detail": "not your ticket to collect"}, status=403)
         from django.utils import timezone
         kot.status = Kot.SERVED
         kot.served_at = timezone.now()
@@ -651,7 +750,7 @@ class OrderViewSet(ModuleViewSetMixin, viewsets.ModelViewSet):
         err = _closed_error(order) or _billed_error(order)
         if err:
             return err
-        item = MenuItem.objects.filter(pk=request.data.get("menu_item")).first()
+        item = MenuItem.objects.filter(pk=request.data.get("menu_item"), available=True).first()
         if not item:
             return Response({"detail": "menu_item not found"}, status=404)
         qty = int(request.data.get("qty", 1))
@@ -736,10 +835,12 @@ class OrderViewSet(ModuleViewSetMixin, viewsets.ModelViewSet):
         return Response(OrderSerializer(self._reload(order)).data)
 
     def _free_table_if_idle(self, table):
-        """Free the table only when nothing on it is still unpaid (incl. printed bills)."""
+        """Free the table (restaurant Table or BarTable — both use "free" as
+        their idle status value) only when nothing on it is still unpaid
+        (incl. printed bills)."""
         if table and not table.orders.filter(
                 status__in=[Order.OPEN, Order.KOT_FIRED, Order.BILLED]).exists():
-            table.status = Table.FREE
+            table.status = "free"
             table.save(update_fields=["status"])
 
     @action(detail=False, methods=["post"])
@@ -960,6 +1061,7 @@ class OrderViewSet(ModuleViewSetMixin, viewsets.ModelViewSet):
         order.discount_reason = f"VOID by {request.user.username} (override {mgr.username})"
         order.save(update_fields=["status", "discount_reason"])
         self._free_table_if_idle(order.table)
+        self._free_table_if_idle(order.bar_table)
         log_action(request.user, "order_void", entity="Order", entity_id=order.id,
                    after={"override": mgr.username, "reason": request.data.get("reason", "")})
         return Response(OrderSerializer(order).data)
@@ -1071,6 +1173,9 @@ class OrderViewSet(ModuleViewSetMixin, viewsets.ModelViewSet):
         if order.table:
             order.table.status = Table.RUNNING
             order.table.save(update_fields=["status"])
+        elif order.bar_table:
+            order.bar_table.status = BarTable.RUNNING
+            order.bar_table.save(update_fields=["status"])
         log_action(request.user, "kot_fire", entity="Order", entity_id=order.id,
                    after={"kot": kot.number, "round": seq})
         return Response(OrderSerializer(order).data)
@@ -1168,6 +1273,7 @@ class OrderViewSet(ModuleViewSetMixin, viewsets.ModelViewSet):
         order.save(update_fields=["status"])
         # Free the table only if no other unpaid order (e.g. a split bill) sits on it.
         self._free_table_if_idle(order.table)
+        self._free_table_if_idle(order.bar_table)
         # Receipt notification to the customer (FR-NOT-001).
         if order.customer:
             from apps.integrations import services as integ

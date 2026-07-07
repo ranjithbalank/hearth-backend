@@ -80,6 +80,26 @@ def _build_alerts():
             "detail": f"{k.number} is ready in the kitchen — send it up to the guest",
         })
 
+    # A bar tab's side dish still cooks in the shared kitchen — bar staff
+    # need telling when it's ready so they walk over and collect it (the
+    # kitchen has no way to know it reached the bar customer, so the bar
+    # confirms pickup itself via the same "serve" action captains use).
+    from apps.pos.models import Kot, Order as PosOrder
+    bar_ready = (Kot.objects.filter(status=Kot.READY, order__department=PosOrder.BAR)
+                 .select_related("order", "order__bar_table")
+                 .prefetch_related("lines__menu_item"))
+    for k in bar_ready:
+        kitchen_lines = [l for l in k.lines.all() if l.menu_item.station == "kitchen"]
+        if not kitchen_lines:
+            continue
+        where = f"Bar: {k.order.bar_table.name}" if k.order.bar_table else "Bar takeaway"
+        items_desc = ", ".join(f"{l.qty}× {l.display_name}" for l in kitchen_lines)
+        alerts.append({
+            "severity": "warning", "module": "barpos",
+            "title": f"{where} — side dish ready",
+            "detail": f"{items_desc} ready in the kitchen — collect from the pass",
+        })
+
     from apps.housekeeping.models import WorkOrder
     open_wo = WorkOrder.objects.exclude(status=WorkOrder.DONE).count()
     if open_wo:
@@ -105,6 +125,22 @@ def _build_alerts():
             "severity": "info", "module": "procurement",
             "title": f"{pending} purchase order(s) pending approval",
             "detail": "Awaiting manager approval",
+        })
+
+    # Chef proposes a new dish → Restaurant Manager/GM/MD/Super Admin sign off
+    # before it's orderable. "roles" narrows past the module gate: Chef also
+    # has the "recipes" module, but can't approve their own dish, so they
+    # don't need this alert.
+    from apps.accounts.constants import MENU_APPROVER_ROLES
+    from apps.pos.models import MenuItem
+    pending_dishes = MenuItem.objects.filter(approval_status=MenuItem.PENDING)
+    if pending_dishes.exists():
+        names = list(pending_dishes.values_list("name", flat=True))
+        alerts.append({
+            "severity": "warning", "module": "recipes",
+            "title": f"{len(names)} dish(es) awaiting approval",
+            "detail": "Proposed: " + ", ".join(names),
+            "roles": sorted(MENU_APPROVER_ROLES),
         })
 
     # Chef requests chicken → Restaurant Manager approves → the Store Keeper

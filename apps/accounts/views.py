@@ -105,6 +105,20 @@ class EntitlementView(APIView):
     def patch(self, request):
         prop = get_property()
         ent = prop.entitlement
+        # Switching to Combined hides Bar POS from the nav entirely — any
+        # still-open bar tab would become unreachable (and unsettled) the
+        # moment this switch lands, so block it until they're cleared.
+        if request.data.get("bar_mode") == Entitlement.BAR_COMBINED and ent.bar_mode != Entitlement.BAR_COMBINED:
+            from apps.pos.models import Order
+            open_bar = Order.objects.filter(
+                department=Order.BAR,
+                status__in=[Order.OPEN, Order.KOT_FIRED, Order.BILLED],
+            ).count()
+            if open_bar:
+                return Response(
+                    {"detail": f"{open_bar} open bar tab(s) — settle them before switching to Combined mode"},
+                    status=400,
+                )
         before = ent.as_dict()
         ser = EntitlementSerializer(ent, data=request.data, partial=True)
         ser.is_valid(raise_exception=True)

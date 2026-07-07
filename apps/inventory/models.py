@@ -6,7 +6,7 @@ from django.db import models
 # Raw-material categories and base consumption units from the
 # "Restaurant Inventory, Recipe & Consumption Management" spec (§1).
 CATEGORY_SUGGESTIONS = [
-    "Vegetables", "Meat / Seafood", "Dairy", "Spices", "Beverages",
+    "Vegetables", "Meat / Seafood", "Dairy", "Spices", "Beverages", "Liquor",
     "Packaging Materials", "Cleaning Materials", "Other Consumables",
 ]
 UNIT_CHOICES = [

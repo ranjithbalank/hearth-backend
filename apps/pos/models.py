@@ -35,9 +35,36 @@ class Table(models.Model):
         return self.name
 
 
+class BarTable(models.Model):
+    """The bar's own seating — deliberately separate from the restaurant's
+    Table model. The bar runs as its own operation with its own floor plan,
+    not a filtered view of the restaurant's tables."""
+
+    FREE = "free"
+    RUNNING = "running"
+    PAID = "paid"
+    STATUS_CHOICES = [(FREE, "Free"), (RUNNING, "Running"), (PAID, "Paid")]
+
+    name = models.CharField(max_length=20)
+    section = models.CharField(max_length=40, default="Bar")
+    seats = models.PositiveSmallIntegerField(default=4)
+    shape = models.CharField(max_length=20, default="square")
+    status = models.CharField(max_length=12, choices=STATUS_CHOICES, default=FREE)
+
+    class Meta:
+        ordering = ["section", "name"]
+
+    def __str__(self):
+        return f"Bar: {self.name}"
+
+
 class Category(models.Model):
     name = models.CharField(max_length=80)
     sort_order = models.PositiveSmallIntegerField(default=0)
+    # Bar categories (Beer, Wine, Cocktails, Spirits...) are their own list —
+    # kept out of the restaurant's category picker (Rice Bowls, Starters...)
+    # so the two never get mixed, same separation as the menu items themselves.
+    is_bar = models.BooleanField(default=False)
 
     class Meta:
         ordering = ["sort_order", "name"]
@@ -53,6 +80,13 @@ class MenuItem(models.Model):
     EGG = "egg"
     DIET_CHOICES = [(VEG, "Veg"), (NONVEG, "Non-veg"), (EGG, "Egg")]
 
+    PENDING = "pending"
+    APPROVED = "approved"
+    REJECTED = "rejected"
+    APPROVAL_CHOICES = [
+        (PENDING, "Pending approval"), (APPROVED, "Approved"), (REJECTED, "Rejected"),
+    ]
+
     name = models.CharField(max_length=120)
     short_code = models.CharField(max_length=20, blank=True)
     category = models.ForeignKey(Category, on_delete=models.PROTECT, related_name="items")
@@ -60,13 +94,32 @@ class MenuItem(models.Model):
     gst_rate = models.DecimalField(max_digits=4, decimal_places=1, default=5)
     diet = models.CharField(max_length=10, choices=DIET_CHOICES, default=VEG)
     station = models.CharField(max_length=20, default="kitchen", help_text="kitchen | bar")
+    # The bar runs its own dedicated menu, not a filtered view of the
+    # restaurant's — a kitchen dish only shows up in Bar POS once someone
+    # explicitly adds it here. Beverages (station=bar) are always in it.
+    bar_menu = models.BooleanField(default=False)
     available = models.BooleanField(default=True)
     # Item photo as a data URL (same pattern as the property logo) — shows on
     # POS tiles and the guest QR menu. Kept small client-side (~64kB).
     image = models.TextField(blank=True, default="")
+    # New-dish sign-off (BRD segregation of duties): a Chef-proposed dish stays
+    # `pending` (and unavailable) until a manager approves it — everyone else
+    # who creates a dish here is already trusted, so theirs go live immediately.
+    approval_status = models.CharField(max_length=10, choices=APPROVAL_CHOICES, default=APPROVED)
+    created_by = models.CharField(max_length=80, blank=True, default="")
+    approved_by = models.CharField(max_length=80, blank=True, default="")
+    approved_at = models.DateTimeField(null=True, blank=True)
+    reject_reason = models.CharField(max_length=200, blank=True, default="")
 
     class Meta:
         ordering = ["category__sort_order", "name"]
+
+    def save(self, *args, **kwargs):
+        # A bar-station item (a beverage) is always in the bar's own menu —
+        # only kitchen items need an explicit opt-in to appear there.
+        if self.station == "bar":
+            self.bar_menu = True
+        super().save(*args, **kwargs)
 
     def __str__(self):
         return self.name
@@ -184,9 +237,22 @@ class Order(models.Model):
         (POSTED_TO_ROOM, "Posted to Room"),
     ]
 
+    # Which desk this order belongs to — the restaurant floor or the bar.
+    # They're run as separate operations: a bar order is tied to a BarTable
+    # (never a restaurant Table) and settles on its own, independent bill.
+    # A bar tab CAN include kitchen-made side dishes — those still fire a KOT
+    # to the shared kitchen, but the charge stays on the bar's own tab.
+    FOOD = "food"
+    BAR = "bar"
+    DEPARTMENT_CHOICES = [(FOOD, "Food"), (BAR, "Bar")]
+
     mode = models.CharField(max_length=12, choices=MODE_CHOICES, default=DINEIN)
+    department = models.CharField(max_length=6, choices=DEPARTMENT_CHOICES, default=FOOD)
     table = models.ForeignKey(
         Table, on_delete=models.SET_NULL, null=True, blank=True, related_name="orders"
+    )
+    bar_table = models.ForeignKey(
+        "BarTable", on_delete=models.SET_NULL, null=True, blank=True, related_name="orders"
     )
     customer = models.ForeignKey(
         Customer, on_delete=models.SET_NULL, null=True, blank=True, related_name="orders"

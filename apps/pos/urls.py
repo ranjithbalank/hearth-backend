@@ -3,6 +3,7 @@ from rest_framework.routers import DefaultRouter
 from django.urls import path
 
 from .views import (
+    BarTableViewSet,
     CategoryViewSet,
     FeedbackPublicView,
     FeedbackViewSet,
@@ -19,6 +20,7 @@ from .views import (
 
 router = DefaultRouter()
 router.register("pos/tables", TableViewSet, basename="table")
+router.register("bar/tables", BarTableViewSet, basename="bartable")
 router.register("pos/categories", CategoryViewSet, basename="category")
 router.register("pos/menu-items", MenuItemViewSet, basename="menuitem")
 router.register("pos/orders", OrderViewSet, basename="order")

@@ -3,6 +3,7 @@ from rest_framework import serializers
 from .models import (
     AddOn,
     AddOnGroup,
+    BarTable,
     Category,
     MenuItem,
     Order,
@@ -23,10 +24,18 @@ class TableSerializer(serializers.ModelSerializer):
         fields = ["id", "name", "section", "seats", "shape", "status", "status_label"]
 
 
+class BarTableSerializer(serializers.ModelSerializer):
+    status_label = serializers.CharField(source="get_status_display", read_only=True)
+
+    class Meta:
+        model = BarTable
+        fields = ["id", "name", "section", "seats", "shape", "status", "status_label"]
+
+
 class CategorySerializer(serializers.ModelSerializer):
     class Meta:
         model = Category
-        fields = ["id", "name", "sort_order"]
+        fields = ["id", "name", "sort_order", "is_bar"]
 
 
 class VariantSerializer(serializers.ModelSerializer):
@@ -59,7 +68,7 @@ class MenuItemSerializer(serializers.ModelSerializer):
         model = MenuItem
         fields = [
             "id", "name", "short_code", "category", "category_name", "price",
-            "gst_rate", "diet", "station", "available", "variants", "addon_groups",
+            "gst_rate", "diet", "station", "bar_menu", "available", "variants", "addon_groups",
             "channel_prices", "image",
         ]
 
@@ -84,6 +93,7 @@ class OrderSerializer(serializers.ModelSerializer):
     lines = OrderLineSerializer(many=True, read_only=True)
     totals = serializers.SerializerMethodField()
     table_name = serializers.CharField(source="table.name", read_only=True, default=None)
+    bar_table_name = serializers.CharField(source="bar_table.name", read_only=True, default=None)
     status_label = serializers.CharField(source="get_status_display", read_only=True)
 
     coupon_code = serializers.CharField(source="coupon.code", read_only=True, default=None)
@@ -91,7 +101,8 @@ class OrderSerializer(serializers.ModelSerializer):
     class Meta:
         model = Order
         fields = [
-            "id", "mode", "table", "table_name", "customer", "covers", "captain",
+            "id", "mode", "department", "table", "table_name", "bar_table", "bar_table_name",
+            "customer", "covers", "captain",
             "status", "status_label", "folio", "kot_no", "lines", "totals", "created_at",
             "discount_kind", "discount_value", "discount_reason", "coupon_code",
             "loyalty_redeemed", "source_platform", "external_ref", "online_status", "prepaid",

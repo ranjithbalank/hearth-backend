@@ -222,7 +222,9 @@ class IngredientViewSet(ModuleViewSetMixin, viewsets.ModelViewSet):
     def movements(self, request):
         """Inventory movements / consumption register (spec §4/§6).
         Filters: ?kind=consumption&ingredient=<id>&days=30 or an explicit
-        ?from=YYYY-MM-DD&to=YYYY-MM-DD range. ?fmt=csv downloads the register."""
+        ?from=YYYY-MM-DD&to=YYYY-MM-DD range, plus ?category=Liquor to see
+        just the bar's stock (or any other category) within the one shared
+        ledger. ?fmt=csv downloads the register."""
         qs = StockMovement.objects.select_related("ingredient")
         kind = request.query_params.get("kind")
         if kind:
@@ -230,6 +232,9 @@ class IngredientViewSet(ModuleViewSetMixin, viewsets.ModelViewSet):
         ingredient = request.query_params.get("ingredient")
         if ingredient:
             qs = qs.filter(ingredient_id=ingredient)
+        category = request.query_params.get("category")
+        if category:
+            qs = qs.filter(ingredient__category=category)
         date_from = parse_date(request.query_params.get("from") or "")
         date_to = parse_date(request.query_params.get("to") or "")
         if date_from:
@@ -256,13 +261,19 @@ class IngredientViewSet(ModuleViewSetMixin, viewsets.ModelViewSet):
 
     @action(detail=False, methods=["get"])
     def consumption_report(self, request):
-        """Raw-material consumption + purchase-vs-consumption over ?days= (spec §7)."""
+        """Raw-material consumption + purchase-vs-consumption over ?days= (spec §7).
+        ?category=Liquor narrows the shared ledger to just the bar's stock
+        (or any other category) without needing a separate system."""
         from apps.accounts.constants import ROLE_CHEF
         show_cost = getattr(request.user, "role", "") != ROLE_CHEF
         days = int(request.query_params.get("days", 30))
         since = timezone.now() - timedelta(days=days)
+        ingredients = Ingredient.objects.all()
+        category = request.query_params.get("category")
+        if category:
+            ingredients = ingredients.filter(category=category)
         rows = []
-        for ing in Ingredient.objects.all():
+        for ing in ingredients:
             sums = (ing.movements.filter(created_at__gte=since)
                     .values("kind").annotate(total=Sum("qty")))
             by_kind = {r["kind"]: r["total"] or Decimal("0") for r in sums}

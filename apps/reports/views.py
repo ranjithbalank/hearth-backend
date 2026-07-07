@@ -79,37 +79,75 @@ def _receivables():
 
 
 class DashboardView(ModuleAPIView):
+    """Rooms + F&B side by side for cross-cutting roles (Admin, Finance, and
+    Super Admin/MD/GM if they land here) — but Front Office only runs the
+    hotel side and Restaurant Manager only runs the restaurant side, so each
+    gets just their own numbers, not the other side's."""
+
     module = "dashboard"
 
     def get(self, request):
-        return Response({"rooms": _room_kpis(), "fnb": _fnb_kpis(), "receivables": _receivables()})
+        from apps.accounts.constants import ROLE_FRONT_OFFICE, ROLE_REST_MGR
+        role = getattr(request.user, "role", "")
+        body = {}
+        if role != ROLE_REST_MGR:
+            body["rooms"] = _room_kpis()
+            body["receivables"] = _receivables()
+        if role != ROLE_FRONT_OFFICE:
+            body["fnb"] = _fnb_kpis()
+        body["view"] = ("hotel" if role == ROLE_FRONT_OFFICE
+                        else "restaurant" if role == ROLE_REST_MGR else "combined")
+        return Response(body)
 
 
 class ExecutiveView(ModuleAPIView):
+    """Group performance — combined by default, but MD/GM/CEO/Super Admin can
+    also drill into just the hotel side or just the restaurant side via ?view=."""
+
     module = "execdashboard"
 
     def get(self, request):
+        view = request.query_params.get("view", "all")
+        if view not in ("all", "hotel", "restaurant"):
+            view = "all"
         rooms = _room_kpis()
         fnb = _fnb_kpis()
+        receivables = _receivables()
         room_rev = Decimal(rooms["room_revenue"])
         fnb_rev = Decimal(fnb["fnb_sales"])
-        receivables = sum(
-            (c.outstanding for c in Customer.objects.all()), start=Decimal("0")
-        )
-        total_rev = room_rev + fnb_rev
-        return Response({
-            "kpis": {
+
+        body = {"view": view}
+        if view in ("all", "hotel"):
+            body["rooms"] = rooms
+        if view in ("all", "restaurant"):
+            body["fnb"] = fnb
+        if view == "all":
+            total_rev = room_rev + fnb_rev
+            body["kpis"] = {
                 "revenue": str(total_rev),
                 "occupancy_pct": rooms["occupancy_pct"],
                 "room_revenue": str(room_rev),
                 "fnb_revenue": str(fnb_rev),
-                "receivables": str(receivables),
-            },
-            "revenue_mix": [
+                "receivables": receivables["total"],
+            }
+            body["revenue_mix"] = [
                 {"label": "Rooms", "value": str(room_rev)},
                 {"label": "F&B", "value": str(fnb_rev)},
-            ],
-        })
+            ]
+        elif view == "hotel":
+            body["kpis"] = {
+                "revenue": rooms["room_revenue"],
+                "occupancy_pct": rooms["occupancy_pct"],
+                "room_revenue": rooms["room_revenue"],
+                "receivables": receivables["total"],
+            }
+        else:  # restaurant
+            body["kpis"] = {
+                "revenue": fnb["fnb_sales"],
+                "fnb_revenue": fnb["fnb_sales"],
+                "order_count": fnb["order_count"],
+            }
+        return Response(body)
 
 
 class SalesSummaryView(ModuleAPIView):

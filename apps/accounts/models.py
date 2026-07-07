@@ -56,6 +56,13 @@ class Entitlement(models.Model):
     restaurant = models.BooleanField(default=True)
     banquets = models.BooleanField(default=True)
     rms = models.BooleanField(default=True)
+    # Whether the bar runs as its own separate operation (own tables, own
+    # menu, Bar Captain/Bar Cashier) or combined into the one restaurant POS.
+    # Changeable anytime from Settings — not locked in at initial setup.
+    BAR_SEPARATE = "separate"
+    BAR_COMBINED = "combined"
+    BAR_MODE_CHOICES = [(BAR_SEPARATE, "Separate operation"), (BAR_COMBINED, "Combined with restaurant")]
+    bar_mode = models.CharField(max_length=10, choices=BAR_MODE_CHOICES, default=BAR_SEPARATE)
 
     def as_dict(self):
         return {
@@ -63,6 +70,7 @@ class Entitlement(models.Model):
             "restaurant": self.restaurant,
             "banquets": self.banquets,
             "rms": self.rms,
+            "bar_mode": self.bar_mode,
         }
 
     def __str__(self):

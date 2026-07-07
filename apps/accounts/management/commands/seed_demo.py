@@ -11,6 +11,8 @@ from django.db import transaction
 
 from apps.accounts.constants import (
     ROLE_ADMIN,
+    ROLE_BAR_CAPTAIN,
+    ROLE_BAR_CASHIER,
     ROLE_CAPTAIN,
     ROLE_CASHIER,
     ROLE_CEO,
@@ -33,7 +35,7 @@ from apps.inventory.models import Ingredient
 from apps.matreq.models import MaterialRequest, MaterialRequestLine
 from apps.housekeeping.models import LostFoundItem
 from apps.pos.models import (
-    AddOn, AddOnGroup, Category, ChannelPrice, ComboComponent, Coupon, MenuItem,
+    AddOn, AddOnGroup, BarTable, Category, ChannelPrice, ComboComponent, Coupon, MenuItem,
     MenuSchedule, Table, Variant,
 )
 from apps.procurement.models import PurchaseOrder, PurchaseOrderLine, Supplier, Vendor
@@ -100,6 +102,8 @@ class Command(BaseCommand):
             ("housekeeping", "Sunita", "Pal", ROLE_HOUSEKEEPING, False),
             ("chef", "Arun", "Balan", ROLE_CHEF, False),
             ("store", "Mani", "Velu", ROLE_STORE, False),
+            ("barcaptain", "Deepak", "Shetty", ROLE_BAR_CAPTAIN, False),
+            ("barcashier", "Nisha", "Kamath", ROLE_BAR_CASHIER, False),
         ]
         # Per-user discount caps + manager passcodes (BRD FR-USR-004/006).
         caps = {
@@ -218,6 +222,40 @@ class Command(BaseCommand):
         for t in Table.objects.filter(qr_token=""):
             t.qr_token = f"QR{t.id:04d}"
             t.save(update_fields=["qr_token"])
+        # Bar runs its own floor plan — separate from the restaurant's tables.
+        if not BarTable.objects.exists():
+            for n in range(1, 7):
+                BarTable.objects.create(name=f"B{n}", seats=2 if n % 2 else 4)
+        # The bar's own categories (Beer, Wine, Cocktails, Spirits) — kept
+        # separate from the restaurant's own "Beverages" (Masala Chai, Lime
+        # Soda) so the two pickers never mix, same split as everything else
+        # about the bar.
+        bar_cats = {}
+        for i, name in enumerate(["Beer", "Wine", "Cocktails", "Spirits"]):
+            c, _ = Category.objects.get_or_create(name=name, defaults={"sort_order": 90 + i, "is_bar": True})
+            if not c.is_bar:
+                c.is_bar = True
+                c.save(update_fields=["is_bar"])
+            bar_cats[name] = c
+        bar_items = [
+            ("Draft Beer (Pint)", "Beer", "280"), ("House Red Wine", "Wine", "450"),
+            ("Classic Mojito", "Cocktails", "350"), ("Whisky (30ml)", "Spirits", "400"),
+            ("Masala Soda", "Cocktails", "90"),
+        ]
+        for name, cat, price in bar_items:
+            MenuItem.objects.get_or_create(name=name, defaults={
+                "category": bar_cats[cat], "price": Decimal(price),
+                "gst_rate": Decimal("18"), "diet": "veg", "station": "bar",
+                "short_code": "".join(w[0] for w in name.split()).upper(),
+            })
+        # Backfill: on a DB seeded before the bar had its own categories, these
+        # items landed under the restaurant's shared "Beverages" — move them.
+        for name, cat, _price in bar_items:
+            MenuItem.objects.filter(name=name, station="bar").exclude(category=bar_cats[cat]).update(category=bar_cats[cat])
+        # Backfill: a bar-station item re-run through get_or_create() on an
+        # already-seeded DB doesn't call save(), so it can miss the bar_menu
+        # auto-flag added after the item first existed.
+        MenuItem.objects.filter(station="bar", bar_menu=False).update(bar_menu=True)
         Coupon.objects.get_or_create(code="WELCOME10", defaults={
             "kind": "percent", "value": Decimal("10"), "min_bill": Decimal("500")})
         Coupon.objects.get_or_create(code="FLAT100", defaults={
@@ -330,6 +368,22 @@ class Command(BaseCommand):
         if "Butter" in ing_by_name:
             b = ing_by_name["Butter"]; b.current_stock = Decimal("3"); b.save()
 
+        # Liquor: its own bar-exclusive category — stock stays in the same
+        # Store/Inventory system as kitchen materials, just filterable apart.
+        from apps.inventory.models import IngredientCategory
+        IngredientCategory.objects.get_or_create(name="Liquor")
+        liquors = [
+            ("Whisky (bottle)", "l", 12, 4, 1800), ("Draft Beer (Keg)", "l", 30, 10, 220),
+            ("Red Wine (bottle)", "l", 8, 3, 950), ("White Rum (bottle)", "l", 6, 2, 1100),
+        ]
+        for name, unit, stock, reorder, cost in liquors:
+            i, _ = Ingredient.objects.get_or_create(name=name, defaults={
+                "unit": unit, "current_stock": Decimal(stock),
+                "reorder_level": Decimal(reorder), "unit_cost": Decimal(cost),
+                "category": "Liquor",
+            })
+            ing_by_name[name] = i
+
         # Recipes (BOM) for a few menu items.
         recipes = {
             "Paneer Tikka": [("Paneer", 0.2), ("Onion", 0.05), ("Cooking Oil", 0.02)],
@@ -337,6 +391,10 @@ class Command(BaseCommand):
             "Dal Makhani": [("Butter", 0.03), ("Tomato", 0.05), ("Onion", 0.04)],
             "Chicken Biryani": [("Chicken", 0.2), ("Basmati Rice", 0.18), ("Onion", 0.06)],
             "Garlic Naan": [("Wheat Flour", 0.12), ("Butter", 0.01)],
+            # Bar drinks draw from the same Store ledger, just the Liquor category.
+            "Whisky (30ml)": [("Whisky (bottle)", 0.03)],
+            "Draft Beer (Pint)": [("Draft Beer (Keg)", 0.5)],
+            "House Red Wine": [("Red Wine (bottle)", 0.15)],
         }
         for item_name, lines in recipes.items():
             mi = MenuItem.objects.filter(name=item_name).first()
