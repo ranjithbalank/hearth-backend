@@ -80,22 +80,22 @@ def _receivables():
 
 class DashboardView(ModuleAPIView):
     """Rooms + F&B side by side for cross-cutting roles (Admin, Finance, and
-    Super Admin/MD/GM if they land here) — but Front Office only runs the
+    Super Admin/MD/GM if they land here) — but Hotel Manager only runs the
     hotel side and Restaurant Manager only runs the restaurant side, so each
     gets just their own numbers, not the other side's."""
 
     module = "dashboard"
 
     def get(self, request):
-        from apps.accounts.constants import ROLE_FRONT_OFFICE, ROLE_REST_MGR
+        from apps.accounts.constants import ROLE_HOTEL_MGR, ROLE_REST_MGR
         role = getattr(request.user, "role", "")
         body = {}
         if role != ROLE_REST_MGR:
             body["rooms"] = _room_kpis()
             body["receivables"] = _receivables()
-        if role != ROLE_FRONT_OFFICE:
+        if role != ROLE_HOTEL_MGR:
             body["fnb"] = _fnb_kpis()
-        body["view"] = ("hotel" if role == ROLE_FRONT_OFFICE
+        body["view"] = ("hotel" if role == ROLE_HOTEL_MGR
                         else "restaurant" if role == ROLE_REST_MGR else "combined")
         return Response(body)
 
@@ -150,25 +150,49 @@ class ExecutiveView(ModuleAPIView):
         return Response(body)
 
 
+def _scoped_sales_kpis(role):
+    """Sales Summary content, scoped like the Dashboard: Restaurant Manager
+    sees F&B only, Hotel Manager sees rooms only, everyone else authorized
+    for 'sales' (full access, Finance, CEO) sees both. Returns (rooms, fnb),
+    either of which is None when that side is hidden from this role."""
+    from apps.accounts.constants import ROLE_HOTEL_MGR, ROLE_REST_MGR
+    rooms = _room_kpis() if role != ROLE_REST_MGR else None
+    fnb = _fnb_kpis() if role != ROLE_HOTEL_MGR else None
+    return rooms, fnb
+
+
 class SalesSummaryView(ModuleAPIView):
     module = "reports"
 
     def get(self, request):
-        return Response({"rooms": _room_kpis(), "fnb": _fnb_kpis()})
+        role = getattr(request.user, "role", "")
+        rooms, fnb = _scoped_sales_kpis(role)
+        body = {}
+        if rooms is not None:
+            body["rooms"] = rooms
+        if fnb is not None:
+            body["fnb"] = fnb
+        return Response(body)
 
 
-def _report_rows(report):
+def _report_rows(report, role):
     """Return (title, header, rows) for an exportable report."""
     if report == "sales":
-        r, f = _room_kpis(), _fnb_kpis()
-        return ("Sales Summary", ["Metric", "Value"], [
-            ["Occupancy %", r["occupancy_pct"]],
-            ["ADR", r["adr"]],
-            ["RevPAR", r["revpar"]],
-            ["Room revenue", r["room_revenue"]],
-            ["F&B sales", f["fnb_sales"]],
-            ["F&B orders", f["order_count"]],
-        ])
+        rooms, fnb = _scoped_sales_kpis(role)
+        rows = []
+        if rooms is not None:
+            rows += [
+                ["Occupancy %", rooms["occupancy_pct"]],
+                ["ADR", rooms["adr"]],
+                ["RevPAR", rooms["revpar"]],
+                ["Room revenue", rooms["room_revenue"]],
+            ]
+        if fnb is not None:
+            rows += [
+                ["F&B sales", fnb["fnb_sales"]],
+                ["F&B orders", fnb["order_count"]],
+            ]
+        return ("Sales Summary", ["Metric", "Value"], rows)
     if report == "tax":
         from collections import defaultdict
         agg = defaultdict(lambda: [Decimal("0")] * 4)
@@ -227,10 +251,14 @@ class ReportExportView(ModuleAPIView):
     module = "reports"
 
     def get(self, request):
+        from apps.accounts.constants import role_can_view_report
         report = request.query_params.get("report", "sales")
+        role = getattr(request.user, "role", "")
+        if not role_can_view_report(role, report):
+            return Response({"detail": f"not authorized for the '{report}' report"}, status=403)
         # NB: avoid the query param name 'format' — DRF reserves it as a renderer override.
         fmt = request.query_params.get("fmt", "xlsx")
-        title, header, rows = _report_rows(report)
+        title, header, rows = _report_rows(report, role)
 
         if fmt == "csv":
             buf = io.StringIO()
@@ -497,22 +525,36 @@ class ReportView(ModuleAPIView):
     module = "reports"
 
     def get(self, request):
+        from apps.accounts.constants import role_can_view_report
         report = request.query_params.get("report", "sales")
+        role = getattr(request.user, "role", "")
+        if not role_can_view_report(role, report):
+            return Response({"detail": f"not authorized for the '{report}' report"}, status=403)
         restaurant = _restaurant_report(report)
         if restaurant:
             return Response(restaurant)
         if report == "sales":
-            r, f = _room_kpis(), _fnb_kpis()
+            rooms, fnb = _scoped_sales_kpis(role)
+            kpis = []
+            if rooms is not None:
+                kpis += [
+                    {"label": "Occupancy", "value": f"{rooms['occupancy_pct']}%"},
+                    {"label": "ADR", "value": rooms["adr"], "money": True},
+                    {"label": "RevPAR", "value": rooms["revpar"], "money": True},
+                ]
+            if fnb is not None:
+                kpis.append({"label": "F&B sales", "value": fnb["fnb_sales"], "money": True})
+            if fnb is not None:
+                series_label = "F&B sales by channel"
+                bars = [{"name": k.title(), "value": float(v)} for k, v in fnb["by_mode"].items()]
+            else:
+                series_label = "Room revenue"
+                bars = [{"name": "Room revenue", "value": float(rooms["room_revenue"])}]
             return Response({
                 "title": "Sales Summary",
-                "kpis": [
-                    {"label": "Occupancy", "value": f"{r['occupancy_pct']}%"},
-                    {"label": "ADR", "value": r["adr"], "money": True},
-                    {"label": "RevPAR", "value": r["revpar"], "money": True},
-                    {"label": "F&B sales", "value": f["fnb_sales"], "money": True},
-                ],
-                "series_label": "F&B sales by channel",
-                "bars": [{"name": k.title(), "value": float(v)} for k, v in f["by_mode"].items()],
+                "kpis": kpis,
+                "series_label": series_label,
+                "bars": bars,
             })
         if report == "tax":
             from collections import defaultdict
@@ -552,19 +594,43 @@ class CatalogueView(ModuleAPIView):
     module = "reports"
 
     def get(self, request):
+        from apps.accounts.constants import (
+            ROLE_ALLOW,
+            RESTAURANT_ANALYTICS_REPORTS,
+            role_can_view_report,
+        )
+        role = getattr(request.user, "role", "")
+        full = ROLE_ALLOW.get(role) == "*"
+
+        all_reports = [
+            "sales", "tax", "source", "occupancy", "accounting", "guests",
+            "aggregator", "recipe_consumption", "sales_vs_consumption",
+            "purchase_vs_consumption", "food_cost", "item_profitability",
+        ]
+        allowed_reports = all_reports if full else [
+            r for r in all_reports if role_can_view_report(role, r)]
+        allowed = set(allowed_reports)
+
+        # Each group is gated on a representative report key from that
+        # category — same slices as ROLE_REPORT_ACCESS, so nobody sees a
+        # tile for a report they'd be 403'd on if they actually tried it.
         groups = [
-            {"group": "Rooms", "tiles": [
+            {"group": "Rooms", "gate": {"source", "occupancy"}, "tiles": [
                 "Occupancy & RevPAR", "Arrivals & Departures",
                 "Night Audit / Daily Revenue", "No-show & Cancellation"]},
-            {"group": "F&B", "tiles": [
+            {"group": "F&B", "gate": {"sales", "aggregator"}, "tiles": [
                 "F&B Sales Summary", "Item & Category Performance",
                 "Discounts & Voids", "Zomato / Swiggy Aggregators"]},
-            {"group": "Restaurant Inventory", "tiles": [
+            {"group": "Restaurant Inventory", "gate": RESTAURANT_ANALYTICS_REPORTS, "tiles": [
                 "Recipe-wise Consumption", "Daily Sales vs Consumption",
                 "Purchase vs Consumption", "Food Cost",
                 "Menu Item Profitability"]},
-            {"group": "Finance", "tiles": [
+            {"group": "Finance", "gate": {"tax", "accounting"}, "tiles": [
                 "Tax / GST", "City Ledger / AR Aging"]},
-            {"group": "Guests", "tiles": ["Guest & Loyalty"]},
+            {"group": "Guests", "gate": {"guests"}, "tiles": ["Guest & Loyalty"]},
         ]
-        return Response(groups)
+        visible = [
+            {"group": g["group"], "tiles": g["tiles"]}
+            for g in groups if full or allowed & g["gate"]
+        ]
+        return Response({"groups": visible, "allowed_reports": allowed_reports})

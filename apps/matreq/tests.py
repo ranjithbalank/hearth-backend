@@ -70,7 +70,7 @@ class MaterialRequestTests(TestCase):
         self.assertEqual(self.ing.current_stock, Decimal("16.000"))  # 20 − 4
 
     def test_housekeeping_and_maintenance_route_to_their_own_approvers(self):
-        """Housekeeping/Banquets/Front-Office indents go to Front Office;
+        """Housekeeping/Banquets/Front-Office indents go to Hotel Manager;
         Maintenance goes to Housekeeping (it already owns work orders)."""
         hk = APIClient()
         hk.force_authenticate(User.objects.create_user(
@@ -84,12 +84,12 @@ class MaterialRequestTests(TestCase):
         # Housekeeping itself can't approve its own department's indent…
         r = hk.post(f"/api/material-requests/{req_id}/advance/")
         self.assertEqual(r.status_code, 403)
-        self.assertIn("Front Office", r.data["detail"])
-        # …Front Office approves, Store Keeper issues.
-        fo = APIClient()
-        fo.force_authenticate(User.objects.create_user(
-            username="fomr", password="Tk9$mZ2pQw!7", role="Front Office"))
-        self.assertEqual(fo.post(f"/api/material-requests/{req_id}/advance/").data["status"],
+        self.assertIn("Hotel Manager", r.data["detail"])
+        # …Hotel Manager approves, Store Keeper issues.
+        hm = APIClient()
+        hm.force_authenticate(User.objects.create_user(
+            username="hmmr", password="Tk9$mZ2pQw!7", role="Hotel Manager"))
+        self.assertEqual(hm.post(f"/api/material-requests/{req_id}/advance/").data["status"],
                          "approved")
         store = APIClient()
         store.force_authenticate(User.objects.create_user(
@@ -98,6 +98,9 @@ class MaterialRequestTests(TestCase):
                          "issued")
 
         # Maintenance indent: Housekeeping approves (Front Office can't).
+        fo = APIClient()
+        fo.force_authenticate(User.objects.create_user(
+            username="fomaint", password="Tk9$mZ2pQw!7", role="Front Office"))
         r = fo.post("/api/material-requests/", {
             "department": "Maintenance",
             "lines": [{"ingredient": self.ing.id, "qty": "1"}],
@@ -152,8 +155,8 @@ class MaterialRequestTests(TestCase):
         self.assertEqual(chef.get("/api/material-requests/").data, [])
 
     def test_approval_queue_shows_only_whats_actually_actionable(self):
-        """Front Office's queue: Housekeeping's pending request shows up
-        (Front Office approves it); a Kitchen request does not."""
+        """Hotel Manager's queue: Housekeeping's pending request shows up
+        (Hotel Manager approves it); a Kitchen request does not."""
         hk = APIClient()
         hk.force_authenticate(User.objects.create_user(
             username="hkqueue", password="Tk9$mZ2pQw!7", role="Housekeeping"))
@@ -162,7 +165,7 @@ class MaterialRequestTests(TestCase):
             username="chefqueue", password="Tk9$mZ2pQw!7", role="Chef / Kitchen"))
         fo = APIClient()
         fo.force_authenticate(User.objects.create_user(
-            username="foqueue", password="Tk9$mZ2pQw!7", role="Front Office"))
+            username="hmqueue", password="Tk9$mZ2pQw!7", role="Hotel Manager"))
 
         r_hk = hk.post("/api/material-requests/", {
             "department": "Housekeeping", "lines": [{"ingredient": self.ing.id, "qty": "1"}],
@@ -175,8 +178,8 @@ class MaterialRequestTests(TestCase):
         self.assertIn(r_hk["id"], queue_ids)
         self.assertNotIn(r_chef["id"], queue_ids)
 
-        # Once Front Office approves the Housekeeping indent, it drops out of
-        # Front Office's queue (nothing left for them to do) but a Store
+        # Once Hotel Manager approves the Housekeeping indent, it drops out of
+        # Hotel Manager's queue (nothing left for them to do) but a Store
         # Keeper's queue now picks it up for issuing.
         fo.post(f"/api/material-requests/{r_hk['id']}/advance/")
         queue_ids = [r["id"] for r in fo.get("/api/material-requests/").data]
@@ -219,15 +222,16 @@ class MaterialRequestTests(TestCase):
             "department": "Maintenance", "lines": [{"ingredient": self.ing.id, "qty": "1"}],
         }, format="json")
         self.assertEqual(r.status_code, 400)
-        # Its own department is fine — Front Office approves that, not Housekeeping.
+        # Its own department is fine — Hotel Manager approves that, not Housekeeping.
         r = hk.post("/api/material-requests/", {
             "department": "Housekeeping", "lines": [{"ingredient": self.ing.id, "qty": "1"}],
         }, format="json")
         self.assertEqual(r.status_code, 201)
 
-    def test_banquets_and_front_office_departments_route_to_gm_not_front_office(self):
+    def test_banquets_and_front_office_departments_route_to_hotel_manager(self):
         """Front Office is the only role that would ever raise these two —
-        so it can't also be the approver. GM/MD/Super Admin sign off instead."""
+        so it can't also be the approver. Hotel Manager (or GM/MD/Super Admin)
+        signs off instead."""
         fo = APIClient()
         fo.force_authenticate(User.objects.create_user(
             username="foself", password="Tk9$mZ2pQw!7", role="Front Office"))
@@ -236,20 +240,23 @@ class MaterialRequestTests(TestCase):
         }, format="json")
         self.assertEqual(r.status_code, 201, r.data)
         self.assertEqual(r.data["approver_roles"],
-                         ["General Manager", "Managing Director", "Super Admin"])
+                         ["General Manager", "Hotel Manager", "Managing Director", "Super Admin"])
         req_id = r.data["id"]
         # Front Office can't approve its own Banquets indent…
         r = fo.post(f"/api/material-requests/{req_id}/advance/")
         self.assertEqual(r.status_code, 403)
-        # …GM does.
-        self.assertEqual(self.client.post(f"/api/material-requests/{req_id}/advance/").data["status"],
+        # …Hotel Manager does.
+        hm = APIClient()
+        hm.force_authenticate(User.objects.create_user(
+            username="hmself", password="Tk9$mZ2pQw!7", role="Hotel Manager"))
+        self.assertEqual(hm.post(f"/api/material-requests/{req_id}/advance/").data["status"],
                          "approved")
         # Same story for the Front Office department's own supplies.
         r = fo.post("/api/material-requests/", {
             "department": "Front Office", "lines": [{"ingredient": self.ing.id, "qty": "1"}],
         }, format="json")
         self.assertEqual(r.data["approver_roles"],
-                         ["General Manager", "Managing Director", "Super Admin"])
+                         ["General Manager", "Hotel Manager", "Managing Director", "Super Admin"])
 
     def test_universal_roles_exempt_from_the_self_request_block(self):
         """GM/MD/Super Admin can still request anything — they're already

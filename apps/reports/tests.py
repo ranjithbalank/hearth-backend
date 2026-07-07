@@ -116,3 +116,76 @@ class RestaurantReportsTests(TestCase):
         r = self.client.get("/api/reports/export/?report=food_cost&fmt=csv")
         self.assertEqual(r.status_code, 200)
         self.assertIn("Food cost", r.content.decode())
+
+
+class ReportsRbacTests(TestCase):
+    """Having the 'reports' module only gates opening the Reports screen —
+    these confirm WHICH report each non-universal role may actually pull is
+    scoped too (the gap where Restaurant Manager could previously export
+    Guest KYC, GST and accounting data it has no other access to)."""
+
+    def _client(self, role, username):
+        c = APIClient()
+        c.force_authenticate(User.objects.create_user(
+            username=username, password="Tk9$mZ2pQw!7", role=role))
+        return c
+
+    def test_restaurant_manager_scoped_to_restaurant_reports(self):
+        rm = self._client("Restaurant Manager", "rmrpt")
+        self.assertEqual(rm.get("/api/reports/view/?report=food_cost").status_code, 200)
+        for report in ["guests", "tax", "accounting", "source", "occupancy"]:
+            self.assertEqual(rm.get(f"/api/reports/view/?report={report}").status_code, 403)
+            self.assertEqual(rm.get(f"/api/reports/export/?report={report}").status_code, 403)
+
+    def test_hotel_manager_scoped_to_hotel_reports(self):
+        hm = self._client("Hotel Manager", "hmrpt")
+        for report in ["source", "occupancy"]:
+            self.assertEqual(hm.get(f"/api/reports/view/?report={report}").status_code, 200)
+        for report in ["guests", "tax", "accounting", "food_cost", "recipe_consumption"]:
+            self.assertEqual(hm.get(f"/api/reports/view/?report={report}").status_code, 403)
+
+    def test_finance_scoped_to_money_reports(self):
+        fin = self._client("Finance", "finrpt")
+        for report in ["tax", "accounting"]:
+            self.assertEqual(fin.get(f"/api/reports/view/?report={report}").status_code, 200)
+        for report in ["guests", "source", "occupancy"]:
+            self.assertEqual(fin.get(f"/api/reports/view/?report={report}").status_code, 403)
+
+    def test_guest_kyc_is_full_access_only(self):
+        """Guest KYC (raw ID numbers) — the tightest gate: not even CEO/Finance."""
+        for role, uname in [("CEO", "ceorpt"), ("Finance", "finrpt2"),
+                            ("Restaurant Manager", "rmrpt2"), ("Hotel Manager", "hmrpt2")]:
+            c = self._client(role, uname)
+            self.assertEqual(c.get("/api/reports/view/?report=guests").status_code, 403)
+            self.assertEqual(c.get("/api/reports/export/?report=guests").status_code, 403)
+        gm = self._client("General Manager", "gmrpt2")
+        self.assertEqual(gm.get("/api/reports/export/?report=guests").status_code, 200)
+
+    def test_sales_summary_scoped_like_dashboard(self):
+        """Restaurant Manager's Sales Summary shows F&B only, no room KPIs —
+        and vice versa for Hotel Manager. Same split as the Dashboard."""
+        rm = self._client("Restaurant Manager", "rmsales")
+        data = rm.get("/api/reports/view/?report=sales").data
+        labels = {k["label"] for k in data["kpis"]}
+        self.assertIn("F&B sales", labels)
+        self.assertNotIn("Occupancy", labels)
+
+        hm = self._client("Hotel Manager", "hmsales")
+        data = hm.get("/api/reports/view/?report=sales").data
+        labels = {k["label"] for k in data["kpis"]}
+        self.assertIn("Occupancy", labels)
+        self.assertNotIn("F&B sales", labels)
+
+    def test_catalogue_hides_groups_the_role_cant_open(self):
+        rm = self._client("Restaurant Manager", "rmcat")
+        groups = {g["group"] for g in rm.get("/api/reports/catalogue/").data["groups"]}
+        self.assertIn("Restaurant Inventory", groups)
+        self.assertNotIn("Guests", groups)
+        self.assertNotIn("Finance", groups)
+        self.assertNotIn("Rooms", groups)
+
+        hm = self._client("Hotel Manager", "hmcat")
+        groups = {g["group"] for g in hm.get("/api/reports/catalogue/").data["groups"]}
+        self.assertIn("Rooms", groups)
+        self.assertNotIn("Guests", groups)
+        self.assertNotIn("Restaurant Inventory", groups)

@@ -36,10 +36,13 @@ class MaterialRequestViewSet(ModuleViewSetMixin, viewsets.ViewSet):
         and issuers everywhere already, so instead of just their actionable
         subset they get the full oversight view — every department, every
         status (including already-issued history), across the whole property.
+        CEO gets that same full oversight view for visibility only — CEO
+        never appears in indent_approvers_for()/INDENT_ISSUER_ROLES, so the
+        advance() action below still rejects any approve/issue attempt from CEO.
         """
         from apps.accounts.constants import (
             INDENT_ISSUER_ROLES,
-            UNIVERSAL_INDENT_APPROVERS,
+            INDENT_OVERSIGHT_ROLES,
             indent_approvers_for,
         )
         role = getattr(request.user, "role", "")
@@ -47,7 +50,7 @@ class MaterialRequestViewSet(ModuleViewSetMixin, viewsets.ViewSet):
         qs = MaterialRequest.objects.prefetch_related("lines__ingredient")
         if request.query_params.get("view") == "mine":
             qs = qs.filter(requested_by=username)
-        elif role in UNIVERSAL_INDENT_APPROVERS:
+        elif role in INDENT_OVERSIGHT_ROLES:
             pass   # full oversight — every department, every status
         else:
             actionable_ids = [

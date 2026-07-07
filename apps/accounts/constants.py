@@ -14,6 +14,11 @@ ROLE_CEO = "CEO"
 ROLE_GM = "General Manager"
 ROLE_FINANCE = "Finance"
 ROLE_REST_MGR = "Restaurant Manager"
+# Hotel Manager is Front Office's manager tier, mirroring Restaurant Manager
+# on the F&B side: runs the hotel-side dashboard, approves Housekeeping/
+# Banquets/Front-Office indents, but — same rule as Restaurant Manager and
+# Kitchen/Bar — never requests for those departments itself.
+ROLE_HOTEL_MGR = "Hotel Manager"
 ROLE_FRONT_OFFICE = "Front Office"
 ROLE_CASHIER = "F&B Cashier"
 ROLE_CAPTAIN = "Captain"
@@ -35,6 +40,7 @@ ROLE_CHOICES = [
     (ROLE_GM, ROLE_GM),
     (ROLE_FINANCE, ROLE_FINANCE),
     (ROLE_REST_MGR, ROLE_REST_MGR),
+    (ROLE_HOTEL_MGR, ROLE_HOTEL_MGR),
     (ROLE_FRONT_OFFICE, ROLE_FRONT_OFFICE),
     (ROLE_CASHIER, ROLE_CASHIER),
     (ROLE_CAPTAIN, ROLE_CAPTAIN),
@@ -81,10 +87,10 @@ ROLE_ALLOW = {
     ],
     # Finance — books and statutory: accounting, tax/GST, AR (customers),
     # payables (vendors/suppliers/POs), payroll and reports. No floor ops.
-    # Dashboard is now the two sector managers' own view (Front Office = hotel,
-    # Restaurant Manager = restaurant) plus Admin and Super Admin/MD/GM — not
-    # Finance by default. If Finance genuinely needs it, grant it per-property
-    # via the Role Matrix rather than hardcoding it here.
+    # Dashboard is now the two sector managers' own view (Hotel Manager =
+    # hotel, Restaurant Manager = restaurant) plus Admin and Super Admin/MD/GM
+    # — not Finance by default. If Finance genuinely needs it, grant it
+    # per-property via the Role Matrix rather than hardcoding it here.
     ROLE_FINANCE: [
         "accounting", "tax", "gstmaster", "reports",
         "customers", "vendors", "suppliers", "pomanage", "hr", "notifications",
@@ -100,13 +106,25 @@ ROLE_ALLOW = {
         "pomanage", "matreq", "recipes", "suppliers", "vendors",
         "menumaster", "tablemaster", "reports", "notifications",
     ],
+    # Hotel Manager — the hotel-side counterpart to Restaurant Manager: runs
+    # the hotel dashboard, oversees Front Desk's operations, and approves
+    # Housekeeping/Banquets/Front-Office indents. Never requests for those
+    # departments itself (same rule as Restaurant Manager and Kitchen/Bar —
+    # see role_can_request_department below). No books, no RBAC config.
+    ROLE_HOTEL_MGR: [
+        "dashboard", "frontdesk", "checkin", "checkout", "livegrid", "folio",
+        "reservations", "housekeeping", "banquets", "roommaster", "cateringmaster",
+        "customers", "reports", "matreq", "notifications",
+    ],
     # Front Office / Reception — the guest-facing desk only: front desk, room
     # assignment & status, reservations, folios/cashiering, banquets and guest
     # records. NO back-office (accounting, tax, reports, HR, CRM campaigns).
-    # matreq: raises indents for its own supplies (stationery, amenities) and
-    # is the approver for Housekeeping/Banquets/Front-Office indents below.
+    # No "dashboard" — that's Hotel Manager's, same as Cashier/Captain never
+    # having it on the restaurant side.
+    # matreq: raises indents for its own supplies (stationery, amenities);
+    # Hotel Manager approves Housekeeping/Banquets/Front-Office indents below.
     ROLE_FRONT_OFFICE: [
-        "dashboard", "frontdesk", "checkin", "checkout", "livegrid", "folio",
+        "frontdesk", "checkin", "checkout", "livegrid", "folio",
         "reservations", "housekeeping", "banquets", "customers", "notifications",
         "matreq",
     ],
@@ -119,7 +137,7 @@ ROLE_ALLOW = {
     # a material request when the section runs short of something.
     # Settlement is tender-restricted (see ROLE_TENDERS).
     ROLE_CAPTAIN: [
-        "pos", "matreq",
+        "pos", "matreq", "notifications",
     ],
     # Housekeeping — room status board, maintenance work orders, and indents
     # for its own supplies (linen, amenities, cleaning agents); also approves
@@ -197,28 +215,34 @@ MENU_APPROVER_ROLES = {ROLE_SUPER_ADMIN, ROLE_MD, ROLE_GM, ROLE_REST_MGR}
 # custodian who hands over stock at the ISSUE step, not the requester's boss).
 #
 # The pattern that MUST hold for every department: requester role ≠ approver
-# role (Housekeeping requests → Front Office approves is the model). Kitchen
-# and Bar have no separate floor role that "owns" requesting the way
-# Housekeeping does, so Chef/Cashier/Captain do the requesting and Restaurant
-# Manager stays approver-ONLY there (see role_can_request_department below —
-# Restaurant Manager is blocked from picking Kitchen/Bar, otherwise the same
-# person could raise a request no one else could sign off on).
-# Banquets and the Front Office's own supplies have the mirror problem: Front
-# Office is the only role that operates there, so IT must be the requester —
-# meaning the approver can't be Front Office too. Those two route to GM/MD/
-# Super Admin only, same as any unlisted department.
+# role. Kitchen and Bar have no separate floor role that "owns" requesting
+# the way Housekeeping does, so Chef/Cashier/Captain do the requesting and
+# Restaurant Manager stays approver-ONLY there (see role_can_request_department
+# below — Restaurant Manager is blocked from picking Kitchen/Bar, otherwise
+# the same person could raise a request no one else could sign off on).
+# Housekeeping/Banquets/Front-Office-supplies mirror that on the hotel side:
+# Hotel Manager approves all three but never requests for them — Front
+# Office (and Housekeeping, for its own department) does the requesting.
 DEPARTMENT_APPROVERS = {
     "Kitchen": {ROLE_REST_MGR},
     "Bar": {ROLE_REST_MGR},
-    "Housekeeping": {ROLE_FRONT_OFFICE},   # "frontdesk manager" per house convention
+    "Housekeeping": {ROLE_HOTEL_MGR},
+    "Banquets": {ROLE_HOTEL_MGR},
+    "Front Office": {ROLE_HOTEL_MGR},
     "Maintenance": {ROLE_HOUSEKEEPING},    # Housekeeping owns engineering/work-orders
-    # "Banquets" and "Front Office" intentionally absent — Front Office is the
-    # only role that would ever raise those, so it can't also approve them;
-    # they fall through to the universal GM/MD/Super Admin approvers below.
 }
 UNIVERSAL_INDENT_APPROVERS = {ROLE_SUPER_ADMIN, ROLE_MD, ROLE_GM}
-# Any department not listed above (Banquets, Front Office, Other/general
-# office supplies) still needs a real approver — GM+ only, never unapproved.
+# Any department not listed above (general office supplies etc.) still needs
+# a real approver — GM+ only, never unapproved.
+
+# CEO gets the same full-property visibility as the universal approvers
+# (every department, every status, in matreq's list()) for oversight — but
+# is deliberately NOT folded into UNIVERSAL_INDENT_APPROVERS itself, since
+# that set also drives indent_approvers_for() and role_can_request_department()
+# below. Adding CEO there would silently make CEO a real approver for every
+# department. This set is visibility-only: CEO can see who's waiting on what,
+# never approve or issue it themselves.
+INDENT_OVERSIGHT_ROLES = UNIVERSAL_INDENT_APPROVERS | {ROLE_CEO}
 
 
 def indent_approvers_for(department: str) -> set:
@@ -246,6 +270,35 @@ INDENT_ISSUER_ROLES = {ROLE_SUPER_ADMIN, ROLE_MD, ROLE_GM, ROLE_REST_MGR, ROLE_S
 KITCHEN_ROLES = {ROLE_SUPER_ADMIN, ROLE_MD, ROLE_GM, ROLE_REST_MGR, ROLE_CHEF}
 
 
+# --- Reports scoping ---
+# Having the "reports" module (see ROLE_ALLOW) only gates that a role can
+# open the Reports screen at all — it says nothing about WHICH report. The
+# non-universal roles that carry "reports" (Restaurant Manager, Hotel
+# Manager, Finance, CEO) each only get a slice, mirroring their module access
+# everywhere else: Restaurant Manager gets F&B/restaurant-analytics, Hotel
+# Manager gets the hotel side, Finance/CEO get the money + strategic reports.
+# Guest KYC ("guests" — raw ID numbers) is deliberately absent from ALL of
+# them: Super Admin/MD/GM only, the tightest PII gate in the system.
+RESTAURANT_ANALYTICS_REPORTS = {
+    "recipe_consumption", "sales_vs_consumption", "purchase_vs_consumption",
+    "food_cost", "item_profitability", "aggregator",
+}
+ROLE_REPORT_ACCESS = {
+    ROLE_REST_MGR: {"sales"} | RESTAURANT_ANALYTICS_REPORTS,
+    ROLE_HOTEL_MGR: {"sales", "source", "occupancy"},
+    ROLE_FINANCE: {"sales", "tax", "accounting"} | RESTAURANT_ANALYTICS_REPORTS,
+    ROLE_CEO: {"sales", "tax", "accounting", "source", "occupancy"} | RESTAURANT_ANALYTICS_REPORTS,
+}
+
+
+def role_can_view_report(role: str, report: str) -> bool:
+    """Full-access roles (Super Admin/MD/GM) see every report. Everyone else
+    with 'reports' only sees their slice — see ROLE_REPORT_ACCESS above."""
+    if ROLE_ALLOW.get(role) == "*":
+        return True
+    return report in ROLE_REPORT_ACCESS.get(role, set())
+
+
 # --- POS tender mapping (BRD 5.10 role mapping) ---
 # Which tenders each role may accept when settling a bill. "*" == all tenders.
 # Captains take digital payments (UPI / gateway) tableside; cash is counted and
@@ -257,6 +310,7 @@ ROLE_TENDERS = {
     ROLE_FINANCE: "*",
     ROLE_REST_MGR: "*",
     ROLE_CASHIER: "*",
+    ROLE_HOTEL_MGR: "*",
     ROLE_FRONT_OFFICE: "*",
     ROLE_CAPTAIN: ["UPI", "Gateway"],
     ROLE_BAR_CAPTAIN: ["UPI", "Gateway"],

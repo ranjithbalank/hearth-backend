@@ -3,6 +3,7 @@ from django.test import TestCase
 from .constants import (
     ROLE_CASHIER,
     ROLE_FRONT_OFFICE,
+    ROLE_HOTEL_MGR,
     ROLE_HOUSEKEEPING,
     ROLE_MD,
     edition_entitlements,
@@ -38,9 +39,12 @@ class RbacTests(TestCase):
         self.assertFalse(role_can_access(ROLE_CASHIER, "inventory"))
         self.assertFalse(role_can_access(ROLE_CASHIER, "folio"))
 
-    def test_kpi_dashboard_is_management_and_front_desk_only(self):
-        # The occupancy/ADR/RevPAR dashboard isn't for the kitchen or housekeeping.
-        self.assertTrue(role_can_access(ROLE_FRONT_OFFICE, "dashboard"))
+    def test_kpi_dashboard_is_management_only(self):
+        # The occupancy/ADR/RevPAR dashboard is Hotel Manager's, not the
+        # front desk floor role — same split as Restaurant Manager vs.
+        # Cashier/Captain on the F&B side.
+        self.assertTrue(role_can_access(ROLE_HOTEL_MGR, "dashboard"))
+        self.assertFalse(role_can_access(ROLE_FRONT_OFFICE, "dashboard"))
         self.assertFalse(role_can_access(ROLE_HOUSEKEEPING, "dashboard"))
         self.assertFalse(role_can_access(ROLE_CASHIER, "dashboard"))
 
