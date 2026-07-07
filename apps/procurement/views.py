@@ -5,6 +5,7 @@ from rest_framework.response import Response
 
 from apps.accounts.models import log_action
 from apps.accounts.permissions import (
+    AnyModuleViewSetMixin,
     ModuleViewSetMixin,
     resolve_active_branch,
     shared_or_visible,
@@ -65,8 +66,15 @@ class VendorViewSet(ModuleViewSetMixin, viewsets.ViewSet):
         ])
 
 
-class PurchaseOrderViewSet(ModuleViewSetMixin, viewsets.ViewSet):
-    module = "procurement"
+class PurchaseOrderViewSet(AnyModuleViewSetMixin, viewsets.ViewSet):
+    # Two doors into POs: the store side ("procurement" — Store Keeper,
+    # Restaurant Manager) and the payables side ("pomanage" — Finance, whose
+    # Purchase Orders screen gates on it and who sits in PO_APPROVER_ROLES).
+    # Gating on "procurement" alone left Finance a designated approver who
+    # could never actually reach the approve endpoint. Spend approval is
+    # still guarded by PO_APPROVER_ROLES inside approve() regardless of
+    # which module let the request in.
+    modules = ["procurement", "pomanage"]
 
     def list(self, request):
         # A PO is exclusive to the branch that raised it, not shared like a
