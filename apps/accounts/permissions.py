@@ -120,23 +120,67 @@ class AnyModuleViewSetMixin:
     modules = []
 
 
+def visible_branch_ids(request):
+    """Resolve which branch id(s) this request should see: "*" for every
+    branch (all-branch role with no specific header), or a concrete set
+    (one branch if X-Branch-Id was sent and allowed, otherwise every branch
+    the caller is assigned to)."""
+    allowed = user_branch_ids(request.user)
+    branch_id = resolve_active_branch(request)
+    if branch_id is not None:
+        return {branch_id}
+    return allowed
+
+
 class BranchScopedMixin:
-    """Filter a viewset's queryset to the caller's active branch.
+    """Filter a viewset's queryset to the caller's active branch — strictly:
+    every row must belong to that branch (see Room/Table/BarTable, where a
+    table always belongs to exactly one location).
 
     Mix in on top of ModuleViewSetMixin/AnyModuleViewSetMixin. The model must
-    have a `location` FK to `accounts.Branch` (see Room/Table/BarTable). If the
-    caller has all-branch access (Super Admin/MD/GM) and sends no X-Branch-Id,
-    every branch's rows are returned — that's the group-oversight view, not a
-    bug. A branch-restricted user with no valid X-Branch-Id sees nothing,
-    rather than silently leaking every branch's data.
+    have a `location` FK to `accounts.Branch`. If the caller has all-branch
+    access (Super Admin/MD/GM) and sends no X-Branch-Id, every branch's rows
+    are returned — that's the group-oversight view, not a bug. A
+    branch-restricted user with no valid X-Branch-Id sees nothing, rather
+    than silently leaking every branch's data.
+
+    For a model where a blank `location` means "shared by every branch"
+    instead (see Category/MenuItem), don't use this mixin — filter directly
+    with `visible_branch_ids()` and OR in the NULL-location rows.
     """
 
     def get_queryset(self):
         qs = super().get_queryset()
-        allowed = user_branch_ids(self.request.user)
-        branch_id = resolve_active_branch(self.request)
-        if branch_id is not None:
-            return qs.filter(location_id=branch_id)
-        if allowed == "*":
+        visible = visible_branch_ids(self.request)
+        if visible == "*":
             return qs
-        return qs.filter(location_id__in=allowed) if allowed else qs.none()
+        return qs.filter(location_id__in=visible) if visible else qs.none()
+
+
+class BranchUniqueFriendlyMixin:
+    """Turn the DB-level per-location uniqueness constraint's IntegrityError
+    into a clean 400 instead of a 500.
+
+    Pairs with `validators = []` on the serializer (see RoomSerializer):
+    DRF force-requires every field in a UniqueConstraint — including a
+    conditional one it can't actually reason about — which would wrongly
+    demand `location` on every create. Skipping DRF's auto-validator and
+    enforcing uniqueness at the DB level instead needs this to still fail
+    politely on a genuine duplicate.
+    """
+
+    duplicate_message = "That name already exists there."
+
+    def _save_or_400(self, serializer):
+        from django.db import IntegrityError
+        from rest_framework.exceptions import ValidationError
+        try:
+            serializer.save()
+        except IntegrityError:
+            raise ValidationError({"detail": self.duplicate_message})
+
+    def perform_create(self, serializer):
+        self._save_or_400(serializer)
+
+    def perform_update(self, serializer):
+        self._save_or_400(serializer)

@@ -60,7 +60,20 @@ class Room(models.Model):
 
     class Meta:
         ordering = ["branch", "number"]
-        unique_together = [("branch", "number")]
+        # `location` (the real branch) is nullable during the transition, so
+        # a plain unique_together on (location, branch, number) would let
+        # NULL-location rows collide (NULL != NULL in a SQL unique index) —
+        # weaker than the old (branch, number) guarantee for anyone who
+        # hasn't assigned locations yet. Two explicit constraints close that:
+        # the no-location case keeps the original guarantee unchanged, and
+        # once a location is set, two locations may freely reuse the same
+        # room-numbering scheme.
+        constraints = [
+            models.UniqueConstraint(fields=["branch", "number"], condition=models.Q(location__isnull=True),
+                                    name="unique_room_no_location"),
+            models.UniqueConstraint(fields=["location", "branch", "number"], condition=models.Q(location__isnull=False),
+                                    name="unique_room_with_location"),
+        ]
 
     def __str__(self):
         return f"{self.branch} {self.number}"

@@ -30,3 +30,9 @@ class RoomSerializer(serializers.ModelSerializer):
             "floor", "view", "smoking", "status", "status_label", "ooo_reason",
             "cleaning_requested", "cleaning_note", "is_sellable", "updated_at",
         ]
+        # DRF auto-forces every field in ANY UniqueConstraint to required=True,
+        # even a conditional one — it can't reason about `condition=`, so it
+        # would wrongly demand `location` on every create. The two constraints
+        # (see Room.Meta) still enforce uniqueness at the DB level; the
+        # viewset turns that IntegrityError into a clean 400 instead.
+        validators = []

@@ -79,6 +79,12 @@ class Category(models.Model):
     # kept out of the restaurant's category picker (Rice Bowls, Starters...)
     # so the two never get mixed, same separation as the menu items themselves.
     is_bar = models.BooleanField(default=False)
+    # Blank = shared across every branch (the common case). Set it to scope
+    # a category to one branch only — a Bhavani Road-only combo, say.
+    location = models.ForeignKey(
+        "accounts.Branch", null=True, blank=True, on_delete=models.SET_NULL,
+        related_name="categories",
+    )
 
     class Meta:
         ordering = ["sort_order", "name"]
@@ -124,6 +130,12 @@ class MenuItem(models.Model):
     approved_by = models.CharField(max_length=80, blank=True, default="")
     approved_at = models.DateTimeField(null=True, blank=True)
     reject_reason = models.CharField(max_length=200, blank=True, default="")
+    # Blank = on every branch's menu (the common case, and today's default
+    # behaviour unchanged). Set it to make a dish exclusive to one branch.
+    location = models.ForeignKey(
+        "accounts.Branch", null=True, blank=True, on_delete=models.SET_NULL,
+        related_name="menu_items",
+    )
 
     class Meta:
         ordering = ["category__sort_order", "name"]
@@ -262,6 +274,13 @@ class Order(models.Model):
 
     mode = models.CharField(max_length=12, choices=MODE_CHOICES, default=DINEIN)
     department = models.CharField(max_length=6, choices=DEPARTMENT_CHOICES, default=FOOD)
+    # Which branch rang this up — set at creation from the till's active
+    # branch (falls back to the table/bar table's own location when no
+    # branch header was sent). Drives both "which orders can this cashier
+    # see" and, eventually, per-branch invoice numbering.
+    location = models.ForeignKey(
+        "accounts.Branch", on_delete=models.SET_NULL, null=True, blank=True, related_name="orders"
+    )
     table = models.ForeignKey(
         Table, on_delete=models.SET_NULL, null=True, blank=True, related_name="orders"
     )

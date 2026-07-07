@@ -22,6 +22,11 @@ class TableSerializer(serializers.ModelSerializer):
     class Meta:
         model = Table
         fields = ["id", "name", "section", "seats", "shape", "status", "status_label", "location"]
+        # See Room.Meta / RoomSerializer: DRF force-requires every field in a
+        # UniqueConstraint, which would wrongly demand `location` on every
+        # create. The DB-level constraint still enforces it; the viewset
+        # turns the resulting IntegrityError into a clean 400.
+        validators = []
 
 
 class BarTableSerializer(serializers.ModelSerializer):
@@ -30,12 +35,13 @@ class BarTableSerializer(serializers.ModelSerializer):
     class Meta:
         model = BarTable
         fields = ["id", "name", "section", "seats", "shape", "status", "status_label", "location"]
+        validators = []
 
 
 class CategorySerializer(serializers.ModelSerializer):
     class Meta:
         model = Category
-        fields = ["id", "name", "sort_order", "is_bar"]
+        fields = ["id", "name", "sort_order", "is_bar", "location"]
 
 
 class VariantSerializer(serializers.ModelSerializer):
@@ -69,7 +75,7 @@ class MenuItemSerializer(serializers.ModelSerializer):
         fields = [
             "id", "name", "short_code", "category", "category_name", "price",
             "gst_rate", "diet", "station", "bar_menu", "available", "variants", "addon_groups",
-            "channel_prices", "image",
+            "channel_prices", "image", "location",
         ]
 
     def get_channel_prices(self, obj):
@@ -106,8 +112,9 @@ class OrderSerializer(serializers.ModelSerializer):
             "status", "status_label", "folio", "kot_no", "lines", "totals", "created_at",
             "discount_kind", "discount_value", "discount_reason", "coupon_code",
             "loyalty_redeemed", "source_platform", "external_ref", "online_status", "prepaid",
-            "brand", "token_no", "client_uuid",
+            "brand", "token_no", "client_uuid", "location",
         ]
+        read_only_fields = ["location"]  # set server-side from the till's active branch
 
     def get_totals(self, obj):
         t = obj.totals()
