@@ -6,12 +6,14 @@ from rest_framework.views import APIView
 from rest_framework_simplejwt.views import TokenObtainPairView
 
 from .constants import ALL_MODULES, ROLE_ALLOW, edition_entitlements
-from .models import Entitlement, Property, User, log_action
+from .models import Branch, Entitlement, Property, User, UserBranchAccess, log_action
 from .permissions import ModulePermission, ModuleViewSetMixin
 from .serializers import (
+    BranchSerializer,
     EntitlementSerializer,
     HearthTokenSerializer,
     PropertySerializer,
+    UserBranchAccessSerializer,
     UserSerializer,
 )
 
@@ -132,6 +134,55 @@ class UserViewSet(ModuleViewSetMixin, viewsets.ModelViewSet):
     module = "settings"
     queryset = User.objects.all().order_by("role", "username")
     serializer_class = UserSerializer
+
+
+class BranchViewSet(ModuleViewSetMixin, viewsets.ModelViewSet):
+    """Branch Master (BRD 5.1): the group's locations. Each carries its own
+    address/GSTIN and edition/entitlement flags — a branch can be
+    restaurant-only while another is hotel+restaurant."""
+
+    module = "branchmaster"
+    queryset = Branch.objects.select_related("property").all()
+    serializer_class = BranchSerializer
+
+    def perform_create(self, serializer):
+        branch = serializer.save(property=get_property())
+        log_action(self.request.user, "branch_create", entity="Branch", entity_id=branch.id,
+                   after={"name": branch.name, "code": branch.code})
+
+
+class UserBranchAccessViewSet(ModuleViewSetMixin, viewsets.ModelViewSet):
+    """Staff assignment: which branch a person operates in, and as what role
+    there. `?user=<id>` narrows to one person's assignments (the Users screen
+    calls it this way); unfiltered lists everyone's, for the Branch Master
+    screen's roster view."""
+
+    module = "settings"
+    serializer_class = UserBranchAccessSerializer
+
+    def get_queryset(self):
+        qs = UserBranchAccess.objects.select_related("branch", "user")
+        user_id = self.request.query_params.get("user")
+        if user_id:
+            qs = qs.filter(user_id=user_id)
+        branch_id = self.request.query_params.get("branch")
+        if branch_id:
+            qs = qs.filter(branch_id=branch_id)
+        return qs
+
+    def perform_create(self, serializer):
+        access = serializer.save()
+        log_action(self.request.user, "branch_access_grant", entity="UserBranchAccess",
+                   entity_id=access.id,
+                   after={"user": access.user.username, "branch": access.branch.code,
+                          "role": access.role})
+
+    def perform_destroy(self, instance):
+        log_action(self.request.user, "branch_access_revoke", entity="UserBranchAccess",
+                   entity_id=instance.id,
+                   before={"user": instance.user.username, "branch": instance.branch.code,
+                           "role": instance.role})
+        instance.delete()
 
 
 class MfaSetupView(APIView):

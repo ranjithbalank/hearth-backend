@@ -9,7 +9,12 @@ from rest_framework.views import APIView
 
 from apps.accounts.constants import ROLE_BAR_CAPTAIN, ROLE_BAR_CASHIER
 from apps.accounts.models import log_action
-from apps.accounts.permissions import AnyModuleViewSetMixin, ModuleViewSetMixin, active_entitlements
+from apps.accounts.permissions import (
+    AnyModuleViewSetMixin,
+    BranchScopedMixin,
+    ModuleViewSetMixin,
+    active_entitlements,
+)
 from apps.frontoffice import services as fo_services
 from apps.frontoffice.models import Folio, FolioLine, Settlement
 
@@ -91,7 +96,7 @@ def _billed_error(order):
     return None
 
 
-class TableViewSet(ModuleViewSetMixin, viewsets.ModelViewSet):
+class TableViewSet(BranchScopedMixin, ModuleViewSetMixin, viewsets.ModelViewSet):
     module = "pos"
     queryset = Table.objects.all()
     serializer_class = TableSerializer
@@ -101,7 +106,7 @@ class TableViewSet(ModuleViewSetMixin, viewsets.ModelViewSet):
         return super().list(request, *args, **kwargs)
 
 
-class BarTableViewSet(ModuleViewSetMixin, viewsets.ModelViewSet):
+class BarTableViewSet(BranchScopedMixin, ModuleViewSetMixin, viewsets.ModelViewSet):
     """The bar's own floor plan — separate master from the restaurant's
     Table Master (spec: bar runs as its own operation)."""
 

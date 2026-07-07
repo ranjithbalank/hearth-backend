@@ -21,7 +21,7 @@ class TableSerializer(serializers.ModelSerializer):
 
     class Meta:
         model = Table
-        fields = ["id", "name", "section", "seats", "shape", "status", "status_label"]
+        fields = ["id", "name", "section", "seats", "shape", "status", "status_label", "location"]
 
 
 class BarTableSerializer(serializers.ModelSerializer):
@@ -29,7 +29,7 @@ class BarTableSerializer(serializers.ModelSerializer):
 
     class Meta:
         model = BarTable
-        fields = ["id", "name", "section", "seats", "shape", "status", "status_label"]
+        fields = ["id", "name", "section", "seats", "shape", "status", "status_label", "location"]
 
 
 class CategorySerializer(serializers.ModelSerializer):

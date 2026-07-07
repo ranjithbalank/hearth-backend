@@ -3,7 +3,7 @@ from rest_framework.decorators import action
 from rest_framework.response import Response
 
 from apps.accounts.models import log_action
-from apps.accounts.permissions import ModuleViewSetMixin
+from apps.accounts.permissions import BranchScopedMixin, ModuleViewSetMixin
 
 from .models import RatePlan, Room, RoomType
 from .serializers import RatePlanSerializer, RoomSerializer, RoomTypeSerializer
@@ -21,7 +21,7 @@ class RatePlanViewSet(ModuleViewSetMixin, viewsets.ModelViewSet):
     serializer_class = RatePlanSerializer
 
 
-class RoomViewSet(ModuleViewSetMixin, viewsets.ModelViewSet):
+class RoomViewSet(BranchScopedMixin, ModuleViewSetMixin, viewsets.ModelViewSet):
     """Live room grid + status updates (BRD 5.1 / 5.2).
 
     Read access is shared by several modules, so we gate on `livegrid` (hms).

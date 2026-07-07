@@ -58,7 +58,7 @@ ALL_MODULES = [
     "booking", "pos", "barpos", "inventory", "procurement", "pomanage", "matreq", "recipes",
     "accounting", "tax", "gstmaster", "roommaster", "tablemaster", "menumaster",
     "employees", "roles", "customers", "vendors", "suppliers", "hr", "engineering",
-    "crm", "notifications", "reports", "settings", "cateringmaster",
+    "crm", "notifications", "reports", "settings", "cateringmaster", "branchmaster",
 ]
 
 # "*" == full access. Otherwise an explicit allow-list of module keys.
@@ -74,7 +74,7 @@ ROLE_ALLOW = {
     # Can still raise a general-supplies indent (office stationery etc.).
     ROLE_ADMIN: [
         "dashboard", "settings", "roles", "employees", "roommaster",
-        "tablemaster", "menumaster", "gstmaster", "cateringmaster",
+        "tablemaster", "menumaster", "gstmaster", "cateringmaster", "branchmaster",
         "customers", "vendors", "suppliers", "notifications", "matreq",
     ],
     # CEO — executive oversight, read-heavy: dashboards, reports, revenue
