@@ -150,6 +150,17 @@ class BranchViewSet(ModuleViewSetMixin, viewsets.ModelViewSet):
         log_action(self.request.user, "branch_create", entity="Branch", entity_id=branch.id,
                    after={"name": branch.name, "code": branch.code})
 
+    def perform_destroy(self, instance):
+        from django.db.models import ProtectedError
+        from rest_framework.exceptions import ValidationError
+        try:
+            instance.delete()
+        except ProtectedError:
+            raise ValidationError({
+                "detail": f"{instance.name} still has rooms or tables assigned to it — "
+                          "move or remove those before deleting the branch.",
+            })
+
 
 class UserBranchAccessViewSet(ModuleViewSetMixin, viewsets.ModelViewSet):
     """Staff assignment: which branch a person operates in, and as what role
