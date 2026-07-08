@@ -26,9 +26,10 @@ def _m(v):
 
 
 def build_beo_pdf(event, property_name):
+    ref = event.beo_no or f"BEO-{event.id}"
     buf = io.BytesIO()
     doc = SimpleDocTemplate(buf, pagesize=A4, topMargin=16 * mm, bottomMargin=16 * mm,
-                            leftMargin=16 * mm, rightMargin=16 * mm, title=f"BEO-{event.id}")
+                            leftMargin=16 * mm, rightMargin=16 * mm, title=ref)
     ss = getSampleStyleSheet()
     brand = ParagraphStyle("b", parent=ss["Title"], fontSize=20, textColor=PINE, spaceAfter=0)
     docr = ParagraphStyle("d", parent=ss["Normal"], alignment=2, fontSize=13)
@@ -36,7 +37,7 @@ def build_beo_pdf(event, property_name):
     story = []
     header = Table([[
         Paragraph(f"{property_name}<br/><font size=8 color='#8A8478'>Banquet &amp; Events</font>", brand),
-        Paragraph(f"<b>BANQUET EVENT ORDER</b><br/><font size=9 color='#8A8478'>BEO-{event.id} · "
+        Paragraph(f"<b>BANQUET EVENT ORDER</b><br/><font size=9 color='#8A8478'>{ref} · "
                   f"{event.status.upper()}</font>", docr),
     ]], colWidths=[100 * mm, 78 * mm])
     story += [header, Spacer(1, 4), HRFlowable(width="100%", thickness=2, color=PINE), Spacer(1, 10)]

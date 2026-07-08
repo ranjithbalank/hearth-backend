@@ -264,6 +264,9 @@ class Order(models.Model):
         Folio, on_delete=models.SET_NULL, null=True, blank=True, related_name="pos_orders"
     )
     kot_no = models.CharField(max_length=20, blank=True)
+    # Sequential bill/receipt number, assigned once the order first settles
+    # (see assign_bill_no) — regardless of which channel closes it.
+    bill_no = models.CharField(max_length=30, blank=True)
     # Kitchen Display status (BRD 5.13 / KDS): ""(none) | cooking | ready | served
     kitchen_status = models.CharField(max_length=12, blank=True, default="")
     # Online ordering & delivery (BRD 5.16)
@@ -298,6 +301,15 @@ class Order(models.Model):
 
     def __str__(self):
         return f"Order #{self.id} ({self.mode})"
+
+    def assign_bill_no(self):
+        """Idempotently assign the sequential bill number the first time this order settles."""
+        if not self.bill_no:
+            from apps.accounts.models import Property
+            from apps.accounts.numbering import next_document_number
+            prop = Property.objects.first()
+            self.bill_no = next_document_number(Order, "bill_no", prop.bill_prefix if prop else "BILL")
+        return self.bill_no
 
     def _subtotal(self):
         return sum((l.unit_price * l.qty for l in self.lines.all()), start=Decimal("0"))

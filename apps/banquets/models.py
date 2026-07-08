@@ -50,6 +50,8 @@ class Event(models.Model):
     nonveg_rate = models.DecimalField(max_digits=10, decimal_places=2, default=0, help_text="₹ per non-veg plate")
     # BEO prep status shown on the kitchen display (FR-BQT-004): "" | pending | ready
     beo_status = models.CharField(max_length=10, blank=True, default="")
+    # Sequential BEO document number, assigned once the event is first confirmed.
+    beo_no = models.CharField(max_length=30, blank=True)
     status = models.CharField(max_length=12, choices=STATUS_CHOICES, default=TENTATIVE)
     billed = models.BooleanField(default=False)
 

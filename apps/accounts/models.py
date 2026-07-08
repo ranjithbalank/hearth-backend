@@ -30,6 +30,13 @@ class Property(models.Model):
                                   help_text="extra letterhead lines (tagline, CIN, FSSAI…)")
     doc_footer = models.TextField(blank=True, default="",
                                   help_text="terms & conditions / bank details footer")
+    # Configurable prefixes for each document type's sequential number
+    # (PREFIX-YYYYMM-NNNNN — see apps/accounts/numbering.py).
+    invoice_prefix = models.CharField(max_length=12, default="HRT")
+    bill_prefix = models.CharField(max_length=12, default="BILL")
+    po_prefix = models.CharField(max_length=12, default="PO")
+    grn_prefix = models.CharField(max_length=12, default="GRN")
+    beo_prefix = models.CharField(max_length=12, default="BEO")
     currency = models.CharField(max_length=8, default="INR")
     # GST Master: with_gst (tax invoice) vs without_gst (bill of supply) — BRD 5.23.
     gst_billing_mode = models.CharField(max_length=12, default="with_gst")

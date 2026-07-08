@@ -61,6 +61,7 @@ class PropertySerializer(serializers.ModelSerializer):
             "gstin", "address", "phone", "logo", "doc_header", "doc_footer",
             "currency", "entitlement", "gst_billing_mode",
             "zomato_commission_pct", "swiggy_commission_pct",
+            "invoice_prefix", "bill_prefix", "po_prefix", "grn_prefix", "beo_prefix",
         ]
 
 
