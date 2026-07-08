@@ -94,8 +94,14 @@ class PurchaseOrderViewSet(AnyModuleViewSetMixin, viewsets.ViewSet):
         Rate defaults to the material's current purchase rate."""
         from decimal import Decimal, InvalidOperation
 
+        from apps.accounts.constants import PO_HANDLER_ROLES
         from apps.inventory.models import Ingredient
 
+        if getattr(request.user, "role", "") not in PO_HANDLER_ROLES:
+            return Response(
+                {"detail": "raising a purchase order is the store's job — Restaurant Manager or "
+                           "Store Keeper (Finance approves the spend once it's raised)"},
+                status=403)
         supplier = shared_or_visible(Supplier.objects.all(), request).filter(
             pk=request.data.get("supplier")).first()
         if not supplier:
@@ -144,6 +150,11 @@ class PurchaseOrderViewSet(AnyModuleViewSetMixin, viewsets.ViewSet):
     @action(detail=True, methods=["post"])
     def receive(self, request, pk=None):
         """Goods receipt: post each line's qty to stock and mark the PO received."""
+        from apps.accounts.constants import PO_HANDLER_ROLES
+        if getattr(request.user, "role", "") not in PO_HANDLER_ROLES:
+            return Response(
+                {"detail": "goods receipt is the store's job — Restaurant Manager or Store Keeper"},
+                status=403)
         po = shared_or_visible(PurchaseOrder.objects.all(), request).prefetch_related(
             "lines__ingredient").filter(pk=pk).first()
         if not po or po.status != PurchaseOrder.APPROVED:

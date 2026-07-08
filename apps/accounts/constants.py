@@ -25,6 +25,12 @@ ROLE_CAPTAIN = "Captain"
 ROLE_HOUSEKEEPING = "Housekeeping"
 ROLE_CHEF = "Chef / Kitchen"
 ROLE_STORE = "Store Keeper"
+# HR Manager — people operations: the staff roster, attendance/payroll and
+# the leave desk (types master, on-behalf entry, oversight). Leave is a
+# two-level approval: the department's own manager first (see
+# LEAVE_DEPARTMENT_APPROVERS), then HR gives the final sign-off that puts it
+# on the attendance/payroll record.
+ROLE_HR = "HR Manager"
 # Bar runs as its own operation, separate from the restaurant floor — its own
 # tables, its own login, never the restaurant POS (and vice versa). Mirrors
 # the restaurant's Cashier/Captain split: Bar Cashier handles cash at the bar
@@ -49,6 +55,7 @@ ROLE_CHOICES = [
     (ROLE_STORE, ROLE_STORE),
     (ROLE_BAR_CAPTAIN, ROLE_BAR_CAPTAIN),
     (ROLE_BAR_CASHIER, ROLE_BAR_CASHIER),
+    (ROLE_HR, ROLE_HR),
 ]
 
 # Module keys used across nav, RBAC and entitlement gating.
@@ -59,6 +66,9 @@ ALL_MODULES = [
     "accounting", "tax", "gstmaster", "roommaster", "tablemaster", "menumaster",
     "employees", "roles", "customers", "vendors", "suppliers", "hr", "engineering",
     "crm", "notifications", "reports", "settings", "cateringmaster", "branchmaster",
+    # leave is a shared service like matreq — every role can open its own
+    # leave desk (apply, balances, track); approvals are role-gated inside.
+    "leave",
 ]
 
 # "*" == full access. Otherwise an explicit allow-list of module keys.
@@ -75,7 +85,7 @@ ROLE_ALLOW = {
     ROLE_ADMIN: [
         "dashboard", "settings", "roles", "employees", "roommaster",
         "tablemaster", "menumaster", "gstmaster", "cateringmaster", "branchmaster",
-        "customers", "vendors", "suppliers", "notifications", "matreq",
+        "customers", "vendors", "suppliers", "notifications", "matreq", "leave",
     ],
     # CEO — executive oversight, read-heavy: dashboards, reports, revenue
     # strategy and CRM. No floor operations, no configuration.
@@ -83,7 +93,7 @@ ROLE_ALLOW = {
     # than the operational Dashboard — that's for the two sector managers.
     ROLE_CEO: [
         "execdashboard", "reports", "revenue", "channel",
-        "booking", "crm", "accounting", "tax", "hr", "notifications", "matreq",
+        "booking", "crm", "accounting", "tax", "hr", "notifications", "matreq", "leave",
     ],
     # Finance — books and statutory: accounting, tax/GST, AR (customers),
     # payables (vendors/suppliers/POs), payroll and reports. No floor ops.
@@ -94,7 +104,7 @@ ROLE_ALLOW = {
     ROLE_FINANCE: [
         "accounting", "tax", "gstmaster", "reports",
         "customers", "vendors", "suppliers", "pomanage", "hr", "notifications",
-        "matreq",
+        "matreq", "leave",
     ],
     # Restaurant Manager — runs the whole restaurant side: POS/KDS/online,
     # the store & supply chain (approves indents and POs), recipes and the
@@ -104,7 +114,7 @@ ROLE_ALLOW = {
     ROLE_REST_MGR: [
         "dashboard", "pos", "barpos", "kds", "online", "inventory", "procurement",
         "pomanage", "matreq", "recipes", "suppliers", "vendors",
-        "menumaster", "tablemaster", "reports", "notifications",
+        "menumaster", "tablemaster", "reports", "notifications", "leave",
     ],
     # Hotel Manager — the hotel-side counterpart to Restaurant Manager: runs
     # the hotel dashboard, oversees Front Desk's operations, and approves
@@ -114,7 +124,7 @@ ROLE_ALLOW = {
     ROLE_HOTEL_MGR: [
         "dashboard", "frontdesk", "checkin", "checkout", "livegrid", "folio",
         "reservations", "housekeeping", "banquets", "roommaster", "cateringmaster",
-        "customers", "reports", "matreq", "notifications",
+        "customers", "reports", "matreq", "notifications", "leave",
     ],
     # Front Office / Reception — the guest-facing desk only: front desk, room
     # assignment & status, reservations, folios/cashiering, banquets and guest
@@ -126,45 +136,51 @@ ROLE_ALLOW = {
     ROLE_FRONT_OFFICE: [
         "frontdesk", "checkin", "checkout", "livegrid", "folio",
         "reservations", "housekeeping", "banquets", "customers", "notifications",
-        "matreq",
+        "matreq", "leave",
     ],
     # F&B Cashier — POS & KOT; capped discounts; no rooms, no back-office.
     # Can raise indents for counter supplies; approval still routes elsewhere.
     ROLE_CASHIER: [
-        "pos", "kds", "online", "notifications", "matreq",
+        "pos", "kds", "online", "notifications", "matreq", "leave",
     ],
     # Captain / steward — tableside ordering on mobile: POS only, plus raising
     # a material request when the section runs short of something.
     # Settlement is tender-restricted (see ROLE_TENDERS).
     ROLE_CAPTAIN: [
-        "pos", "matreq", "notifications",
+        "pos", "matreq", "notifications", "leave",
     ],
     # Housekeeping — room status board, maintenance work orders, and indents
     # for its own supplies (linen, amenities, cleaning agents); also approves
     # Maintenance-department indents (it already owns the engineering module).
     ROLE_HOUSEKEEPING: [
-        "housekeeping", "livegrid", "engineering", "notifications", "matreq",
+        "housekeeping", "livegrid", "engineering", "notifications", "matreq", "leave",
     ],
     # Chef / Kitchen — kitchen display, recipes/BOM, kitchen stock and
     # material requests to the store. No sales, no purchasing.
     ROLE_CHEF: [
-        "kds", "recipes", "inventory", "matreq", "notifications",
+        "kds", "recipes", "inventory", "matreq", "notifications", "leave",
     ],
     # Store Keeper — stores & supply chain: stock, procurement, purchase
     # orders, material issue, supplier/vendor masters. No sales, no books.
     ROLE_STORE: [
         "inventory", "procurement", "pomanage", "matreq", "suppliers",
-        "vendors", "notifications",
+        "vendors", "notifications", "leave",
     ],
     # Bar Captain — runs the bar as its own desk: bar tables, bar tabs. Never
     # the restaurant POS/tables, and the restaurant floor never sees "barpos".
     ROLE_BAR_CAPTAIN: [
-        "barpos", "matreq", "notifications",
+        "barpos", "matreq", "notifications", "leave",
     ],
     # Bar Cashier — the bar counter's cash handler, same split as F&B Cashier
     # vs Captain on the restaurant side.
     ROLE_BAR_CASHIER: [
-        "barpos", "matreq", "notifications",
+        "barpos", "matreq", "notifications", "leave",
+    ],
+    # HR Manager — people operations: staff roster, attendance, payroll and
+    # the leave desk (types master, on-behalf requests, full oversight).
+    # No floor operations, no guest money, no RBAC config.
+    ROLE_HR: [
+        "hr", "employees", "leave", "matreq", "notifications",
     ],
 }
 
@@ -199,6 +215,15 @@ MODULE_ENTITLEMENT = {
 # Spending money (PO approval) is a manager's call; issuing held stock
 # (indent approval) is the store's call — never the requester's own.
 PO_APPROVER_ROLES = {ROLE_SUPER_ADMIN, ROLE_MD, ROLE_GM, ROLE_FINANCE, ROLE_REST_MGR}
+
+# Raising and receiving a PO are the buying side's job — Store Keeper and
+# Restaurant Manager physically deal with the goods. Finance approves the
+# spend but never originates or receives it — same "never both sides of a
+# handoff" rule as everywhere else (matreq, leave): without this, Finance
+# having the "procurement" module (needed just to see/approve POs) would
+# otherwise let Finance also raise a PO and receive goods against it,
+# nobody else in the loop.
+PO_HANDLER_ROLES = {ROLE_SUPER_ADMIN, ROLE_MD, ROLE_GM, ROLE_REST_MGR, ROLE_STORE}
 
 # Menu/recipe costing (plate cost, margin %) is ownership-level P&L information —
 # Chef and Restaurant Manager build and run recipes without needing to see it.
@@ -265,6 +290,53 @@ def role_can_request_department(role: str, department: str) -> bool:
 # Issuing approved stock is always the store's job — it's a physical handover
 # from the shelf, regardless of which department the indent was for.
 INDENT_ISSUER_ROLES = {ROLE_SUPER_ADMIN, ROLE_MD, ROLE_GM, ROLE_REST_MGR, ROLE_STORE}
+
+
+# --- Leave approvals (FR-HRM — same shape as DEPARTMENT_APPROVERS above) ---
+# Two-level flow: the employee's department manager approves first (they know
+# the roster — hotel-side departments the Hotel Manager, F&B-side the
+# Restaurant Manager), then HR gives the FINAL sign-off; only that final
+# approval writes the attendance marks that feed payroll. GM/MD/Super Admin
+# are universal override at both levels. A manager's own leave (or any
+# unmapped department) falls through to the universal approvers for the
+# first level; HR's own leave gets its final decision from a universal role
+# (nobody ever decides their own request at either level).
+LEAVE_DEPARTMENT_APPROVERS = {
+    "Kitchen": {ROLE_REST_MGR},
+    "Bar": {ROLE_REST_MGR},
+    "F&B": {ROLE_REST_MGR},
+    "Restaurant": {ROLE_REST_MGR},
+    "Housekeeping": {ROLE_HOTEL_MGR},
+    "Banquets": {ROLE_HOTEL_MGR},
+    "Front Office": {ROLE_HOTEL_MGR},
+    "Reservations": {ROLE_HOTEL_MGR},
+    "Maintenance": {ROLE_HOTEL_MGR},
+}
+UNIVERSAL_LEAVE_APPROVERS = {ROLE_SUPER_ADMIN, ROLE_MD, ROLE_GM}
+# Level 2 — the final sign-off after the department manager's approval.
+LEAVE_FINAL_APPROVERS = {ROLE_HR} | UNIVERSAL_LEAVE_APPROVERS
+# Full visibility of every request (mirror of INDENT_OVERSIGHT_ROLES):
+# HR runs the desk, CEO watches without any approval rights.
+LEAVE_OVERSIGHT_ROLES = UNIVERSAL_LEAVE_APPROVERS | {ROLE_HR, ROLE_CEO}
+# The leave-types master (quotas, paid/unpaid) is HR's configuration surface,
+# plus Admin (owns the other masters) and the universal roles.
+LEAVE_TYPE_MANAGER_ROLES = {ROLE_SUPER_ADMIN, ROLE_MD, ROLE_GM, ROLE_ADMIN, ROLE_HR}
+
+# Running / finalizing / paying a payroll month moves real money — HR runs
+# it, Finance pays it, GM/MD/Super Admin override. CEO keeps the "hr" module
+# for oversight but stays read-only here.
+PAYROLL_MANAGER_ROLES = {ROLE_SUPER_ADMIN, ROLE_MD, ROLE_GM, ROLE_HR, ROLE_FINANCE}
+
+
+def leave_approvers_for(department: str) -> set:
+    """Who may approve a leave request from this department's staff."""
+    return LEAVE_DEPARTMENT_APPROVERS.get(department, set()) | UNIVERSAL_LEAVE_APPROVERS
+
+
+def can_enter_leave_on_behalf(role: str, department: str) -> bool:
+    """HR, the department's own approver, or a universal role may file a
+    request for an employee without a login (kitchen helpers, cleaners)."""
+    return role == ROLE_HR or role in leave_approvers_for(department)
 
 # Marking food ready on the KDS is the kitchen's alone (chef + managers).
 KITCHEN_ROLES = {ROLE_SUPER_ADMIN, ROLE_MD, ROLE_GM, ROLE_REST_MGR, ROLE_CHEF}

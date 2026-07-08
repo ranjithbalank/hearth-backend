@@ -22,6 +22,7 @@ from apps.accounts.constants import (
     ROLE_GM,
     ROLE_HOTEL_MGR,
     ROLE_HOUSEKEEPING,
+    ROLE_HR,
     ROLE_MD,
     ROLE_REST_MGR,
     ROLE_STORE,
@@ -31,7 +32,7 @@ from apps.accounts.models import Entitlement, Property, User
 from apps.banquets.models import Event, FunctionSpace
 from apps.channel.models import Channel, ChannelRate
 from apps.crm.models import Customer
-from apps.hr.models import Employee
+from apps.hr.models import Employee, LeaveType
 from apps.inventory.models import Ingredient
 from apps.matreq.models import MaterialRequest, MaterialRequestLine
 from apps.housekeeping.models import LostFoundItem
@@ -70,7 +71,7 @@ class Command(BaseCommand):
         self._activity()
         self.stdout.write(self.style.SUCCESS(
             f"Done. Property '{prop.name}' [{prop.edition}]. "
-            f"Logins: md / gm / frontoffice / cashier / housekeeping (pwd: {PASSWORD})"
+            f"Logins: md / gm / frontoffice / cashier / housekeeping / hr (pwd: {PASSWORD})"
         ))
 
     def _property(self):
@@ -106,6 +107,7 @@ class Command(BaseCommand):
             ("store", "Mani", "Velu", ROLE_STORE, False),
             ("barcaptain", "Deepak", "Shetty", ROLE_BAR_CAPTAIN, False),
             ("barcashier", "Nisha", "Kamath", ROLE_BAR_CASHIER, False),
+            ("hr", "Kavya", "Raman", ROLE_HR, False),
         ]
         # Per-user discount caps + manager passcodes (BRD FR-USR-004/006).
         caps = {
@@ -458,17 +460,54 @@ class Command(BaseCommand):
                                  status=Event.TENTATIVE)
 
     def _hr(self):
-        if Employee.objects.exists():
-            return
         staff = [
-            ("Anil Kumar", "Front Office", "Front Office Manager", ["M","M","M","O","E","E","M"]),
-            ("Sunita Pal", "Housekeeping", "HK Supervisor", ["M","M","M","M","O","M","M"]),
-            ("Priya Nair", "F&B", "Cashier", ["E","E","O","E","E","N","N"]),
-            ("Ravi Shah", "Kitchen", "Sous Chef", ["M","O","M","M","M","M","O"]),
-            ("Deepa Iyer", "Reservations", "Reservations Exec", ["M","M","M","M","M","O","O"]),
+            ("Anil Kumar", "Front Office", "Front Office Manager", ["M","M","M","O","E","E","M"], 38000),
+            ("Sunita Pal", "Housekeeping", "HK Supervisor", ["M","M","M","M","O","M","M"], 20000),
+            ("Priya Nair", "F&B", "Cashier", ["E","E","O","E","E","N","N"], 24000),
+            ("Ravi Shah", "Kitchen", "Sous Chef", ["M","O","M","M","M","M","O"], 32000),
+            ("Deepa Iyer", "Reservations", "Reservations Exec", ["M","M","M","M","M","O","O"], 26000),
+            ("Kavya Raman", "Administration", "HR Manager", ["M","M","M","M","M","O","O"], 35000),
         ]
-        for name, dept, role, shifts in staff:
-            Employee.objects.create(name=name, department=dept, role=role, shifts=shifts)
+        # Per-record idempotent: each demo staffer is created if missing
+        # (new hires like the HR Manager appear on old databases too), and
+        # a 0 salary from an older seed is backfilled so the payroll demo
+        # has real numbers. Never touches an edited salary.
+        for name, dept, role, shifts, salary in staff:
+            _, created = Employee.objects.get_or_create(name=name, defaults={
+                "department": dept, "role": role, "shifts": shifts,
+                "monthly_salary": salary})
+            if not created:
+                Employee.objects.filter(name=name, monthly_salary=0).update(monthly_salary=salary)
+        # Casual labour on day rates — off the statutory rolls (no PF/ESI/PT),
+        # paid rate × attendance days.
+        casuals = [
+            ("Murugan V", "Kitchen", "Kitchen Helper", ["M","M","M","M","M","M","O"], 700),
+            ("Selvi K", "Housekeeping", "Cleaner", ["M","M","O","M","M","M","M"], 600),
+        ]
+        for name, dept, role, shifts, rate in casuals:
+            Employee.objects.get_or_create(name=name, defaults={
+                "department": dept, "role": role, "shifts": shifts,
+                "wage_type": Employee.DAILY, "daily_rate": rate, "statutory": False})
+        # Link staff records to their logins so self-service leave works
+        # (apply, balances) — matched by name, idempotent.
+        links = {"Anil Kumar": "frontoffice", "Sunita Pal": "housekeeping",
+                 "Priya Nair": "cashier", "Kavya Raman": "hr"}
+        for emp_name, username in links.items():
+            emp = Employee.objects.filter(name=emp_name, user__isnull=True).first()
+            user = User.objects.filter(username=username, employee_record__isnull=True).first()
+            if emp and user:
+                emp.user = user
+                emp.save(update_fields=["user"])
+        # Leave types (FR-HRM): standard Indian set; quota 0 = uncapped.
+        if not LeaveType.objects.exists():
+            for name, quota, paid, carry in [
+                ("Casual Leave", 12, True, False),
+                ("Sick Leave", 12, True, False),
+                ("Earned Leave", 15, True, True),
+                ("Loss of Pay", 0, False, False),
+            ]:
+                LeaveType.objects.create(name=name, annual_quota=quota,
+                                         is_paid=paid, carry_forward=carry)
         if not LostFoundItem.objects.exists():
             LostFoundItem.objects.create(description="Black umbrella", location="Lobby", handler="Anil Kumar")
             LostFoundItem.objects.create(description="Phone charger", location="Room 204", handler="Sunita Pal")

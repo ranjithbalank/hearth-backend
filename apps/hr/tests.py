@@ -37,4 +37,8 @@ class AttendancePayrollTests(TestCase):
         r = self.client.get(reverse("hr-payroll") + "?month=2026-07")
         row = r.data["rows"][0]
         self.assertEqual(row["payable_days"], "15.5")
-        self.assertEqual(row["payable"], "15000.00")  # 30000 × 15.5/31
+        self.assertEqual(row["gross_earned"], "15000.00")  # 30000 × 15.5/31
+        # payable is now NET of statutory deductions (PF 12% of the 7,500
+        # earned basic = 900; no ESI above the 21k gross ceiling; no PT
+        # under 21k earned) — see payroll.compute_payslip.
+        self.assertEqual(row["payable"], "14100.00")

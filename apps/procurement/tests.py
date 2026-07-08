@@ -74,6 +74,23 @@ class ProcurementApiTests(TestCase):
         self.ing.refresh_from_db()
         self.assertEqual(self.ing.current_stock, Decimal("15.000"))  # 10 + 5
 
+    def test_finance_approves_but_never_creates_or_receives(self):
+        """Finance reaches POs via the "pomanage" door (AnyModuleViewSetMixin)
+        and sits in PO_APPROVER_ROLES — but must never be able to raise or
+        receive a PO itself (PO_HANDLER_ROLES), or approval stops meaning
+        anything: the same role would be both sides of the spend decision."""
+        finance = APIClient()
+        finance.force_authenticate(User.objects.create_user(
+            username="financepo", password="Tk9$mZ2pQw!7", role="Finance"))
+        r = finance.post("/api/purchase-orders/", {
+            "supplier": self.sup.id,
+            "lines": [{"ingredient": self.ing.id, "qty": "5", "rate": "80"}],
+        }, format="json")
+        self.assertEqual(r.status_code, 403)
+        # But Finance CAN approve one someone else raised.
+        self.assertEqual(finance.post(f"/api/purchase-orders/{self.po.id}/approve/").status_code, 200)
+        self.assertEqual(finance.post(f"/api/purchase-orders/{self.po.id}/receive/").status_code, 403)
+
     def test_grn_recosts_material_weighted_average(self):
         """Receiving at a new rate re-costs held stock: (10 kg @60 + 40 kg @90)/50 = 84."""
         self.ing.unit_cost = Decimal("60")

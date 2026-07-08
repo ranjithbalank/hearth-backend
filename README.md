@@ -16,7 +16,8 @@ python manage.py seed_demo    # demo property, menu, users
 python manage.py runserver 8010
 ```
 
-Demo logins (password `hearth123`): `md`, `gm`, `frontoffice`, `cashier`, `captain`, `housekeeping`.
+Demo logins (password `hearth123`): `md`, `gm`, `frontoffice`, `cashier`, `captain`, `housekeeping`, `hr`,
+`hotelmanager`, `restmanager`.
 
 - SQLite by default; set `DATABASE_URL` for PostgreSQL (see `hearth/settings/`).
 - Set a real `SECRET_KEY` in production (`hearth/settings/prod.py`).
