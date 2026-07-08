@@ -18,7 +18,7 @@ from .models import GoodsReceipt, PurchaseOrder, PurchaseOrderLine, Supplier, Ve
 
 def _po_dict(po):
     return {
-        "id": po.id, "supplier": po.supplier.name, "status": po.status,
+        "id": po.id, "po_no": po.po_no, "supplier": po.supplier.name, "status": po.status,
         "location": po.location_id, "location_name": po.location.name if po.location_id else None,
         "total": str(po.total), "created_at": po.created_at,
         "lines": [
@@ -124,7 +124,12 @@ class PurchaseOrderViewSet(AnyModuleViewSetMixin, viewsets.ViewSet):
                 return Response({"detail": "quantities must be positive"}, status=400)
             parsed.append((ing, qty, rate))
         with transaction.atomic():
+            from apps.accounts.models import Property
+            from apps.accounts.numbering import next_document_number
             po = PurchaseOrder.objects.create(supplier=supplier, location_id=_requester_branch(request))
+            prop = Property.objects.first()
+            po.po_no = next_document_number(PurchaseOrder, "po_no", prop.po_prefix if prop else "PO")
+            po.save(update_fields=["po_no"])
             for ing, qty, rate in parsed:
                 PurchaseOrderLine.objects.create(purchase_order=po, ingredient=ing,
                                                  qty=qty, rate=rate)
@@ -160,7 +165,12 @@ class PurchaseOrderViewSet(AnyModuleViewSetMixin, viewsets.ViewSet):
         if not po or po.status != PurchaseOrder.APPROVED:
             return Response({"detail": "PO must be approved before receipt"}, status=400)
         with transaction.atomic():
+            from apps.accounts.models import Property
+            from apps.accounts.numbering import next_document_number
             grn = GoodsReceipt.objects.create(purchase_order=po, note=request.data.get("note", ""))
+            prop = Property.objects.first()
+            grn.grn_no = next_document_number(GoodsReceipt, "grn_no", prop.grn_prefix if prop else "GRN")
+            grn.save(update_fields=["grn_no"])
             for line in po.lines.all():
                 outstanding = line.qty - line.received_qty
                 if outstanding <= 0:
@@ -198,7 +208,8 @@ class GoodsReceiptViewSet(ModuleViewSetMixin, viewsets.ViewSet):
             request, field="purchase_order__location",
         )
         return Response([
-            {"id": g.id, "po": g.purchase_order_id, "supplier": g.purchase_order.supplier.name,
+            {"id": g.id, "grn_no": g.grn_no, "po": g.purchase_order_id,
+             "po_no": g.purchase_order.po_no, "supplier": g.purchase_order.supplier.name,
              "note": g.note, "created_at": g.created_at}
             for g in qs[:30]
         ])

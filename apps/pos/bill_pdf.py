@@ -29,7 +29,7 @@ def build_bill_pdf(order, property_name, doc_footer=""):
     # A slim receipt page.
     doc = SimpleDocTemplate(buf, pagesize=(80 * mm, 200 * mm), topMargin=8 * mm,
                             bottomMargin=8 * mm, leftMargin=6 * mm, rightMargin=6 * mm,
-                            title=f"Bill {order.kot_no or order.id}")
+                            title=f"Bill {order.bill_no or order.kot_no or order.id}")
     ss = getSampleStyleSheet()
     center = ParagraphStyle("c", parent=ss["Normal"], alignment=1)
     brand = ParagraphStyle("b", parent=center, fontSize=13, textColor=PINE, spaceAfter=2)
@@ -39,7 +39,7 @@ def build_bill_pdf(order, property_name, doc_footer=""):
     story = [
         Paragraph(property_name, brand),
         Paragraph(where, small),
-        Paragraph(f"{order.kot_no or ('#' + str(order.id))}", small),
+        Paragraph(f"{order.bill_no or order.kot_no or ('#' + str(order.id))}", small),
         Spacer(1, 4), HRFlowable(width="100%", thickness=1, color=PINE), Spacer(1, 4),
     ]
     rows = [["Item", "Qty", "Amt"]]

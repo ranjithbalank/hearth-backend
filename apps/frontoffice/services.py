@@ -6,7 +6,7 @@ These functions are the integration points referenced in the plan:
   - settle_folio / check_out -> multi-tender settle + room release
   - run_night_audit -> atomic, resumable day-end close
 """
-from datetime import date, timedelta
+from datetime import timedelta
 from decimal import Decimal
 
 from django.db import transaction
@@ -20,14 +20,10 @@ from .models import Folio, FolioLine, NightAuditRun, Settlement
 
 
 def _next_invoice_no():
-    last = Folio.objects.exclude(invoice_no="").order_by("-id").first()
-    seq = 1
-    if last and last.invoice_no.startswith("HRT-"):
-        try:
-            seq = int(last.invoice_no.split("-")[-1]) + 1
-        except ValueError:
-            seq = Folio.objects.exclude(invoice_no="").count() + 1
-    return f"HRT-{date.today():%Y%m}-{seq:05d}"
+    from apps.accounts.models import Property
+    from apps.accounts.numbering import next_document_number
+    prop = Property.objects.first()
+    return next_document_number(Folio, "invoice_no", prop.invoice_prefix if prop else "HRT")
 
 
 @transaction.atomic

@@ -74,10 +74,11 @@ class PurchaseOrder(models.Model):
         "accounts.Branch", null=True, blank=True, on_delete=models.SET_NULL, related_name="purchase_orders",
     )
     status = models.CharField(max_length=12, choices=STATUS_CHOICES, default=PENDING)
+    po_no = models.CharField(max_length=30, blank=True)
     created_at = models.DateTimeField(auto_now_add=True)
 
     def __str__(self):
-        return f"PO #{self.id} — {self.supplier.name} ({self.status})"
+        return f"{self.po_no or ('PO #' + str(self.id))} — {self.supplier.name} ({self.status})"
 
     @property
     def total(self):
@@ -100,10 +101,11 @@ class GoodsReceipt(models.Model):
 
     purchase_order = models.ForeignKey(PurchaseOrder, on_delete=models.PROTECT, related_name="grns")
     note = models.CharField(max_length=200, blank=True)
+    grn_no = models.CharField(max_length=30, blank=True)
     created_at = models.DateTimeField(auto_now_add=True)
 
     class Meta:
         ordering = ["-created_at"]
 
     def __str__(self):
-        return f"GRN for PO #{self.purchase_order_id}"
+        return self.grn_no or f"GRN for PO #{self.purchase_order_id}"
