@@ -4,7 +4,7 @@ from django.test import TestCase
 from django.urls import reverse
 from rest_framework.test import APIClient
 
-from apps.accounts.models import User
+from apps.accounts.models import Branch, Property, User, UserBranchAccess
 
 from .models import Event, FunctionSpace
 
@@ -120,3 +120,48 @@ class BanquetTests(TestCase):
         self.assertEqual(r["tax"]["tax"], "37800.00")          # 18% of 210000
         self.assertEqual(r["tax"]["total"], "247800.00")
         self.assertEqual(r["balance"], "197800.00")            # total − 50000 deposit
+
+
+class BanquetBranchScopingTests(TestCase):
+    """Confirmed gap from the 2026-07 security review (finding B-banquets):
+    the whole module had zero branch scoping. A Hotel Manager assigned only
+    to Branch A must never see, download BEOs for, or confirm/bill Branch
+    B's events by guessing an id."""
+
+    def setUp(self):
+        prop = Property.objects.create(name="Hearth Grand")
+        self.branch_a = Branch.objects.create(property=prop, name="Downtown", code="DTN")
+        self.branch_b = Branch.objects.create(property=prop, name="Airport", code="APT")
+        self.hall_a = FunctionSpace.objects.create(name="Ballroom A", capacity=200, location=self.branch_a)
+        self.hall_b = FunctionSpace.objects.create(name="Ballroom B", capacity=150, location=self.branch_b)
+        self.event_b = Event.objects.create(
+            space=self.hall_b, title="Branch B Wedding", event_date="2026-12-01",
+            covers=100, package_amount=Decimal("50000"))
+
+        self.mgr_a = User.objects.create_user(username="mgra", password="Tk9$mZ2pQw!7", role="Hotel Manager")
+        UserBranchAccess.objects.create(user=self.mgr_a, branch=self.branch_a, role="Hotel Manager")
+        self.client = APIClient()
+        self.client.force_authenticate(self.mgr_a)
+
+    def test_list_hides_other_branch(self):
+        r = self.client.get(reverse("banquet-list")).data
+        self.assertEqual([s["name"] for s in r["spaces"]], ["Ballroom A"])
+        self.assertEqual(r["events"], [])
+
+    def test_cannot_create_event_in_other_branchs_hall(self):
+        r = self.client.post(reverse("banquet-list"), {
+            "title": "Sneaky booking", "space": self.hall_b.id, "event_date": "2026-12-05",
+        }, format="json")
+        self.assertEqual(r.status_code, 400)
+
+    def test_cannot_beo_pdf_confirm_or_bill_other_branchs_event(self):
+        self.assertEqual(self.client.get(reverse("banquet-beo-pdf", args=[self.event_b.id])).status_code, 404)
+        self.assertEqual(self.client.post(reverse("banquet-confirm", args=[self.event_b.id])).status_code, 404)
+        self.assertEqual(self.client.post(reverse("banquet-bill", args=[self.event_b.id])).status_code, 404)
+        self.assertEqual(self.client.patch(reverse("banquet-detail", args=[self.event_b.id]),
+                                           {"covers": 999}, format="json").status_code, 404)
+
+    def test_own_branch_still_works(self):
+        e = Event.objects.create(space=self.hall_a, title="Branch A Party",
+                                 event_date="2026-12-10", covers=50, package_amount=Decimal("20000"))
+        self.assertEqual(self.client.post(reverse("banquet-confirm", args=[e.id])).status_code, 200)

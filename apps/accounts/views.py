@@ -216,6 +216,9 @@ class MfaVerifyView(APIView):
     """Confirm a TOTP code to enable MFA on the account."""
 
     permission_classes = [IsAuthenticated]
+    # A 6-digit TOTP is brute-forceable without a rate limit
+    # (security review 2026-07, finding B5).
+    throttle_scope = "sensitive"
 
     def post(self, request):
         from . import mfa
@@ -229,6 +232,7 @@ class MfaVerifyView(APIView):
 
 class MfaDisableView(APIView):
     permission_classes = [IsAuthenticated]
+    throttle_scope = "sensitive"
 
     def post(self, request):
         request.user.mfa_enabled = False

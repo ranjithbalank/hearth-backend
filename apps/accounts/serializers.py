@@ -32,6 +32,11 @@ class UserSerializer(serializers.ModelSerializer):
     allowed_modules = serializers.SerializerMethodField()
     branches = serializers.SerializerMethodField()
     password = serializers.CharField(write_only=True, required=False, allow_blank=True)
+    # A quick-login PIN has no business being readable over the API — same
+    # write-only treatment as password (security review 2026-07, finding B8).
+    # Settings' user list never displayed it (create-form value only), so
+    # this changes nothing visible.
+    passcode = serializers.CharField(write_only=True, required=False, allow_blank=True)
 
     class Meta:
         model = User

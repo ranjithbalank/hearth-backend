@@ -153,7 +153,11 @@ class MaterialRequestViewSet(ModuleViewSetMixin, viewsets.ViewSet):
         — a physical handover, regardless of which department it's for.
         """
         from apps.accounts.constants import indent_approvers_for, INDENT_ISSUER_ROLES
-        r = MaterialRequest.objects.prefetch_related("lines__ingredient").filter(pk=pk).first()
+        # Same branch scoping as list() — a manager at one branch must never
+        # approve/issue another branch's indent by guessing its id (security
+        # review 2026-07, finding B6).
+        qs = shared_or_visible(MaterialRequest.objects.prefetch_related("lines__ingredient"), request)
+        r = qs.filter(pk=pk).first()
         if not r:
             return Response({"detail": "not found"}, status=404)
         role = getattr(request.user, "role", "")

@@ -107,7 +107,8 @@ class HrViewSet(ModuleViewSetMixin, viewsets.ViewSet):
     def update(self, request, pk=None):
         """Edit a staff record — salary revision, phone, department move,
         Active/Inactive. Only sent fields change."""
-        e = Employee.objects.filter(pk=pk).first()
+        # Same branch scoping as list() (security review 2026-07, finding B7).
+        e = shared_or_visible(Employee.objects.all(), request, field="branch").filter(pk=pk).first()
         if not e:
             return Response({"detail": "not found"}, status=404)
         before = {"salary": str(e.monthly_salary), "department": e.department, "status": e.status}

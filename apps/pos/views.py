@@ -503,8 +503,9 @@ class KdsViewSet(ModuleViewSetMixin, viewsets.ViewSet):
         from apps.accounts.constants import KITCHEN_ROLES
         if getattr(request.user, "role", "") not in KITCHEN_ROLES:
             return Response({"detail": "only the kitchen marks food ready"}, status=403)
+        from apps.accounts.permissions import shared_or_visible
         from apps.banquets.models import Event as BqEvent
-        e = BqEvent.objects.filter(pk=pk).first()
+        e = shared_or_visible(BqEvent.objects.all(), request, field="space__location").filter(pk=pk).first()
         if not e:
             return Response({"detail": "not found"}, status=404)
         e.beo_status = "ready" if e.beo_status == "pending" else "done"
@@ -556,6 +557,16 @@ class OrderViewSet(AnyModuleViewSetMixin, viewsets.ModelViewSet):
     queryset = (Order.objects.prefetch_related("lines__menu_item")
                 .select_related("table", "bar_table").all())
     serializer_class = OrderSerializer
+    # Manager-override passcode and coupon/loyalty codes are brute-forceable
+    # if unthrottled (security review 2026-07, findings B3/B4) — scoped to
+    # just these actions so ordinary order-taking during a busy service
+    # never hits a rate limit.
+    _sensitive_actions = {"set_qty", "void", "apply_discount", "apply_coupon", "redeem_loyalty"}
+
+    def get_throttles(self):
+        if self.action in self._sensitive_actions:
+            self.throttle_scope = "sensitive"
+        return super().get_throttles()
 
     def get_queryset(self):
         from apps.accounts.rbac import can_access
