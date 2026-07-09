@@ -28,7 +28,7 @@ from apps.accounts.constants import (
     ROLE_STORE,
     ROLE_SUPER_ADMIN,
 )
-from apps.accounts.models import Entitlement, Property, User
+from apps.accounts.models import Branch, Entitlement, Property, User, UserBranchAccess
 from apps.banquets.models import Event, FunctionSpace
 from apps.channel.models import Channel, ChannelRate
 from apps.crm.models import Customer
@@ -69,6 +69,7 @@ class Command(BaseCommand):
         self._hr()
         self._masters()
         self._activity()
+        self._branch_access()
         self.stdout.write(self.style.SUCCESS(
             f"Done. Property '{prop.name}' [{prop.edition}]. "
             f"Logins: md / gm / frontoffice / cashier / housekeeping / hr (pwd: {PASSWORD})"
@@ -593,3 +594,47 @@ class Command(BaseCommand):
             deduct_for_newly_fired(o, agg_lines)
             Settlement.objects.create(tender="zomato (prepaid)", amount=o.totals()["total"],
                                       reference="zomato:ZOM-DEMO-1")
+
+    def _branch_access(self):
+        """Every demo login needs somewhere to actually operate (BUG found in
+        UAT 2026-07-09): Table/Room/BarTable use BranchScopedMixin, which —
+        by design (never silently leak another branch's data) — shows a
+        branch-restricted login NOTHING if it has zero UserBranchAccess rows,
+        even if the row it should see has no location at all. Universal roles
+        (Super Admin/MD/GM) were always fine since they bypass this
+        entirely; every other seeded role had no branch to stand in, so
+        Front Desk/POS/Housekeeping/etc. rendered empty for them.
+
+        Idempotent and additive only: reuses the "APT" branch if one already
+        exists (from real Branch Master use) instead of creating a
+        competing one, grants access only to users who have none yet, and
+        only backfills the *unassigned* Tables/Rooms/BarTables — anything
+        already tagged to a specific branch (via the Branch Master screen)
+        is left exactly as configured.
+        """
+        prop = Property.objects.first()
+        if not prop:
+            return
+        branch, _ = Branch.objects.get_or_create(
+            code="APT", defaults={
+                "property": prop, "name": "Hearth Grand - Airport",
+                "hms": True, "restaurant": True, "banquets": True, "rms": True,
+                "status": Branch.STATUS_ACTIVE,
+            })
+
+        for u in User.objects.exclude(role__in=[ROLE_SUPER_ADMIN, ROLE_MD, ROLE_GM]):
+            if not UserBranchAccess.objects.filter(user=u).exists():
+                UserBranchAccess.objects.create(user=u, branch=branch, role=u.role)
+
+        # Per-row, not a bulk .update(): ad-hoc Branch Master testing already
+        # left a handful of name collisions at this branch (e.g. two "B1" bar
+        # tables) — skip exactly those rather than failing the whole seed.
+        from django.db import IntegrityError, transaction as _txn
+        for model in (Table, Room, BarTable):
+            for obj in model.objects.filter(location__isnull=True):
+                try:
+                    with _txn.atomic():
+                        obj.location = branch
+                        obj.save(update_fields=["location"])
+                except IntegrityError:
+                    pass
