@@ -7,7 +7,8 @@ from rest_framework.permissions import AllowAny
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
-from apps.accounts.constants import ROLE_BAR_CAPTAIN, ROLE_BAR_CASHIER
+from apps.accounts.constants import ROLE_CAPTAIN, ROLE_CASHIER, ROLE_BAR_CAPTAIN, ROLE_BAR_CASHIER
+from apps.accounts.rbac import PROTECTED
 from apps.accounts.models import log_action
 from apps.accounts.permissions import (
     AnyModuleViewSetMixin,
@@ -46,6 +47,7 @@ from .serializers import (
     TableReservationSerializer,
     TableSerializer,
     TillSessionSerializer,
+    captain_on_leave_today,
 )
 
 
@@ -100,6 +102,8 @@ def _billed_error(order):
     return None
 
 
+
+
 class TableViewSet(BranchScopedMixin, BranchUniqueFriendlyMixin, ModuleViewSetMixin, viewsets.ModelViewSet):
     module = "pos"
     queryset = Table.objects.all()
@@ -109,6 +113,57 @@ class TableViewSet(BranchScopedMixin, BranchUniqueFriendlyMixin, ModuleViewSetMi
     def list(self, request, *args, **kwargs):
         refresh_reservation_holds()   # time-based holds without a scheduler
         return super().list(request, *args, **kwargs)
+
+    def perform_destroy(self, instance):
+        # Never delete a table mid-service — settle or void the running
+        # order first, then remove the table. (Order.table is SET_NULL, so
+        # deleting would otherwise silently orphan an active bill.)
+        if instance.orders.exclude(status__in=CLOSED_STATUSES).exists():
+            from rest_framework.exceptions import ValidationError
+            raise ValidationError({"detail": f"table {instance.name} has a running order — settle or void it before deleting the table"})
+        instance.delete()
+
+    @action(detail=False, methods=["get"])
+    def captains(self, request):
+        """Captain logins for one branch — lets the F&B Cashier build the
+        assignment list without needing Settings/Users access (that's gated
+        to the 'settings' module, which Cashiers never get)."""
+        from apps.accounts.models import User
+        from apps.accounts.models import UserBranchAccess
+        from datetime import date
+
+        location = request.query_params.get("location")
+        qs = User.objects.filter(role=ROLE_CAPTAIN, is_active=True)
+        if location:
+            today = date.today()
+            ids = [a.user_id for a in UserBranchAccess.objects.filter(branch_id=location) if a.is_active_on(today)]
+            qs = qs.filter(id__in=ids)
+        qs = qs.distinct().order_by("first_name", "username")
+        return Response([{"id": u.id, "name": u.get_full_name() or u.username} for u in qs])
+
+    @action(detail=True, methods=["post"])
+    def assign_captain(self, request, pk=None):
+        """Hand a table to a captain for the shift — the F&B Cashier runs the
+        floor and decides who's working which tables. Captains themselves
+        can't self-assign (assigned_captain is read-only on the main
+        serializer); send captain=null to clear an assignment."""
+        role = getattr(request.user, "role", "")
+        if role != ROLE_CASHIER and role not in PROTECTED:
+            return Response({"detail": "Only the F&B Cashier can assign tables to captains"}, status=403)
+        table = self.get_object()
+        captain_id = request.data.get("captain")
+        if captain_id is None:
+            table.assigned_captain = None
+        else:
+            from apps.accounts.models import User
+            captain = User.objects.filter(pk=captain_id, role=ROLE_CAPTAIN).first()
+            if not captain:
+                return Response({"detail": "Not a Captain — pick a valid captain login"}, status=400)
+            table.assigned_captain = captain
+        table.save(update_fields=["assigned_captain"])
+        log_action(request.user, "table_assign_captain", entity="Table", entity_id=table.id,
+                   after={"assigned_captain": captain_id})
+        return Response(TableSerializer(table).data)
 
 
 class BarTableViewSet(BranchScopedMixin, BranchUniqueFriendlyMixin, ModuleViewSetMixin, viewsets.ModelViewSet):
@@ -642,6 +697,15 @@ class OrderViewSet(AnyModuleViewSetMixin, viewsets.ModelViewSet):
             # Captains work the tables — takeaway/delivery/room are counter flows.
             if role == "Captain" and serializer.validated_data.get("mode", Order.DINEIN) != Order.DINEIN:
                 raise ValidationError({"detail": "captains take table orders — counter flows stay with the cashier"})
+            # Hard-assigned tables: once the F&B Cashier hands a table to a
+            # captain, only that captain can open orders on it — a table
+            # nobody's been assigned yet (assigned_captain is null) stays open.
+            # Exception: if that captain is on approved leave today, the
+            # table doesn't stay locked to someone who isn't even in —
+            # anyone can pick it up until the cashier reassigns it.
+            if (role == "Captain" and tbl and tbl.assigned_captain_id and tbl.assigned_captain_id != user.id
+                    and not captain_on_leave_today(tbl.assigned_captain)):
+                raise ValidationError({"detail": f"table {tbl.name} is assigned to another captain"})
             # A reserved table belongs to its booking: seat the reservation (which
             # releases the hold) before anyone can order on it.
             if tbl:

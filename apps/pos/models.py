@@ -21,6 +21,9 @@ class Table(models.Model):
     ]
 
     name = models.CharField(max_length=20)
+    # Free text, not a number — a restaurant's floor plan isn't always
+    # "1st/2nd": a lawn, terrace or poolside deck is a "floor" here too.
+    floor = models.CharField(max_length=40, blank=True, default="")
     section = models.CharField(max_length=40, default="Main")
     seats = models.PositiveSmallIntegerField(default=4)
     shape = models.CharField(max_length=20, default="square")
@@ -30,6 +33,11 @@ class Table(models.Model):
     location = models.ForeignKey(
         "accounts.Branch", null=True, blank=True, on_delete=models.PROTECT,
         related_name="tables", help_text="Which of the group's branches this table belongs to",
+    )
+    assigned_captain = models.ForeignKey(
+        "accounts.User", null=True, blank=True, on_delete=models.SET_NULL,
+        related_name="assigned_tables",
+        help_text="Captain this table is assigned to — set by the F&B Cashier running the floor",
     )
 
     class Meta:
