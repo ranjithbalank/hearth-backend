@@ -603,6 +603,18 @@ class MenuItemViewSet(AnyModuleViewSetMixin, viewsets.ModelViewSet):
             qs = qs.filter(bar_menu=True)
         return qs
 
+    def perform_destroy(self, instance):
+        # OrderLine.menu_item is on_delete=PROTECT — any item with order
+        # history (even fully settled, historical orders) can't be deleted
+        # outright. Turn that into a clean 400 instead of a raw 500.
+        from django.db.models import ProtectedError
+        try:
+            instance.delete()
+        except ProtectedError:
+            from rest_framework.exceptions import ValidationError
+            raise ValidationError(
+                {"detail": f"\"{instance.name}\" has order history and can't be deleted — mark it unavailable (86'd) instead"})
+
 
 class OrderViewSet(AnyModuleViewSetMixin, viewsets.ModelViewSet):
     # Shared by the restaurant floor ("pos") and the bar ("barpos") — which
