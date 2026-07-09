@@ -137,12 +137,20 @@ class HrViewSet(ModuleViewSetMixin, viewsets.ViewSet):
             e.has_allowances = bool(request.data["has_allowances"])
         if "shifts" in request.data and isinstance(request.data.get("shifts"), list):
             e.shifts = request.data["shifts"]
+        if "branch" in request.data:
+            branch_id = request.data.get("branch") or None
+            e.branch_id = branch_id
         e.save()
         log_action(request.user, "employee_update", entity="Employee", entity_id=e.id,
                    before=before,
                    after={"salary": str(e.monthly_salary), "department": e.department,
                           "status": e.status})
         return Response(_employee_dict(e))
+
+    # A plain ViewSet (not ModelViewSet) doesn't get partial_update for free —
+    # the router sends PATCH here and 405s without it. update() already only
+    # touches fields present in request.data, so it's partial by construction.
+    partial_update = update
 
     # --- Payroll (FR-HRM): attendance-driven, snapshotted per month ---
 
