@@ -5,3 +5,6 @@ db.sqlite3
 .env
 staticfiles/
 .pytest_cache/
+# COPY . . pulls in the full build context — without this, commit history/
+# metadata ends up in the image layers (security review 2026-07, finding I5).
+.git/

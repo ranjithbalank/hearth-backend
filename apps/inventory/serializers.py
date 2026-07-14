@@ -24,11 +24,16 @@ class IngredientSerializer(serializers.ModelSerializer):
     class Meta:
         model = Ingredient
         fields = [
-            "id", "code", "name", "unit", "category", "current_stock",
+            "id", "code", "name", "location", "unit", "category", "current_stock",
             "min_stock_level", "reorder_level", "unit_cost",
             "storage_location", "expiry_date", "below_par", "below_min",
         ]
         read_only_fields = ["code"]
+        # See Room/RoomSerializer: DRF force-requires every field in a
+        # UniqueConstraint, including this conditional one — the DB
+        # constraint still enforces it; the viewset turns a genuine
+        # duplicate's IntegrityError into a clean 400.
+        validators = []
 
     def to_representation(self, instance):
         """Chef's only reason to browse Inventory is picking ingredients for a

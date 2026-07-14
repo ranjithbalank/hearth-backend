@@ -15,6 +15,12 @@ class Folio(models.Model):
     reservation = models.OneToOneField(
         Reservation, on_delete=models.PROTECT, related_name="folio", null=True, blank=True
     )
+    # Which branch the bill belongs to — inherited from the reservation (or
+    # the assigned room) at check-in. Blank = legacy rows, visible to all.
+    location = models.ForeignKey(
+        "accounts.Branch", on_delete=models.SET_NULL, null=True, blank=True,
+        related_name="folios",
+    )
     guest_name = models.CharField(max_length=200)
     room = models.ForeignKey(
         Room, on_delete=models.SET_NULL, null=True, blank=True, related_name="folios"

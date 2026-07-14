@@ -16,12 +16,44 @@ from .models import (
 )
 
 
+def captain_on_leave_today(captain_user):
+    """A table assigned to a captain who's off today shouldn't stay locked
+    to them all day — anyone can pick it up until it's reassigned."""
+    if captain_user is None:
+        return False
+    from datetime import date
+
+    employee = getattr(captain_user, "employee_record", None)
+    if not employee:
+        return False
+    from apps.hr.models import LeaveRequest
+    today = date.today()
+    return employee.leave_requests.filter(
+        status=LeaveRequest.APPROVED, start_date__lte=today, end_date__gte=today,
+    ).exists()
+
+
 class TableSerializer(serializers.ModelSerializer):
     status_label = serializers.CharField(source="get_status_display", read_only=True)
+    assigned_captain_name = serializers.CharField(source="assigned_captain.get_full_name", read_only=True, default=None)
+    # Writable only through the dedicated `assign_captain` action, which is
+    # role-gated to F&B Cashier — generic create/update never touches this,
+    # otherwise any "pos"-module role (including Captain) could self-assign.
+    assigned_captain = serializers.PrimaryKeyRelatedField(read_only=True)
+    assigned_captain_on_leave = serializers.SerializerMethodField()
 
     class Meta:
         model = Table
-        fields = ["id", "name", "section", "seats", "shape", "status", "status_label"]
+        fields = ["id", "name", "floor", "section", "seats", "shape", "status", "status_label", "location",
+                  "assigned_captain", "assigned_captain_name", "assigned_captain_on_leave"]
+
+    def get_assigned_captain_on_leave(self, obj):
+        return captain_on_leave_today(obj.assigned_captain)
+        # See Room.Meta / RoomSerializer: DRF force-requires every field in a
+        # UniqueConstraint, which would wrongly demand `location` on every
+        # create. The DB-level constraint still enforces it; the viewset
+        # turns the resulting IntegrityError into a clean 400.
+        validators = []
 
 
 class BarTableSerializer(serializers.ModelSerializer):
@@ -29,13 +61,14 @@ class BarTableSerializer(serializers.ModelSerializer):
 
     class Meta:
         model = BarTable
-        fields = ["id", "name", "section", "seats", "shape", "status", "status_label"]
+        fields = ["id", "name", "section", "seats", "shape", "status", "status_label", "location"]
+        validators = []
 
 
 class CategorySerializer(serializers.ModelSerializer):
     class Meta:
         model = Category
-        fields = ["id", "name", "sort_order", "is_bar"]
+        fields = ["id", "name", "sort_order", "is_bar", "location"]
 
 
 class VariantSerializer(serializers.ModelSerializer):
@@ -69,7 +102,7 @@ class MenuItemSerializer(serializers.ModelSerializer):
         fields = [
             "id", "name", "short_code", "category", "category_name", "price",
             "gst_rate", "diet", "station", "bar_menu", "available", "variants", "addon_groups",
-            "channel_prices", "image",
+            "channel_prices", "image", "location",
         ]
 
     def get_channel_prices(self, obj):
@@ -106,8 +139,9 @@ class OrderSerializer(serializers.ModelSerializer):
             "status", "status_label", "folio", "kot_no", "bill_no", "lines", "totals", "created_at",
             "discount_kind", "discount_value", "discount_reason", "coupon_code",
             "loyalty_redeemed", "source_platform", "external_ref", "online_status", "prepaid",
-            "brand", "token_no", "client_uuid",
+            "brand", "token_no", "client_uuid", "location",
         ]
+        read_only_fields = ["location"]  # set server-side from the till's active branch
 
     def get_totals(self, obj):
         t = obj.totals()

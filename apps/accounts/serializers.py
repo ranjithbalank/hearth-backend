@@ -3,13 +3,40 @@ from rest_framework_simplejwt.serializers import TokenObtainPairSerializer
 
 from . import mfa
 from .constants import ROLE_ALLOW
-from .models import Entitlement, Property, User
+from .models import Branch, Entitlement, Property, User, UserBranchAccess
+
+
+class BranchSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = Branch
+        fields = [
+            "id", "name", "code", "address", "city", "state", "gstin",
+            "edition", "hms", "restaurant", "banquets", "rms",
+            "invoice_prefix", "status", "logo", "created_at",
+        ]
+
+
+class UserBranchAccessSerializer(serializers.ModelSerializer):
+    branch_name = serializers.CharField(source="branch.name", read_only=True)
+    branch_code = serializers.CharField(source="branch.code", read_only=True)
+
+    class Meta:
+        model = UserBranchAccess
+        fields = ["id", "user", "branch", "branch_name", "branch_code", "role",
+                  "start_date", "end_date", "created_at"]
+        read_only_fields = ["created_at"]
 
 
 class UserSerializer(serializers.ModelSerializer):
     name = serializers.SerializerMethodField()
     allowed_modules = serializers.SerializerMethodField()
+    branches = serializers.SerializerMethodField()
     password = serializers.CharField(write_only=True, required=False, allow_blank=True)
+    # A quick-login PIN has no business being readable over the API — same
+    # write-only treatment as password (security review 2026-07, finding B8).
+    # Settings' user list never displayed it (create-form value only), so
+    # this changes nothing visible.
+    passcode = serializers.CharField(write_only=True, required=False, allow_blank=True)
 
     class Meta:
         model = User
@@ -17,7 +44,7 @@ class UserSerializer(serializers.ModelSerializer):
             "id", "username", "name", "first_name", "last_name", "email",
             "role", "user_code", "phone", "passcode", "discount_cap_type",
             "discount_cap_value", "rights", "is_active", "allowed_modules",
-            "mfa_enabled", "password",
+            "mfa_enabled", "password", "branches",
         ]
 
     def get_name(self, obj):
@@ -26,6 +53,14 @@ class UserSerializer(serializers.ModelSerializer):
     def get_allowed_modules(self, obj):
         from .rbac import allowed_modules_for
         return allowed_modules_for(obj.role)
+
+    def get_branches(self, obj):
+        from .rbac import PROTECTED
+        if obj.role in PROTECTED:
+            return "*"
+        return UserBranchAccessSerializer(
+            obj.branch_access.select_related("branch").all(), many=True
+        ).data
 
     def create(self, validated_data):
         password = validated_data.pop("password", "") or ""

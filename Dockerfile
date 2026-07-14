@@ -16,6 +16,12 @@ RUN pip install --no-cache-dir -r requirements.txt
 
 COPY . .
 
+# Run as a dedicated non-root user, not root (security review 2026-07,
+# finding I1) — any future RCE-class bug is then confined to this user's
+# privileges instead of root-in-container.
+RUN useradd --create-home --shell /bin/bash appuser && chown -R appuser:appuser /app
+USER appuser
+
 # Collect static at build (WhiteNoise serves them)
 RUN SECRET_KEY=build-only DATABASE_URL=sqlite:////tmp/build.sqlite3 \
     python manage.py collectstatic --noinput || true

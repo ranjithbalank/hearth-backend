@@ -4,7 +4,12 @@ from rest_framework.decorators import action
 from rest_framework.response import Response
 
 from apps.accounts.models import log_action
-from apps.accounts.permissions import ModuleViewSetMixin
+from apps.accounts.permissions import (
+    ModuleViewSetMixin,
+    resolve_active_branch,
+    shared_or_visible,
+    visible_branch_ids,
+)
 from apps.inventory.models import apply_movement
 
 from .models import MaterialRequest
@@ -15,6 +20,7 @@ def _dict(r):
     return {
         "id": r.id, "department": r.department, "requested_by": r.requested_by,
         "status": r.status, "created_at": r.created_at,
+        "location": r.location_id, "location_name": r.location.name if r.location_id else None,
         "lines": [{"ingredient": l.ingredient.name, "qty": str(l.qty)} for l in r.lines.all()],
         # Who approves THIS department's indent — shown on the card so the
         # requester knows whose desk it's waiting on.
@@ -36,18 +42,25 @@ class MaterialRequestViewSet(ModuleViewSetMixin, viewsets.ViewSet):
         and issuers everywhere already, so instead of just their actionable
         subset they get the full oversight view — every department, every
         status (including already-issued history), across the whole property.
+        CEO gets that same full oversight view for visibility only — CEO
+        never appears in indent_approvers_for()/INDENT_ISSUER_ROLES, so the
+        advance() action below still rejects any approve/issue attempt from CEO.
         """
         from apps.accounts.constants import (
             INDENT_ISSUER_ROLES,
-            UNIVERSAL_INDENT_APPROVERS,
+            INDENT_OVERSIGHT_ROLES,
             indent_approvers_for,
         )
         role = getattr(request.user, "role", "")
         username = request.user.username
         qs = MaterialRequest.objects.prefetch_related("lines__ingredient")
+        # Same "mine + not-yet-branch-tagged" rule as POS orders — an
+        # indent raised before this feature existed doesn't vanish for
+        # anyone, but a new one at another branch stays out of view.
+        qs = shared_or_visible(qs, request)
         if request.query_params.get("view") == "mine":
             qs = qs.filter(requested_by=username)
-        elif role in UNIVERSAL_INDENT_APPROVERS:
+        elif role in INDENT_OVERSIGHT_ROLES:
             pass   # full oversight — every department, every status
         else:
             actionable_ids = [
@@ -66,9 +79,10 @@ class MaterialRequestViewSet(ModuleViewSetMixin, viewsets.ViewSet):
         this can't just proxy to /inventory/. No cost, no CRUD — just enough
         to pick an item and see what's in stock."""
         from apps.inventory.models import Ingredient
+        qs = shared_or_visible(Ingredient.objects.all(), request).order_by("name")
         return Response([
             {"id": i.id, "name": i.name, "unit": i.unit, "current_stock": str(i.current_stock)}
-            for i in Ingredient.objects.all().order_by("name")
+            for i in qs
         ])
 
     def create(self, request):
@@ -95,9 +109,10 @@ class MaterialRequestViewSet(ModuleViewSetMixin, viewsets.ViewSet):
         wanted = request.data.get("lines") or []
         if not wanted:
             return Response({"detail": "at least one material line is required"}, status=400)
+        ingredient_qs = shared_or_visible(Ingredient.objects.all(), request)
         parsed = []
         for w in wanted:
-            ing = Ingredient.objects.filter(pk=w.get("ingredient")).first()
+            ing = ingredient_qs.filter(pk=w.get("ingredient")).first()
             if not ing:
                 return Response({"detail": "unknown raw material on a line"}, status=400)
             try:
@@ -107,9 +122,18 @@ class MaterialRequestViewSet(ModuleViewSetMixin, viewsets.ViewSet):
             if qty <= 0:
                 return Response({"detail": "quantities must be positive"}, status=400)
             parsed.append((ing, qty))
+        # Same fallback as POS orders: the till's active branch if sent,
+        # else — since an indent has no table to infer from — the
+        # requester's own branch when they're only ever assigned to one.
+        request_location = resolve_active_branch(request)
+        if request_location is None:
+            visible = visible_branch_ids(request)
+            if isinstance(visible, set) and len(visible) == 1:
+                request_location = next(iter(visible))
         with transaction.atomic():
             r = MaterialRequest.objects.create(department=department,
-                                               requested_by=request.user.username)
+                                               requested_by=request.user.username,
+                                               location_id=request_location)
             for ing, qty in parsed:
                 MaterialRequestLine.objects.create(request=r, ingredient=ing, qty=qty)
         log_action(request.user, "indent_requested", entity="MaterialRequest", entity_id=r.id,
@@ -129,7 +153,11 @@ class MaterialRequestViewSet(ModuleViewSetMixin, viewsets.ViewSet):
         — a physical handover, regardless of which department it's for.
         """
         from apps.accounts.constants import indent_approvers_for, INDENT_ISSUER_ROLES
-        r = MaterialRequest.objects.prefetch_related("lines__ingredient").filter(pk=pk).first()
+        # Same branch scoping as list() — a manager at one branch must never
+        # approve/issue another branch's indent by guessing its id (security
+        # review 2026-07, finding B6).
+        qs = shared_or_visible(MaterialRequest.objects.prefetch_related("lines__ingredient"), request)
+        r = qs.filter(pk=pk).first()
         if not r:
             return Response({"detail": "not found"}, status=404)
         role = getattr(request.user, "role", "")

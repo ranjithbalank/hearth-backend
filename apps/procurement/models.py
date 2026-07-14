@@ -6,7 +6,13 @@ from apps.inventory.models import Ingredient
 
 
 class Supplier(models.Model):
-    name = models.CharField(max_length=160, unique=True)
+    # Blank location = a group-wide supplier every branch can buy from
+    # (today's behaviour, unchanged — most suppliers deliver to several
+    # locations). Set it for a genuinely local-only supplier.
+    name = models.CharField(max_length=160)
+    location = models.ForeignKey(
+        "accounts.Branch", null=True, blank=True, on_delete=models.SET_NULL, related_name="suppliers",
+    )
     gstin = models.CharField(max_length=20, blank=True)
     contact = models.CharField(max_length=120, blank=True)
     payment_terms = models.CharField(max_length=80, blank=True)
@@ -15,6 +21,16 @@ class Supplier(models.Model):
 
     class Meta:
         ordering = ["name"]
+        # Same two-constraint shape as Room/Ingredient: unscoped rows keep
+        # the old global-uniqueness guarantee; scoped rows are unique per
+        # branch instead, so two branches can each have their own "Metro
+        # Supplies" without colliding.
+        constraints = [
+            models.UniqueConstraint(fields=["name"], condition=models.Q(location__isnull=True),
+                                    name="unique_supplier_name_no_location"),
+            models.UniqueConstraint(fields=["location", "name"], condition=models.Q(location__isnull=False),
+                                    name="unique_supplier_name_with_location"),
+        ]
 
     def __str__(self):
         return self.name
@@ -23,7 +39,10 @@ class Supplier(models.Model):
 class Vendor(models.Model):
     """Service vendor (vs goods Supplier) — BRD prototype 'Vendors' master."""
 
-    name = models.CharField(max_length=160, unique=True)
+    name = models.CharField(max_length=160)
+    location = models.ForeignKey(
+        "accounts.Branch", null=True, blank=True, on_delete=models.SET_NULL, related_name="vendors",
+    )
     category = models.CharField(max_length=80, blank=True)
     contact = models.CharField(max_length=120, blank=True)
     payment_terms = models.CharField(max_length=80, blank=True)
@@ -31,6 +50,12 @@ class Vendor(models.Model):
 
     class Meta:
         ordering = ["name"]
+        constraints = [
+            models.UniqueConstraint(fields=["name"], condition=models.Q(location__isnull=True),
+                                    name="unique_vendor_name_no_location"),
+            models.UniqueConstraint(fields=["location", "name"], condition=models.Q(location__isnull=False),
+                                    name="unique_vendor_name_with_location"),
+        ]
 
     def __str__(self):
         return self.name
@@ -43,6 +68,11 @@ class PurchaseOrder(models.Model):
     STATUS_CHOICES = [(PENDING, "Pending"), (APPROVED, "Approved"), (RECEIVED, "Received")]
 
     supplier = models.ForeignKey(Supplier, on_delete=models.PROTECT, related_name="purchase_orders")
+    # Which branch this PO is for — set at creation the same way an indent
+    # is (active branch header, else the requester's own single branch).
+    location = models.ForeignKey(
+        "accounts.Branch", null=True, blank=True, on_delete=models.SET_NULL, related_name="purchase_orders",
+    )
     status = models.CharField(max_length=12, choices=STATUS_CHOICES, default=PENDING)
     po_no = models.CharField(max_length=30, blank=True)
     created_at = models.DateTimeField(auto_now_add=True)

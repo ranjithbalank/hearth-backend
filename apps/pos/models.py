@@ -21,15 +21,30 @@ class Table(models.Model):
     ]
 
     name = models.CharField(max_length=20)
+    # Free text, not a number — a restaurant's floor plan isn't always
+    # "1st/2nd": a lawn, terrace or poolside deck is a "floor" here too.
+    floor = models.CharField(max_length=40, blank=True, default="")
     section = models.CharField(max_length=40, default="Main")
     seats = models.PositiveSmallIntegerField(default=4)
     shape = models.CharField(max_length=20, default="square")
     status = models.CharField(max_length=12, choices=STATUS_CHOICES, default=FREE)
     qr_token = models.CharField(max_length=20, blank=True, default="", db_index=True,
                                 help_text="token embedded in the table QR for guest ordering")
+    location = models.ForeignKey(
+        "accounts.Branch", null=True, blank=True, on_delete=models.PROTECT,
+        related_name="tables", help_text="Which of the group's branches this table belongs to",
+    )
+    assigned_captain = models.ForeignKey(
+        "accounts.User", null=True, blank=True, on_delete=models.SET_NULL,
+        related_name="assigned_tables",
+        help_text="Captain this table is assigned to — set by the F&B Cashier running the floor",
+    )
 
     class Meta:
         ordering = ["section", "name"]
+        constraints = [
+            models.UniqueConstraint(fields=["location", "name"], name="unique_table_name_per_location"),
+        ]
 
     def __str__(self):
         return self.name
@@ -50,9 +65,16 @@ class BarTable(models.Model):
     seats = models.PositiveSmallIntegerField(default=4)
     shape = models.CharField(max_length=20, default="square")
     status = models.CharField(max_length=12, choices=STATUS_CHOICES, default=FREE)
+    location = models.ForeignKey(
+        "accounts.Branch", null=True, blank=True, on_delete=models.PROTECT,
+        related_name="bar_tables", help_text="Which of the group's branches this bar table belongs to",
+    )
 
     class Meta:
         ordering = ["section", "name"]
+        constraints = [
+            models.UniqueConstraint(fields=["location", "name"], name="unique_bartable_name_per_location"),
+        ]
 
     def __str__(self):
         return f"Bar: {self.name}"
@@ -65,6 +87,12 @@ class Category(models.Model):
     # kept out of the restaurant's category picker (Rice Bowls, Starters...)
     # so the two never get mixed, same separation as the menu items themselves.
     is_bar = models.BooleanField(default=False)
+    # Blank = shared across every branch (the common case). Set it to scope
+    # a category to one branch only — a Bhavani Road-only combo, say.
+    location = models.ForeignKey(
+        "accounts.Branch", null=True, blank=True, on_delete=models.SET_NULL,
+        related_name="categories",
+    )
 
     class Meta:
         ordering = ["sort_order", "name"]
@@ -110,6 +138,12 @@ class MenuItem(models.Model):
     approved_by = models.CharField(max_length=80, blank=True, default="")
     approved_at = models.DateTimeField(null=True, blank=True)
     reject_reason = models.CharField(max_length=200, blank=True, default="")
+    # Blank = on every branch's menu (the common case, and today's default
+    # behaviour unchanged). Set it to make a dish exclusive to one branch.
+    location = models.ForeignKey(
+        "accounts.Branch", null=True, blank=True, on_delete=models.SET_NULL,
+        related_name="menu_items",
+    )
 
     class Meta:
         ordering = ["category__sort_order", "name"]
@@ -248,6 +282,13 @@ class Order(models.Model):
 
     mode = models.CharField(max_length=12, choices=MODE_CHOICES, default=DINEIN)
     department = models.CharField(max_length=6, choices=DEPARTMENT_CHOICES, default=FOOD)
+    # Which branch rang this up — set at creation from the till's active
+    # branch (falls back to the table/bar table's own location when no
+    # branch header was sent). Drives both "which orders can this cashier
+    # see" and, eventually, per-branch invoice numbering.
+    location = models.ForeignKey(
+        "accounts.Branch", on_delete=models.SET_NULL, null=True, blank=True, related_name="orders"
+    )
     table = models.ForeignKey(
         Table, on_delete=models.SET_NULL, null=True, blank=True, related_name="orders"
     )

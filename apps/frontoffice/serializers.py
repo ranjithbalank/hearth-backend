@@ -42,8 +42,10 @@ class FolioSerializer(serializers.ModelSerializer):
             "routing", "opened_at", "settled_at", "invoice_no", "lines",
             "settlements", "charges_total", "paid_total", "balance",
             "guest_type", "company_name", "billing_mode", "effective_billing_mode",
-            "pending_charges", "projected_balance", "has_id_scan", "has_signature",
+            "pending_charges", "projected_balance", "location",
+            "has_id_scan", "has_signature",
         ]
+        read_only_fields = ["location"]  # inherited from the reservation/room at check-in
 
     def get_has_id_scan(self, obj):
         return bool(obj.id_scan)

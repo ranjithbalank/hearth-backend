@@ -6,7 +6,7 @@ from rest_framework.decorators import action
 from rest_framework.response import Response
 
 from apps.accounts.models import log_action
-from apps.accounts.permissions import ModuleViewSetMixin
+from apps.accounts.permissions import ModuleViewSetMixin, shared_or_visible
 from apps.tax import service as tax
 
 from .models import CateringRate, Event, FunctionSpace
@@ -71,14 +71,21 @@ class BanquetViewSet(ModuleViewSetMixin, viewsets.ViewSet):
     module = "banquets"
 
     def list(self, request):
-        spaces = [{"id": s.id, "name": s.name, "capacity": s.capacity}
-                  for s in FunctionSpace.objects.all()]
-        events = [_event_dict(e) for e in Event.objects.select_related("space")]
-        return Response({"spaces": spaces, "events": events})
+        # Banquets had no branch scoping anywhere in this module (security
+        # review 2026-07, finding B-banquets) — halls and their events now
+        # follow the same "mine + not-yet-tagged" rule as every other module.
+        spaces = shared_or_visible(FunctionSpace.objects.all(), request)
+        events = shared_or_visible(Event.objects.select_related("space"), request,
+                                   field="space__location")
+        return Response({
+            "spaces": [{"id": s.id, "name": s.name, "capacity": s.capacity} for s in spaces],
+            "events": [_event_dict(e) for e in events],
+        })
 
     def create(self, request):
         """Create an event booking for a walk-in enquiry (BRD FR-BQT-002/003)."""
-        space = FunctionSpace.objects.filter(pk=request.data.get("space")).first()
+        space = shared_or_visible(FunctionSpace.objects.all(), request).filter(
+            pk=request.data.get("space")).first()
         if not space:
             return Response({"detail": "function space required"}, status=400)
         event_date = request.data.get("event_date")
@@ -130,7 +137,7 @@ class BanquetViewSet(ModuleViewSetMixin, viewsets.ViewSet):
     def partial_update(self, request, pk=None):
         """Adjust an enquiry before it's billed — space, date/time, covers,
         catering & pricing (BRD FR-BQT-002). Billed events are locked."""
-        e = Event.objects.filter(pk=pk).first()
+        e = shared_or_visible(Event.objects.all(), request, field="space__location").filter(pk=pk).first()
         if not e:
             return Response({"detail": "not found"}, status=404)
         if e.billed:
@@ -138,7 +145,7 @@ class BanquetViewSet(ModuleViewSetMixin, viewsets.ViewSet):
         d = request.data
 
         if d.get("space"):
-            space = FunctionSpace.objects.filter(pk=d.get("space")).first()
+            space = shared_or_visible(FunctionSpace.objects.all(), request).filter(pk=d.get("space")).first()
             if not space:
                 return Response({"detail": "function space required"}, status=400)
             e.space = space
@@ -210,7 +217,7 @@ class BanquetViewSet(ModuleViewSetMixin, viewsets.ViewSet):
                      .values_list("space_id", flat=True)) if d else set()
         return Response([
             {"id": s.id, "name": s.name, "capacity": s.capacity, "available": s.id not in booked}
-            for s in FunctionSpace.objects.all()
+            for s in shared_or_visible(FunctionSpace.objects.all(), request)
         ])
 
     @action(detail=True, methods=["get"])
@@ -220,7 +227,8 @@ class BanquetViewSet(ModuleViewSetMixin, viewsets.ViewSet):
 
         from apps.accounts.views import get_property
         from .beo_pdf import build_beo_pdf
-        e = Event.objects.filter(pk=pk).select_related("space").first()
+        e = shared_or_visible(Event.objects.select_related("space"), request,
+                              field="space__location").filter(pk=pk).first()
         if not e:
             return Response({"detail": "not found"}, status=404)
         pdf = build_beo_pdf(e, get_property().name)
@@ -231,7 +239,7 @@ class BanquetViewSet(ModuleViewSetMixin, viewsets.ViewSet):
 
     @action(detail=True, methods=["post"])
     def confirm(self, request, pk=None):
-        e = Event.objects.filter(pk=pk).first()
+        e = shared_or_visible(Event.objects.all(), request, field="space__location").filter(pk=pk).first()
         if not e:
             return Response({"detail": "not found"}, status=404)
         # Can't confirm into a slot another confirmed event already holds — this
@@ -260,7 +268,7 @@ class BanquetViewSet(ModuleViewSetMixin, viewsets.ViewSet):
     def bill(self, request, pk=None):
         """Bill the event: hall/package + catering (plates × per-plate rate),
         18% GST on the subtotal, less the advance deposit = balance due."""
-        e = Event.objects.filter(pk=pk).first()
+        e = shared_or_visible(Event.objects.all(), request, field="space__location").filter(pk=pk).first()
         if not e:
             return Response({"detail": "not found"}, status=404)
         catering = e.catering_amount

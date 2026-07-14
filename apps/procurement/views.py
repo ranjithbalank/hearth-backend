@@ -4,7 +4,13 @@ from rest_framework.decorators import action
 from rest_framework.response import Response
 
 from apps.accounts.models import log_action
-from apps.accounts.permissions import ModuleViewSetMixin
+from apps.accounts.permissions import (
+    AnyModuleViewSetMixin,
+    ModuleViewSetMixin,
+    resolve_active_branch,
+    shared_or_visible,
+    visible_branch_ids,
+)
 from apps.inventory.models import apply_movement
 
 from .models import GoodsReceipt, PurchaseOrder, PurchaseOrderLine, Supplier, Vendor
@@ -13,6 +19,7 @@ from .models import GoodsReceipt, PurchaseOrder, PurchaseOrderLine, Supplier, Ve
 def _po_dict(po):
     return {
         "id": po.id, "po_no": po.po_no, "supplier": po.supplier.name, "status": po.status,
+        "location": po.location_id, "location_name": po.location.name if po.location_id else None,
         "total": str(po.total), "created_at": po.created_at,
         "lines": [
             {"ingredient": l.ingredient.name, "qty": str(l.qty),
@@ -22,15 +29,28 @@ def _po_dict(po):
     }
 
 
+def _requester_branch(request):
+    """Active branch header if sent, else the caller's own branch when
+    they're only ever assigned to one — same fallback as POS orders and
+    material requests, so a single-branch login never has to pick it."""
+    location = resolve_active_branch(request)
+    if location is None:
+        visible = visible_branch_ids(request)
+        if isinstance(visible, set) and len(visible) == 1:
+            location = next(iter(visible))
+    return location
+
+
 class SupplierViewSet(ModuleViewSetMixin, viewsets.ViewSet):
     module = "suppliers"
 
     def list(self, request):
+        qs = shared_or_visible(Supplier.objects.all(), request)
         return Response([
             {"id": s.id, "name": s.name, "gstin": s.gstin, "contact": s.contact,
              "payment_terms": s.payment_terms, "lead_time_days": s.lead_time_days,
-             "rating": str(s.rating)}
-            for s in Supplier.objects.all()
+             "rating": str(s.rating), "location": s.location_id}
+            for s in qs
         ])
 
 
@@ -38,18 +58,32 @@ class VendorViewSet(ModuleViewSetMixin, viewsets.ViewSet):
     module = "vendors"
 
     def list(self, request):
+        qs = shared_or_visible(Vendor.objects.all(), request)
         return Response([
             {"id": v.id, "name": v.name, "category": v.category, "contact": v.contact,
-             "payment_terms": v.payment_terms, "status": v.status}
-            for v in Vendor.objects.all()
+             "payment_terms": v.payment_terms, "status": v.status, "location": v.location_id}
+            for v in qs
         ])
 
 
-class PurchaseOrderViewSet(ModuleViewSetMixin, viewsets.ViewSet):
-    module = "procurement"
+class PurchaseOrderViewSet(AnyModuleViewSetMixin, viewsets.ViewSet):
+    # Two doors into POs: the store side ("procurement" — Store Keeper,
+    # Restaurant Manager) and the payables side ("pomanage" — Finance, whose
+    # Purchase Orders screen gates on it and who sits in PO_APPROVER_ROLES).
+    # Gating on "procurement" alone left Finance a designated approver who
+    # could never actually reach the approve endpoint. Spend approval is
+    # still guarded by PO_APPROVER_ROLES inside approve() regardless of
+    # which module let the request in.
+    modules = ["procurement", "pomanage"]
 
     def list(self, request):
-        qs = PurchaseOrder.objects.select_related("supplier").prefetch_related("lines__ingredient")
+        # A PO is exclusive to the branch that raised it, not shared like a
+        # supplier — same "mine + not-yet-branch-tagged" rule as orders and
+        # indents, so a pre-existing PO doesn't vanish for anyone.
+        qs = shared_or_visible(
+            PurchaseOrder.objects.select_related("supplier").prefetch_related("lines__ingredient"),
+            request,
+        )
         status_ = request.query_params.get("status")
         if status_:
             qs = qs.filter(status=status_)
@@ -60,17 +94,25 @@ class PurchaseOrderViewSet(ModuleViewSetMixin, viewsets.ViewSet):
         Rate defaults to the material's current purchase rate."""
         from decimal import Decimal, InvalidOperation
 
+        from apps.accounts.constants import PO_HANDLER_ROLES
         from apps.inventory.models import Ingredient
 
-        supplier = Supplier.objects.filter(pk=request.data.get("supplier")).first()
+        if getattr(request.user, "role", "") not in PO_HANDLER_ROLES:
+            return Response(
+                {"detail": "raising a purchase order is the store's job — Restaurant Manager or "
+                           "Store Keeper (Finance approves the spend once it's raised)"},
+                status=403)
+        supplier = shared_or_visible(Supplier.objects.all(), request).filter(
+            pk=request.data.get("supplier")).first()
         if not supplier:
             return Response({"detail": "supplier not found"}, status=400)
         wanted = request.data.get("lines") or []
         if not wanted:
             return Response({"detail": "at least one line is required"}, status=400)
+        ingredient_qs = shared_or_visible(Ingredient.objects.all(), request)
         parsed = []
         for w in wanted:
-            ing = Ingredient.objects.filter(pk=w.get("ingredient")).first()
+            ing = ingredient_qs.filter(pk=w.get("ingredient")).first()
             if not ing:
                 return Response({"detail": "unknown raw material on a line"}, status=400)
             try:
@@ -84,7 +126,7 @@ class PurchaseOrderViewSet(ModuleViewSetMixin, viewsets.ViewSet):
         with transaction.atomic():
             from apps.accounts.models import Property
             from apps.accounts.numbering import next_document_number
-            po = PurchaseOrder.objects.create(supplier=supplier)
+            po = PurchaseOrder.objects.create(supplier=supplier, location_id=_requester_branch(request))
             prop = Property.objects.first()
             po.po_no = next_document_number(PurchaseOrder, "po_no", prop.po_prefix if prop else "PO")
             po.save(update_fields=["po_no"])
@@ -102,7 +144,7 @@ class PurchaseOrderViewSet(ModuleViewSetMixin, viewsets.ViewSet):
             return Response(
                 {"detail": "PO approval is a spend decision — it needs the restaurant manager, finance or GM"},
                 status=403)
-        po = PurchaseOrder.objects.filter(pk=pk).first()
+        po = shared_or_visible(PurchaseOrder.objects.all(), request).filter(pk=pk).first()
         if not po or po.status != PurchaseOrder.PENDING:
             return Response({"detail": "PO not pending"}, status=400)
         po.status = PurchaseOrder.APPROVED
@@ -113,7 +155,13 @@ class PurchaseOrderViewSet(ModuleViewSetMixin, viewsets.ViewSet):
     @action(detail=True, methods=["post"])
     def receive(self, request, pk=None):
         """Goods receipt: post each line's qty to stock and mark the PO received."""
-        po = PurchaseOrder.objects.filter(pk=pk).prefetch_related("lines__ingredient").first()
+        from apps.accounts.constants import PO_HANDLER_ROLES
+        if getattr(request.user, "role", "") not in PO_HANDLER_ROLES:
+            return Response(
+                {"detail": "goods receipt is the store's job — Restaurant Manager or Store Keeper"},
+                status=403)
+        po = shared_or_visible(PurchaseOrder.objects.all(), request).prefetch_related(
+            "lines__ingredient").filter(pk=pk).first()
         if not po or po.status != PurchaseOrder.APPROVED:
             return Response({"detail": "PO must be approved before receipt"}, status=400)
         with transaction.atomic():
@@ -154,9 +202,14 @@ class GoodsReceiptViewSet(ModuleViewSetMixin, viewsets.ViewSet):
     module = "procurement"
 
     def list(self, request):
+        # GoodsReceipt has no location of its own — it follows its PO's.
+        qs = shared_or_visible(
+            GoodsReceipt.objects.select_related("purchase_order__supplier"),
+            request, field="purchase_order__location",
+        )
         return Response([
             {"id": g.id, "grn_no": g.grn_no, "po": g.purchase_order_id,
              "po_no": g.purchase_order.po_no, "supplier": g.purchase_order.supplier.name,
              "note": g.note, "created_at": g.created_at}
-            for g in GoodsReceipt.objects.select_related("purchase_order__supplier")[:30]
+            for g in qs[:30]
         ])

@@ -4,7 +4,7 @@ from rest_framework.decorators import action
 from rest_framework.response import Response
 
 from apps.accounts.models import log_action
-from apps.accounts.permissions import ModuleViewSetMixin
+from apps.accounts.permissions import ModuleViewSetMixin, shared_or_visible
 from apps.rooms.models import Room
 from apps.rooms.serializers import RoomSerializer
 
@@ -23,7 +23,10 @@ class HousekeepingViewSet(ModuleViewSetMixin, viewsets.ViewSet):
     module = "housekeeping"
 
     def list(self, request):
-        qs = Room.objects.select_related("room_type").all()
+        # Rooms are branch-owned (security review 2026-07, finding B7) — same
+        # "mine + not-yet-tagged" rule already used for Room elsewhere
+        # (reservations/views.py).
+        qs = shared_or_visible(Room.objects.select_related("room_type").all(), request)
         status_ = request.query_params.get("status")
         if status_:
             qs = qs.filter(status=status_)
@@ -34,7 +37,7 @@ class HousekeepingViewSet(ModuleViewSetMixin, viewsets.ViewSet):
         """Front desk flags a room for servicing (FR-HSK): occupied make-up-room
         requests and urgent vacant/dirty turnarounds land on the housekeeping
         board and in housekeeping's notifications."""
-        room = Room.objects.filter(pk=pk).first()
+        room = shared_or_visible(Room.objects.all(), request).filter(pk=pk).first()
         if not room:
             return Response({"detail": "room not found"}, status=404)
         room.cleaning_requested = True
@@ -48,7 +51,7 @@ class HousekeepingViewSet(ModuleViewSetMixin, viewsets.ViewSet):
     def advance(self, request, pk=None):
         """Move a room one step along Dirty→Cleaning→Clean→Inspected.
         An occupied room with a cleaning request is simply marked serviced."""
-        room = Room.objects.filter(pk=pk).first()
+        room = shared_or_visible(Room.objects.all(), request).filter(pk=pk).first()
         if not room:
             return Response({"detail": "room not found"}, status=404)
         if room.status == Room.OCCUPIED and room.cleaning_requested:
@@ -74,7 +77,7 @@ class HousekeepingViewSet(ModuleViewSetMixin, viewsets.ViewSet):
     @action(detail=True, methods=["post"])
     def minibar(self, request, pk=None):
         """Post a consumed minibar item to the room's open folio (FR-HSK-005)."""
-        room = Room.objects.filter(pk=pk).first()
+        room = shared_or_visible(Room.objects.all(), request).filter(pk=pk).first()
         if not room:
             return Response({"detail": "room not found"}, status=404)
         from apps.frontoffice.models import Folio, FolioLine
@@ -122,7 +125,7 @@ class HousekeepingViewSet(ModuleViewSetMixin, viewsets.ViewSet):
 
     @action(detail=False, methods=["get"])
     def counters(self, request):
-        rooms = Room.objects.all()
+        rooms = shared_or_visible(Room.objects.all(), request)
         out = {}
         for r in rooms:
             out[r.status] = out.get(r.status, 0) + 1

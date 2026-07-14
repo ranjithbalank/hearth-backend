@@ -7,9 +7,19 @@ from rest_framework.permissions import AllowAny
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
-from apps.accounts.constants import ROLE_BAR_CAPTAIN, ROLE_BAR_CASHIER
+from apps.accounts.constants import ROLE_CAPTAIN, ROLE_CASHIER, ROLE_BAR_CAPTAIN, ROLE_BAR_CASHIER
+from apps.accounts.rbac import PROTECTED
 from apps.accounts.models import log_action
-from apps.accounts.permissions import AnyModuleViewSetMixin, ModuleViewSetMixin, active_entitlements
+from apps.accounts.permissions import (
+    AnyModuleViewSetMixin,
+    BranchScopedMixin,
+    BranchUniqueFriendlyMixin,
+    ModuleViewSetMixin,
+    active_entitlements,
+    resolve_active_branch,
+    shared_or_visible,
+    visible_branch_ids,
+)
 from apps.frontoffice import services as fo_services
 from apps.frontoffice.models import Folio, FolioLine, Settlement
 
@@ -37,6 +47,7 @@ from .serializers import (
     TableReservationSerializer,
     TableSerializer,
     TillSessionSerializer,
+    captain_on_leave_today,
 )
 
 
@@ -91,23 +102,78 @@ def _billed_error(order):
     return None
 
 
-class TableViewSet(ModuleViewSetMixin, viewsets.ModelViewSet):
+
+
+class TableViewSet(BranchScopedMixin, BranchUniqueFriendlyMixin, ModuleViewSetMixin, viewsets.ModelViewSet):
     module = "pos"
     queryset = Table.objects.all()
     serializer_class = TableSerializer
+    duplicate_message = "A table with this name already exists there."
 
     def list(self, request, *args, **kwargs):
         refresh_reservation_holds()   # time-based holds without a scheduler
         return super().list(request, *args, **kwargs)
 
+    def perform_destroy(self, instance):
+        # Never delete a table mid-service — settle or void the running
+        # order first, then remove the table. (Order.table is SET_NULL, so
+        # deleting would otherwise silently orphan an active bill.)
+        if instance.orders.exclude(status__in=CLOSED_STATUSES).exists():
+            from rest_framework.exceptions import ValidationError
+            raise ValidationError({"detail": f"table {instance.name} has a running order — settle or void it before deleting the table"})
+        instance.delete()
 
-class BarTableViewSet(ModuleViewSetMixin, viewsets.ModelViewSet):
+    @action(detail=False, methods=["get"])
+    def captains(self, request):
+        """Captain logins for one branch — lets the F&B Cashier build the
+        assignment list without needing Settings/Users access (that's gated
+        to the 'settings' module, which Cashiers never get)."""
+        from apps.accounts.models import User
+        from apps.accounts.models import UserBranchAccess
+        from datetime import date
+
+        location = request.query_params.get("location")
+        qs = User.objects.filter(role=ROLE_CAPTAIN, is_active=True)
+        if location:
+            today = date.today()
+            ids = [a.user_id for a in UserBranchAccess.objects.filter(branch_id=location) if a.is_active_on(today)]
+            qs = qs.filter(id__in=ids)
+        qs = qs.distinct().order_by("first_name", "username")
+        return Response([{"id": u.id, "name": u.get_full_name() or u.username} for u in qs])
+
+    @action(detail=True, methods=["post"])
+    def assign_captain(self, request, pk=None):
+        """Hand a table to a captain for the shift — the F&B Cashier runs the
+        floor and decides who's working which tables. Captains themselves
+        can't self-assign (assigned_captain is read-only on the main
+        serializer); send captain=null to clear an assignment."""
+        role = getattr(request.user, "role", "")
+        if role != ROLE_CASHIER and role not in PROTECTED:
+            return Response({"detail": "Only the F&B Cashier can assign tables to captains"}, status=403)
+        table = self.get_object()
+        captain_id = request.data.get("captain")
+        if captain_id is None:
+            table.assigned_captain = None
+        else:
+            from apps.accounts.models import User
+            captain = User.objects.filter(pk=captain_id, role=ROLE_CAPTAIN).first()
+            if not captain:
+                return Response({"detail": "Not a Captain — pick a valid captain login"}, status=400)
+            table.assigned_captain = captain
+        table.save(update_fields=["assigned_captain"])
+        log_action(request.user, "table_assign_captain", entity="Table", entity_id=table.id,
+                   after={"assigned_captain": captain_id})
+        return Response(TableSerializer(table).data)
+
+
+class BarTableViewSet(BranchScopedMixin, BranchUniqueFriendlyMixin, ModuleViewSetMixin, viewsets.ModelViewSet):
     """The bar's own floor plan — separate master from the restaurant's
     Table Master (spec: bar runs as its own operation)."""
 
     module = "barpos"
     queryset = BarTable.objects.all()
     serializer_class = BarTableSerializer
+    duplicate_message = "A bar table with this name already exists there."
 
 
 class CounterOnlyMixin:
@@ -497,8 +563,9 @@ class KdsViewSet(ModuleViewSetMixin, viewsets.ViewSet):
         from apps.accounts.constants import KITCHEN_ROLES
         if getattr(request.user, "role", "") not in KITCHEN_ROLES:
             return Response({"detail": "only the kitchen marks food ready"}, status=403)
+        from apps.accounts.permissions import shared_or_visible
         from apps.banquets.models import Event as BqEvent
-        e = BqEvent.objects.filter(pk=pk).first()
+        e = shared_or_visible(BqEvent.objects.all(), request, field="space__location").filter(pk=pk).first()
         if not e:
             return Response({"detail": "not found"}, status=404)
         e.beo_status = "ready" if e.beo_status == "pending" else "done"
@@ -514,7 +581,7 @@ class CategoryViewSet(AnyModuleViewSetMixin, viewsets.ModelViewSet):
     serializer_class = CategorySerializer
 
     def get_queryset(self):
-        qs = super().get_queryset()
+        qs = shared_or_visible(super().get_queryset(), self.request)
         # ?is_bar=1 → just the bar's own categories (Beer, Wine, Cocktails…);
         # ?is_bar=0 → just the restaurant's (Starters, Rice Bowls…). Keeps
         # the two pickers from mixing even though it's one shared table.
@@ -530,7 +597,7 @@ class MenuItemViewSet(AnyModuleViewSetMixin, viewsets.ModelViewSet):
     serializer_class = MenuItemSerializer
 
     def get_queryset(self):
-        qs = super().get_queryset()
+        qs = shared_or_visible(super().get_queryset(), self.request)
         cat = self.request.query_params.get("category")
         if cat:
             qs = qs.filter(category_id=cat)
@@ -541,6 +608,18 @@ class MenuItemViewSet(AnyModuleViewSetMixin, viewsets.ModelViewSet):
             qs = qs.filter(bar_menu=True)
         return qs
 
+    def perform_destroy(self, instance):
+        # OrderLine.menu_item is on_delete=PROTECT — any item with order
+        # history (even fully settled, historical orders) can't be deleted
+        # outright. Turn that into a clean 400 instead of a raw 500.
+        from django.db.models import ProtectedError
+        try:
+            instance.delete()
+        except ProtectedError:
+            from rest_framework.exceptions import ValidationError
+            raise ValidationError(
+                {"detail": f"\"{instance.name}\" has order history and can't be deleted — mark it unavailable (86'd) instead"})
+
 
 class OrderViewSet(AnyModuleViewSetMixin, viewsets.ModelViewSet):
     # Shared by the restaurant floor ("pos") and the bar ("barpos") — which
@@ -550,6 +629,16 @@ class OrderViewSet(AnyModuleViewSetMixin, viewsets.ModelViewSet):
     queryset = (Order.objects.prefetch_related("lines__menu_item")
                 .select_related("table", "bar_table").all())
     serializer_class = OrderSerializer
+    # Manager-override passcode and coupon/loyalty codes are brute-forceable
+    # if unthrottled (security review 2026-07, findings B3/B4) — scoped to
+    # just these actions so ordinary order-taking during a busy service
+    # never hits a rate limit.
+    _sensitive_actions = {"set_qty", "void", "apply_discount", "apply_coupon", "redeem_loyalty"}
+
+    def get_throttles(self):
+        if self.action in self._sensitive_actions:
+            self.throttle_scope = "sensitive"
+        return super().get_throttles()
 
     def get_queryset(self):
         from apps.accounts.rbac import can_access
@@ -563,6 +652,10 @@ class OrderViewSet(AnyModuleViewSetMixin, viewsets.ModelViewSet):
             qs = qs.filter(department=Order.BAR)
         elif can_pos and not can_bar:
             qs = qs.filter(department=Order.FOOD)
+        # An F&B Cashier assigned only to one branch never sees another
+        # branch's till — same "mine + not-yet-branch-tagged" rule as the
+        # menu, so pre-existing orders don't vanish for anyone.
+        qs = shared_or_visible(qs, self.request)
         status_ = self.request.query_params.get("status")
         if status_:
             qs = qs.filter(status=status_)
@@ -621,6 +714,15 @@ class OrderViewSet(AnyModuleViewSetMixin, viewsets.ModelViewSet):
             # Captains work the tables — takeaway/delivery/room are counter flows.
             if role == "Captain" and serializer.validated_data.get("mode", Order.DINEIN) != Order.DINEIN:
                 raise ValidationError({"detail": "captains take table orders — counter flows stay with the cashier"})
+            # Hard-assigned tables: once the F&B Cashier hands a table to a
+            # captain, only that captain can open orders on it — a table
+            # nobody's been assigned yet (assigned_captain is null) stays open.
+            # Exception: if that captain is on approved leave today, the
+            # table doesn't stay locked to someone who isn't even in —
+            # anyone can pick it up until the cashier reassigns it.
+            if (role == "Captain" and tbl and tbl.assigned_captain_id and tbl.assigned_captain_id != user.id
+                    and not captain_on_leave_today(tbl.assigned_captain)):
+                raise ValidationError({"detail": f"table {tbl.name} is assigned to another captain"})
             # A reserved table belongs to its booking: seat the reservation (which
             # releases the hold) before anyone can order on it.
             if tbl:
@@ -630,8 +732,23 @@ class OrderViewSet(AnyModuleViewSetMixin, viewsets.ModelViewSet):
                 raise ValidationError(
                     {"detail": f"table {tbl.name} is reserved — seat the booking from the floor, or pick another table"})
 
+        # Which branch rang this up: the till's active branch if one was
+        # sent; else whichever the table/bar table already belongs to
+        # (covers counter flows with no table at all); else, if this login
+        # is only ever assigned to the one branch, that one — same
+        # single-assignment auto-scoping the reads already get, so a cashier
+        # who only works Bhavani Road never has to pick it explicitly.
+        order_location = resolve_active_branch(self.request)
+        if order_location is None:
+            order_location = getattr(tbl, "location_id", None) or getattr(bar_tbl, "location_id", None)
+        if order_location is None:
+            visible = visible_branch_ids(self.request)
+            if isinstance(visible, set) and len(visible) == 1:
+                order_location = next(iter(visible))
+
         extra = {"department": department,
                  "captain": user.get_full_name() or user.username,
+                 "location_id": order_location,
                  "client_uuid": serializer.validated_data.get("client_uuid") or uuid.uuid4().hex}
         if serializer.validated_data.get("mode") == Order.ROOM:
             # Room channel: the guest's room is chosen up front, so the bill can
@@ -655,10 +772,13 @@ class OrderViewSet(AnyModuleViewSetMixin, viewsets.ModelViewSet):
         if not active_entitlements().get("hms"):
             return Response([])
         from apps.frontoffice.models import Folio
+        # Only this branch's in-house rooms — a cashier can't post a bill
+        # onto another branch's folio.
+        qs = shared_or_visible(
+            Folio.objects.filter(status=Folio.OPEN, room__isnull=False), request)
         return Response([
             {"folio": f.id, "room": f.room.number, "guest": f.guest_name}
-            for f in Folio.objects.filter(status=Folio.OPEN, room__isnull=False)
-            .select_related("room").order_by("room__number")
+            for f in qs.select_related("room").order_by("room__number")
         ])
 
     def _assign_token(self, order):

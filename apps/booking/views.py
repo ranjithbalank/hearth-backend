@@ -52,6 +52,7 @@ class BookingViewSet(ModuleViewSetMixin, viewsets.ViewSet):
         if not rt:
             return Response({"detail": "room_type not found"}, status=400)
         nights = int(request.data.get("nights", 1))
+        from apps.accounts.permissions import requester_branch
         resv = Reservation.objects.create(
             guest_name=request.data.get("guest_name", "Web Guest"),
             room_type=rt,
@@ -61,6 +62,7 @@ class BookingViewSet(ModuleViewSetMixin, viewsets.ViewSet):
             source=Reservation.SOURCE_BOOKING, status=Reservation.BOOKED,
             prepaid=bool(request.data.get("prepaid", True)),
             deposit=rt.base_rate if request.data.get("prepaid", True) else 0,
+            location_id=requester_branch(request),
         )
         log_action(request.user, "direct_booking", entity="Reservation", entity_id=resv.id,
                    after={"room_type": code, "guest": resv.guest_name})

@@ -20,17 +20,19 @@ from apps.accounts.constants import (
     ROLE_FINANCE,
     ROLE_FRONT_OFFICE,
     ROLE_GM,
+    ROLE_HOTEL_MGR,
     ROLE_HOUSEKEEPING,
+    ROLE_HR,
     ROLE_MD,
     ROLE_REST_MGR,
     ROLE_STORE,
     ROLE_SUPER_ADMIN,
 )
-from apps.accounts.models import Entitlement, Property, User
+from apps.accounts.models import Branch, Entitlement, Property, User, UserBranchAccess
 from apps.banquets.models import Event, FunctionSpace
 from apps.channel.models import Channel, ChannelRate
 from apps.crm.models import Customer
-from apps.hr.models import Employee
+from apps.hr.models import Employee, LeaveType
 from apps.inventory.models import Ingredient
 from apps.matreq.models import MaterialRequest, MaterialRequestLine
 from apps.housekeeping.models import LostFoundItem
@@ -67,9 +69,10 @@ class Command(BaseCommand):
         self._hr()
         self._masters()
         self._activity()
+        self._branch_access()
         self.stdout.write(self.style.SUCCESS(
             f"Done. Property '{prop.name}' [{prop.edition}]. "
-            f"Logins: md / gm / frontoffice / cashier / housekeeping (pwd: {PASSWORD})"
+            f"Logins: md / gm / frontoffice / cashier / housekeeping / hr (pwd: {PASSWORD})"
         ))
 
     def _property(self):
@@ -96,6 +99,7 @@ class Command(BaseCommand):
             ("gm", "Meera", "Rao", ROLE_GM, True),
             ("finance", "Divya", "Krishnan", ROLE_FINANCE, False),
             ("restmanager", "Rekha", "Pillai", ROLE_REST_MGR, False),
+            ("hotelmanager", "Lakshmi", "Menon", ROLE_HOTEL_MGR, False),
             ("frontoffice", "Anil", "Kumar", ROLE_FRONT_OFFICE, False),
             ("cashier", "Priya", "Nair", ROLE_CASHIER, False),
             ("captain", "Vijay", "Menon", ROLE_CAPTAIN, False),
@@ -104,6 +108,7 @@ class Command(BaseCommand):
             ("store", "Mani", "Velu", ROLE_STORE, False),
             ("barcaptain", "Deepak", "Shetty", ROLE_BAR_CAPTAIN, False),
             ("barcashier", "Nisha", "Kamath", ROLE_BAR_CASHIER, False),
+            ("hr", "Kavya", "Raman", ROLE_HR, False),
         ]
         # Per-user discount caps + manager passcodes (BRD FR-USR-004/006).
         caps = {
@@ -456,17 +461,54 @@ class Command(BaseCommand):
                                  status=Event.TENTATIVE)
 
     def _hr(self):
-        if Employee.objects.exists():
-            return
         staff = [
-            ("Anil Kumar", "Front Office", "Front Office Manager", ["M","M","M","O","E","E","M"]),
-            ("Sunita Pal", "Housekeeping", "HK Supervisor", ["M","M","M","M","O","M","M"]),
-            ("Priya Nair", "F&B", "Cashier", ["E","E","O","E","E","N","N"]),
-            ("Ravi Shah", "Kitchen", "Sous Chef", ["M","O","M","M","M","M","O"]),
-            ("Deepa Iyer", "Reservations", "Reservations Exec", ["M","M","M","M","M","O","O"]),
+            ("Anil Kumar", "Front Office", "Front Office Manager", ["M","M","M","O","E","E","M"], 38000),
+            ("Sunita Pal", "Housekeeping", "HK Supervisor", ["M","M","M","M","O","M","M"], 20000),
+            ("Priya Nair", "F&B", "Cashier", ["E","E","O","E","E","N","N"], 24000),
+            ("Ravi Shah", "Kitchen", "Sous Chef", ["M","O","M","M","M","M","O"], 32000),
+            ("Deepa Iyer", "Reservations", "Reservations Exec", ["M","M","M","M","M","O","O"], 26000),
+            ("Kavya Raman", "Administration", "HR Manager", ["M","M","M","M","M","O","O"], 35000),
         ]
-        for name, dept, role, shifts in staff:
-            Employee.objects.create(name=name, department=dept, role=role, shifts=shifts)
+        # Per-record idempotent: each demo staffer is created if missing
+        # (new hires like the HR Manager appear on old databases too), and
+        # a 0 salary from an older seed is backfilled so the payroll demo
+        # has real numbers. Never touches an edited salary.
+        for name, dept, role, shifts, salary in staff:
+            _, created = Employee.objects.get_or_create(name=name, defaults={
+                "department": dept, "role": role, "shifts": shifts,
+                "monthly_salary": salary})
+            if not created:
+                Employee.objects.filter(name=name, monthly_salary=0).update(monthly_salary=salary)
+        # Casual labour on day rates — off the statutory rolls (no PF/ESI/PT),
+        # paid rate × attendance days.
+        casuals = [
+            ("Murugan V", "Kitchen", "Kitchen Helper", ["M","M","M","M","M","M","O"], 700),
+            ("Selvi K", "Housekeeping", "Cleaner", ["M","M","O","M","M","M","M"], 600),
+        ]
+        for name, dept, role, shifts, rate in casuals:
+            Employee.objects.get_or_create(name=name, defaults={
+                "department": dept, "role": role, "shifts": shifts,
+                "wage_type": Employee.DAILY, "daily_rate": rate, "statutory": False})
+        # Link staff records to their logins so self-service leave works
+        # (apply, balances) — matched by name, idempotent.
+        links = {"Anil Kumar": "frontoffice", "Sunita Pal": "housekeeping",
+                 "Priya Nair": "cashier", "Kavya Raman": "hr"}
+        for emp_name, username in links.items():
+            emp = Employee.objects.filter(name=emp_name, user__isnull=True).first()
+            user = User.objects.filter(username=username, employee_record__isnull=True).first()
+            if emp and user:
+                emp.user = user
+                emp.save(update_fields=["user"])
+        # Leave types (FR-HRM): standard Indian set; quota 0 = uncapped.
+        if not LeaveType.objects.exists():
+            for name, quota, paid, carry in [
+                ("Casual Leave", 12, True, False),
+                ("Sick Leave", 12, True, False),
+                ("Earned Leave", 15, True, True),
+                ("Loss of Pay", 0, False, False),
+            ]:
+                LeaveType.objects.create(name=name, annual_quota=quota,
+                                         is_paid=paid, carry_forward=carry)
         if not LostFoundItem.objects.exists():
             LostFoundItem.objects.create(description="Black umbrella", location="Lobby", handler="Anil Kumar")
             LostFoundItem.objects.create(description="Phone charger", location="Room 204", handler="Sunita Pal")
@@ -552,3 +594,47 @@ class Command(BaseCommand):
             deduct_for_newly_fired(o, agg_lines)
             Settlement.objects.create(tender="zomato (prepaid)", amount=o.totals()["total"],
                                       reference="zomato:ZOM-DEMO-1")
+
+    def _branch_access(self):
+        """Every demo login needs somewhere to actually operate (BUG found in
+        UAT 2026-07-09): Table/Room/BarTable use BranchScopedMixin, which —
+        by design (never silently leak another branch's data) — shows a
+        branch-restricted login NOTHING if it has zero UserBranchAccess rows,
+        even if the row it should see has no location at all. Universal roles
+        (Super Admin/MD/GM) were always fine since they bypass this
+        entirely; every other seeded role had no branch to stand in, so
+        Front Desk/POS/Housekeeping/etc. rendered empty for them.
+
+        Idempotent and additive only: reuses the "APT" branch if one already
+        exists (from real Branch Master use) instead of creating a
+        competing one, grants access only to users who have none yet, and
+        only backfills the *unassigned* Tables/Rooms/BarTables — anything
+        already tagged to a specific branch (via the Branch Master screen)
+        is left exactly as configured.
+        """
+        prop = Property.objects.first()
+        if not prop:
+            return
+        branch, _ = Branch.objects.get_or_create(
+            code="APT", defaults={
+                "property": prop, "name": "Hearth Grand - Airport",
+                "hms": True, "restaurant": True, "banquets": True, "rms": True,
+                "status": Branch.STATUS_ACTIVE,
+            })
+
+        for u in User.objects.exclude(role__in=[ROLE_SUPER_ADMIN, ROLE_MD, ROLE_GM]):
+            if not UserBranchAccess.objects.filter(user=u).exists():
+                UserBranchAccess.objects.create(user=u, branch=branch, role=u.role)
+
+        # Per-row, not a bulk .update(): ad-hoc Branch Master testing already
+        # left a handful of name collisions at this branch (e.g. two "B1" bar
+        # tables) — skip exactly those rather than failing the whole seed.
+        from django.db import IntegrityError, transaction as _txn
+        for model in (Table, Room, BarTable):
+            for obj in model.objects.filter(location__isnull=True):
+                try:
+                    with _txn.atomic():
+                        obj.location = branch
+                        obj.save(update_fields=["location"])
+                except IntegrityError:
+                    pass

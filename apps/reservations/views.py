@@ -8,7 +8,11 @@ from rest_framework.response import Response
 from rest_framework.views import APIView
 
 from apps.accounts.models import log_action
-from apps.accounts.permissions import ModuleViewSetMixin
+from apps.accounts.permissions import (
+    ModuleViewSetMixin,
+    requester_branch,
+    shared_or_visible,
+)
 from apps.rooms.models import Room, RoomType
 
 from .models import GroupBlock, Reservation
@@ -61,10 +65,16 @@ class ReservationViewSet(ModuleViewSetMixin, viewsets.ModelViewSet):
 
     def get_queryset(self):
         qs = super().get_queryset()
+        # Each desk sees its own branch's book (+ legacy untagged rows) —
+        # same rule as POS orders and indents.
+        qs = shared_or_visible(qs, self.request)
         status_ = self.request.query_params.get("status")
         if status_:
             qs = qs.filter(status=status_)
         return qs
+
+    def perform_create(self, serializer):
+        serializer.save(location_id=requester_branch(self.request))
 
     @action(detail=False, methods=["get"])
     def arrivals(self, request):
@@ -78,9 +88,11 @@ class ReservationViewSet(ModuleViewSetMixin, viewsets.ModelViewSet):
     @action(detail=False, methods=["get"])
     def room_types(self, request):
         """Room types with rate + live availability — for the walk-in form."""
+        # Count only rooms this desk can actually sell (its branch + untagged).
+        rooms_qs = shared_or_visible(Room.objects.all(), request)
         out = []
         for rt in RoomType.objects.all():
-            sellable = Room.objects.filter(room_type=rt, status__in=Room.SELLABLE).count()
+            sellable = rooms_qs.filter(room_type=rt, status__in=Room.SELLABLE).count()
             out.append({"code": rt.code, "name": rt.name, "base_rate": str(rt.base_rate),
                         "available": sellable})
         return Response(out)
@@ -108,6 +120,7 @@ class ReservationViewSet(ModuleViewSetMixin, viewsets.ModelViewSet):
             checkout_date=date.today() + timedelta(days=nights),
             nights=nights, rate=rt.base_rate,
             source=Reservation.SOURCE_WALKIN, status=Reservation.BOOKED,
+            location_id=requester_branch(request),
         )
         log_action(request.user, "walkin_create", entity="Reservation", entity_id=resv.id,
                    after={"guest": resv.guest_name, "room_type": rt.code})
@@ -116,10 +129,17 @@ class ReservationViewSet(ModuleViewSetMixin, viewsets.ModelViewSet):
     @action(detail=True, methods=["get"])
     def room_options(self, request, pk=None):
         """Sellable rooms matching the reservation's room type."""
+        from django.db.models import Q
         resv = self.get_object()
         rooms = Room.objects.filter(
             room_type=resv.room_type, status__in=Room.SELLABLE
         ).select_related("room_type")
+        # The room must be at the stay's own branch (untagged rooms stay
+        # offerable for the single-property/legacy case).
+        if resv.location_id:
+            rooms = rooms.filter(Q(location__isnull=True) | Q(location_id=resv.location_id))
+        else:
+            rooms = shared_or_visible(rooms, request)
         from apps.rooms.serializers import RoomSerializer
         return Response(RoomSerializer(rooms, many=True).data)
 
@@ -133,11 +153,15 @@ class ReservationViewSet(ModuleViewSetMixin, viewsets.ModelViewSet):
         co_d = datetime.strptime(co, "%Y-%m-%d").date()
         if co_d <= ci_d:  # treat a single date as a one-night window
             co_d = ci_d + timedelta(days=1)
+        # Availability is per branch: this desk's rooms and bookings only
+        # (+ untagged legacy rows), not the whole group's pooled together.
+        rooms_qs = shared_or_visible(Room.objects.all(), request)
+        resv_qs = shared_or_visible(Reservation.objects.all(), request)
         out = []
         for rt in RoomType.objects.all():
-            physical = Room.objects.filter(room_type=rt).exclude(status=Room.OOO).count()
+            physical = rooms_qs.filter(room_type=rt).exclude(status=Room.OOO).count()
             # Reservations overlapping [ci, co) that hold inventory.
-            held = Reservation.objects.filter(
+            held = resv_qs.filter(
                 room_type=rt, status__in=[Reservation.BOOKED, Reservation.IN_HOUSE],
                 checkin_date__lt=co_d, checkout_date__gt=ci_d,
             ).count()
@@ -208,7 +232,7 @@ class ReservationViewSet(ModuleViewSetMixin, viewsets.ModelViewSet):
         folio = getattr(resv, "folio", None)
         if not folio:
             folio = Folio.objects.create(reservation=resv, guest_name=resv.guest_name,
-                                         routing="city_ledger")
+                                         routing="city_ledger", location_id=resv.location_id)
         post_charge(folio, kind=FolioLine.KIND_INCIDENTAL, description=reason,
                     amount=amount, gst_rate=tax.room_rate_for(amount),
                     source="penalty", user=request.user)

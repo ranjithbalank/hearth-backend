@@ -41,7 +41,11 @@ class Room(models.Model):
     SELLABLE = {VACANT_CLEAN, INSPECTED}
 
     number = models.CharField(max_length=12)
-    branch = models.CharField(max_length=80, default="Main")
+    branch = models.CharField(max_length=80, default="Main", help_text="Building/wing label within this location, e.g. Main vs Annexe")
+    location = models.ForeignKey(
+        "accounts.Branch", null=True, blank=True, on_delete=models.PROTECT,
+        related_name="rooms", help_text="Which of the group's branches this room belongs to",
+    )
     room_type = models.ForeignKey(RoomType, on_delete=models.PROTECT, related_name="rooms")
     floor = models.PositiveSmallIntegerField(default=1)
     view = models.CharField(max_length=40, blank=True)
@@ -56,7 +60,20 @@ class Room(models.Model):
 
     class Meta:
         ordering = ["branch", "number"]
-        unique_together = [("branch", "number")]
+        # `location` (the real branch) is nullable during the transition, so
+        # a plain unique_together on (location, branch, number) would let
+        # NULL-location rows collide (NULL != NULL in a SQL unique index) —
+        # weaker than the old (branch, number) guarantee for anyone who
+        # hasn't assigned locations yet. Two explicit constraints close that:
+        # the no-location case keeps the original guarantee unchanged, and
+        # once a location is set, two locations may freely reuse the same
+        # room-numbering scheme.
+        constraints = [
+            models.UniqueConstraint(fields=["branch", "number"], condition=models.Q(location__isnull=True),
+                                    name="unique_room_no_location"),
+            models.UniqueConstraint(fields=["location", "branch", "number"], condition=models.Q(location__isnull=False),
+                                    name="unique_room_with_location"),
+        ]
 
     def __str__(self):
         return f"{self.branch} {self.number}"

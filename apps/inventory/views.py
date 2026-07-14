@@ -11,7 +11,7 @@ from rest_framework import viewsets
 from rest_framework.decorators import action
 from rest_framework.response import Response
 
-from apps.accounts.permissions import ModuleViewSetMixin
+from apps.accounts.permissions import BranchUniqueFriendlyMixin, ModuleViewSetMixin, shared_or_visible
 
 from .models import Ingredient, IngredientCategory, StockMovement, Uom, apply_movement
 from .serializers import (
@@ -52,13 +52,14 @@ class IngredientCategoryViewSet(ModuleViewSetMixin, viewsets.ModelViewSet):
         return super().destroy(request, *args, **kwargs)
 
 
-class IngredientViewSet(ModuleViewSetMixin, viewsets.ModelViewSet):
+class IngredientViewSet(BranchUniqueFriendlyMixin, ModuleViewSetMixin, viewsets.ModelViewSet):
     module = "inventory"
     queryset = Ingredient.objects.all()
     serializer_class = IngredientSerializer
+    duplicate_message = "An ingredient with this name already exists there."
 
     def get_queryset(self):
-        qs = super().get_queryset()
+        qs = shared_or_visible(super().get_queryset(), self.request)
         if self.request.query_params.get("below_par") == "1":
             # below_par is a property, so resolve to ids the DB can filter on
             ids = [i.id for i in qs if i.below_par]

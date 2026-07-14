@@ -4,6 +4,16 @@ from django.db import models
 class FunctionSpace(models.Model):
     name = models.CharField(max_length=120, unique=True)
     capacity = models.PositiveSmallIntegerField(default=100)
+    # Blank = shared across every branch (matches Category's convention) —
+    # existing halls stay visible to everyone exactly as before. Set it to
+    # scope a hall to one branch, closing the whole-module cross-branch gap
+    # found in the security review (2026-07): every event booking, BEO
+    # download, and confirm/bill action in this module was previously
+    # visible/actionable from any branch.
+    location = models.ForeignKey(
+        "accounts.Branch", null=True, blank=True, on_delete=models.SET_NULL,
+        related_name="function_spaces",
+    )
 
     def __str__(self):
         return self.name
