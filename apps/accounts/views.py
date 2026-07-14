@@ -62,7 +62,9 @@ class PropertyView(APIView):
     def patch(self, request):
         prop = get_property()
         for f in ["name", "gstin", "address", "phone", "logo", "currency",
-                  "zomato_commission_pct", "swiggy_commission_pct"]:
+                  "doc_header", "doc_footer",
+                  "zomato_commission_pct", "swiggy_commission_pct",
+                  "invoice_prefix", "bill_prefix", "po_prefix", "grn_prefix", "beo_prefix"]:
             if f in request.data:
                 setattr(prop, f, request.data[f])
         prop.save()

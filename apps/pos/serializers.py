@@ -136,7 +136,7 @@ class OrderSerializer(serializers.ModelSerializer):
         fields = [
             "id", "mode", "department", "table", "table_name", "bar_table", "bar_table_name",
             "customer", "covers", "captain",
-            "status", "status_label", "folio", "kot_no", "lines", "totals", "created_at",
+            "status", "status_label", "folio", "kot_no", "bill_no", "lines", "totals", "created_at",
             "discount_kind", "discount_value", "discount_reason", "coupon_code",
             "loyalty_redeemed", "source_platform", "external_ref", "online_status", "prepaid",
             "brand", "token_no", "client_uuid", "location",

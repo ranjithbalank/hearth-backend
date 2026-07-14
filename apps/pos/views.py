@@ -1038,12 +1038,14 @@ class OrderViewSet(AnyModuleViewSetMixin, viewsets.ModelViewSet):
         if target == "dispatched":
             from django.utils import timezone
             order.status = Order.SETTLED if order.prepaid else order.status
+            if order.status == Order.SETTLED:
+                order.assign_bill_no()
             # The food left the building — close the kitchen ticket too so the
             # ready strip and KDS drop it.
             order.kots.filter(status=Kot.READY).update(status=Kot.SERVED,
                                                        served_at=timezone.now())
             order.kitchen_status = "served"
-        order.save(update_fields=["online_status", "status", "kitchen_status"])
+        order.save(update_fields=["online_status", "status", "kitchen_status", "bill_no"])
         return Response(OrderSerializer(order).data)
 
     @action(detail=False, methods=["get"])
@@ -1097,7 +1099,8 @@ class OrderViewSet(AnyModuleViewSetMixin, viewsets.ModelViewSet):
                         reference=f"offline {uuid[:8]}",
                     )
                     order.status = Order.SETTLED
-                    order.save(update_fields=["status"])
+                    order.assign_bill_no()
+                    order.save(update_fields=["status", "bill_no"])
             log_action(request.user, "offline_sync", entity="Order", entity_id=order.id,
                        after={"client_uuid": uuid})
             results.append({"client_uuid": uuid, "id": order.id, "created": True})
@@ -1390,7 +1393,8 @@ class OrderViewSet(AnyModuleViewSetMixin, viewsets.ModelViewSet):
         self._finalize_promotions(order, t["total"])
         self._ensure_feedback(order)
         order.status = Order.SETTLED
-        order.save(update_fields=["status"])
+        order.assign_bill_no()
+        order.save(update_fields=["status", "bill_no"])
         # Free the table only if no other unpaid order (e.g. a split bill) sits on it.
         self._free_table_if_idle(order.table)
         self._free_table_if_idle(order.bar_table)

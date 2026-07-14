@@ -63,7 +63,7 @@ def _event_dict(e):
         "food_veg": e.food_veg, "food_nonveg": e.food_nonveg,
         "veg_rate": str(e.veg_rate), "nonveg_rate": str(e.nonveg_rate),
         "catering_amount": str(e.catering_amount), "bill_subtotal": str(e.bill_subtotal),
-        "beo_status": e.beo_status,
+        "beo_status": e.beo_status, "beo_no": e.beo_no,
     }
 
 
@@ -233,7 +233,8 @@ class BanquetViewSet(ModuleViewSetMixin, viewsets.ViewSet):
             return Response({"detail": "not found"}, status=404)
         pdf = build_beo_pdf(e, get_property().name)
         resp = HttpResponse(pdf.read(), content_type="application/pdf")
-        resp["Content-Disposition"] = f'attachment; filename="BEO-{e.id}.pdf"'
+        ref = e.beo_no or f"BEO-{e.id}"
+        resp["Content-Disposition"] = f'attachment; filename="{ref}.pdf"'
         return resp
 
     @action(detail=True, methods=["post"])
@@ -248,6 +249,12 @@ class BanquetViewSet(ModuleViewSetMixin, viewsets.ViewSet):
             return Response({"detail": _clash_msg(e.space, clash)}, status=status.HTTP_409_CONFLICT)
         e.status = Event.CONFIRMED
         fields = ["status"]
+        if not e.beo_no:
+            from apps.accounts.models import Property
+            from apps.accounts.numbering import next_document_number
+            prop = Property.objects.first()
+            e.beo_no = next_document_number(Event, "beo_no", prop.beo_prefix if prop else "BEO")
+            fields.append("beo_no")
         # Fire the BEO catering prep to the kitchen display (FR-BQT-004).
         if e.food_covers > 0 and not e.beo_status:
             e.beo_status = "pending"
