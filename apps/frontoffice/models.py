@@ -34,6 +34,13 @@ class Folio(models.Model):
     id_type = models.CharField(max_length=30, blank=True)
     id_number = models.CharField(max_length=40, blank=True)
     guest_type = models.CharField(max_length=20, blank=True)
+    # Registration-card evidence captured at check-in (BRD FR-PMS-004):
+    # scanned/photographed ID proof and the guest's digital signature, both
+    # stored as image data URLs. Sensitive PII — never serialized into list
+    # payloads; read only via the folio `registration` endpoint (which is
+    # itself audit-logged), and wiped by DPDP erasure alongside the guest.
+    id_scan = models.TextField(blank=True, default="")
+    signature = models.TextField(blank=True, default="")
     # For corporate (bill-to-company) guests — the company the folio bills to.
     company_name = models.CharField(max_length=200, blank=True)
     company = models.ForeignKey(

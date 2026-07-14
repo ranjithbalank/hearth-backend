@@ -7,6 +7,7 @@ from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
+from apps.accounts.constants import currency_symbol
 from apps.accounts.permissions import ModulePermission
 from apps.crm.models import Customer
 from apps.frontoffice.models import FolioLine
@@ -364,7 +365,7 @@ def _restaurant_report(report):
                 {"label": "Consumption cost (14d)", "value": str(round(total_cons, 2)), "money": True},
                 {"label": "Food cost", "value": f"{pct}%"},
             ],
-            "series_label": "Consumption cost by day (₹)",
+            "series_label": f"Consumption cost by day ({currency_symbol()})",
             "bars": [{"name": datetime.fromisoformat(d).strftime("%d %b"),
                       "value": float(by_day.get(d, 0))} for d in days],
         }
@@ -390,7 +391,7 @@ def _restaurant_report(report):
                 {"label": "Purchased value", "value": str(round(purchased, 2)), "money": True},
                 {"label": "Consumed value", "value": str(round(consumed, 2)), "money": True},
             ],
-            "series_label": "Consumption value by material (₹)",
+            "series_label": f"Consumption value by material ({currency_symbol()})",
             "bars": bars,
         }
 
@@ -407,7 +408,7 @@ def _restaurant_report(report):
                 {"label": "Ingredient cost", "value": str(round(total_cons, 2)), "money": True},
                 {"label": "Food cost", "value": f"{pct}%"},
             ],
-            "series_label": "Cost contribution by material (₹)",
+            "series_label": f"Cost contribution by material ({currency_symbol()})",
             "bars": bars,
         }
 

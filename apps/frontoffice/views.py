@@ -28,6 +28,21 @@ class FolioViewSet(ModuleViewSetMixin, viewsets.ModelViewSet):
             qs = qs.filter(room__number=room)
         return qs
 
+    @action(detail=True, methods=["get"])
+    def registration(self, request, pk=None):
+        """The stay's registration-card evidence: ID proof scan + guest
+        signature. Kept out of the folio list/detail payloads (sensitive PII
+        and big base64 blobs) — and every read of it leaves an audit entry."""
+        from apps.accounts.models import log_action
+        folio = self.get_object()
+        log_action(request.user, "registration_viewed", entity="Folio", entity_id=folio.id,
+                   note="ID scan / signature viewed")
+        return Response({
+            "id": folio.id, "guest_name": folio.guest_name,
+            "id_type": folio.id_type, "id_number": folio.id_number,
+            "id_scan": folio.id_scan, "signature": folio.signature,
+        })
+
     @action(detail=True, methods=["post"])
     def settle(self, request, pk=None):
         folio = self.get_object()
@@ -78,8 +93,9 @@ class FolioViewSet(ModuleViewSetMixin, viewsets.ModelViewSet):
         guest = folio.reservation.guest if folio.reservation else None
         email = getattr(guest, "email", "") or ""
         mobile = getattr(guest, "mobile", "") or ""
+        from apps.accounts.constants import currency_symbol
         body = (f"{folio.guest_name}, your invoice {folio.invoice_no or '(pending)'} "
-                f"total ₹{folio.charges_total}. Thank you for staying with us.")
+                f"total {currency_symbol()}{folio.charges_total}. Thank you for staying with us.")
         if email:
             integ.notify("email", email, body)
             return Response({"sent": True, "channel": "email", "to": email})
@@ -331,21 +347,35 @@ class CheckInView(ModuleViewSetMixin, viewsets.ViewSet):
         id_number = request.data.get("id_number", "")
         guest_type = request.data.get("guest_type", "")
         company_name = (request.data.get("company_name") or "").strip()
+        # Registration-card evidence: scanned ID proof + digital signature
+        # (image data URLs from the wizard). Size-capped so a raw phone photo
+        # can't bloat the row — the frontend downscales before sending.
+        id_scan = request.data.get("id_scan") or ""
+        signature = request.data.get("signature") or ""
+        for label, blob in (("ID scan", id_scan), ("signature", signature)):
+            if blob and not blob.startswith("data:image/"):
+                return Response({"detail": f"{label} must be an image"}, status=400)
+            if len(blob) > 800_000:
+                return Response({"detail": f"{label} is too large — retake at a smaller size"},
+                                status=400)
         if id_type or guest_type or id_number:
             from apps.accounts.models import log_action
             folio.id_type = id_type
             folio.id_number = id_number
             folio.guest_type = guest_type
+            folio.id_scan = id_scan
+            folio.signature = signature
             # Company name only applies when billing to a company.
             folio.company_name = company_name if guest_type == "corporate" else ""
             if guest_type == "corporate":
                 folio.routing = "city_ledger"
                 folio.company = services.company_account(company_name) if company_name else None
             folio.save(update_fields=["id_type", "id_number", "guest_type", "company_name",
-                                      "company", "routing"])
+                                      "company", "routing", "id_scan", "signature"])
             log_action(
                 request.user, "kyc_capture", entity="Folio", entity_id=folio.id,
                 after={"id_type": id_type, "id_number_present": bool(id_number),
+                       "id_scan_present": bool(id_scan), "signature_present": bool(signature),
                        "guest_type": guest_type, "company": folio.company_name},
                 note="Check-in KYC captured",
             )

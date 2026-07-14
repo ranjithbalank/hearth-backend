@@ -228,3 +228,40 @@ class RoleMatrixView(APIView):
         log_action(request.user, "role_permission", entity="RoleConfig", entity_id=role,
                    after={"module": module, "allowed": allowed})
         return Response({"role": role, "modules": mods})
+
+
+class AuditLogView(APIView):
+    """Read-only trail of security-relevant actions (BRD FR-USR-007 / SR-090):
+    who did what, when, with before → after values. The table itself is
+    append-only and immutable — this endpoint only ever reads it.
+
+    Filters: ?entity=Department  ?action=master_updated  ?q=<username substring>
+    Newest first, capped at `limit` rows (default 200, max 1000)."""
+
+    permission_classes = [IsAuthenticated, ModulePermission]
+    module = "settings"
+
+    def get(self, request):
+        from .models import AuditLog
+        qs = AuditLog.objects.select_related("user")
+        entity = request.query_params.get("entity")
+        action_ = request.query_params.get("action")
+        q = request.query_params.get("q")
+        if entity:
+            qs = qs.filter(entity=entity)
+        if action_:
+            qs = qs.filter(action=action_)
+        if q:
+            qs = qs.filter(user__username__icontains=q)
+        try:
+            limit = min(max(int(request.query_params.get("limit", 200)), 1), 1000)
+        except ValueError:
+            limit = 200
+        return Response([
+            {"id": a.id, "created_at": a.created_at,
+             "user": a.user.username if a.user else "system",
+             "user_name": (a.user.get_full_name() or a.user.username) if a.user else "System",
+             "action": a.action, "entity": a.entity, "entity_id": a.entity_id,
+             "before": a.before, "after": a.after, "note": a.note}
+            for a in qs[:limit]
+        ])

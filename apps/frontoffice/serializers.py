@@ -30,6 +30,10 @@ class FolioSerializer(serializers.ModelSerializer):
     effective_billing_mode = serializers.SerializerMethodField()
     pending_charges = serializers.SerializerMethodField()
     projected_balance = serializers.SerializerMethodField()
+    # The scan/signature blobs themselves stay out of folio payloads (PII +
+    # size) — only presence flags here; the images come from /registration/.
+    has_id_scan = serializers.SerializerMethodField()
+    has_signature = serializers.SerializerMethodField()
 
     class Meta:
         model = Folio
@@ -38,8 +42,14 @@ class FolioSerializer(serializers.ModelSerializer):
             "routing", "opened_at", "settled_at", "invoice_no", "lines",
             "settlements", "charges_total", "paid_total", "balance",
             "guest_type", "company_name", "billing_mode", "effective_billing_mode",
-            "pending_charges", "projected_balance",
+            "pending_charges", "projected_balance", "has_id_scan", "has_signature",
         ]
+
+    def get_has_id_scan(self, obj):
+        return bool(obj.id_scan)
+
+    def get_has_signature(self, obj):
+        return bool(obj.signature)
 
     def get_effective_billing_mode(self, obj):
         from . import services

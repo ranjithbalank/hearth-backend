@@ -1,27 +1,72 @@
 import calendar
 from datetime import date
-from decimal import Decimal
+from decimal import Decimal, InvalidOperation
 
 from rest_framework import viewsets
 from rest_framework.decorators import action
 from rest_framework.response import Response
 
 from apps.accounts.models import log_action
-from apps.accounts.permissions import ModuleViewSetMixin
+from apps.accounts.permissions import AnyModuleViewSetMixin
 
 from .models import Attendance, Employee
 
 
-class HrViewSet(ModuleViewSetMixin, viewsets.ViewSet):
-    module = "hr"
+def _employee_dict(e):
+    return {"id": e.id, "name": e.name, "department": e.department, "role": e.role,
+            "phone": e.phone, "shifts": e.shifts, "status": e.status,
+            "monthly_salary": str(e.monthly_salary)}
+
+
+class HrViewSet(AnyModuleViewSetMixin, viewsets.ViewSet):
+    # Serves two desks: the HR module proper (attendance, payroll) and the
+    # Employees master screen, which Admin reaches via "employees" without
+    # holding the full "hr" module.
+    modules = ["hr", "employees"]
 
     def list(self, request):
-        return Response([
-            {"id": e.id, "name": e.name, "department": e.department, "role": e.role,
-             "phone": e.phone, "shifts": e.shifts, "status": e.status,
-             "monthly_salary": str(e.monthly_salary)}
-            for e in Employee.objects.all()
-        ])
+        return Response([_employee_dict(e) for e in Employee.objects.all()])
+
+    def create(self, request):
+        """Add a staff record. Department and designation must be active rows
+        in the masters (Settings > Masters) — same pattern as Ingredient.unit
+        against the UoM master."""
+        from apps.masters.models import Department, Designation
+        name = (request.data.get("name") or "").strip()
+        department = (request.data.get("department") or "").strip()
+        role = (request.data.get("role") or "").strip()
+        if not (name and department and role):
+            return Response({"detail": "name, department and designation are required"}, status=400)
+        if not Department.objects.filter(name=department, active=True).exists():
+            return Response({"detail": f"'{department}' is not an active department"}, status=400)
+        if not Designation.objects.filter(name=role, active=True).exists():
+            return Response({"detail": f"'{role}' is not an active designation"}, status=400)
+        try:
+            salary = Decimal(str(request.data.get("monthly_salary") or 0))
+        except InvalidOperation:
+            return Response({"detail": "invalid monthly salary"}, status=400)
+        e = Employee.objects.create(
+            name=name, department=department, role=role,
+            phone=(request.data.get("phone") or "").strip(), monthly_salary=salary)
+        log_action(request.user, "employee_created", entity="Employee", entity_id=e.id,
+                   after={"name": name, "department": department, "role": role})
+        return Response(_employee_dict(e), status=201)
+
+    @action(detail=True, methods=["post"])
+    def set_status(self, request, pk=None):
+        """Toggle Active/Inactive — inactive staff drop off attendance & payroll."""
+        e = Employee.objects.filter(pk=pk).first()
+        if not e:
+            return Response({"detail": "not found"}, status=404)
+        status_ = request.data.get("status")
+        if status_ not in ("Active", "Inactive"):
+            return Response({"detail": "status must be Active or Inactive"}, status=400)
+        before = e.status
+        e.status = status_
+        e.save(update_fields=["status"])
+        log_action(request.user, "employee_status", entity="Employee", entity_id=e.id,
+                   before={"status": before}, after={"status": status_})
+        return Response(_employee_dict(e))
 
     @action(detail=False, methods=["get"])
     def attendance(self, request):

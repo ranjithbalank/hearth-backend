@@ -2,12 +2,18 @@ from datetime import date, timedelta
 from decimal import Decimal
 
 from django.test import TestCase
+from rest_framework.test import APIClient
 
+from apps.accounts.models import User
 from apps.reservations.models import Reservation
 from apps.rooms.models import Room, RoomType
 
 from . import services
 from .models import Folio, FolioLine
+
+# Tiny valid image data URL (1×1 PNG) for registration-card tests.
+PIXEL = ("data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJ"
+         "AAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==")
 
 
 class FrontOfficeFlowTests(TestCase):
@@ -31,6 +37,44 @@ class FrontOfficeFlowTests(TestCase):
         self.assertEqual(self.room.status, Room.OCCUPIED)
         self.assertEqual(self.resv.status, Reservation.IN_HOUSE)
         self.assertEqual(folio.status, Folio.OPEN)
+
+    def test_checkin_stores_id_scan_and_signature(self):
+        """Registration-card evidence: the wizard's ID scan + signature land on
+        the folio, list payloads carry only presence flags, and the images come
+        back from the audited /registration/ endpoint."""
+        desk = APIClient()
+        desk.force_authenticate(User.objects.create_user(
+            username="fo", password="Tk9$mZ2pQw!7", role="Front Office"))
+        r = desk.post("/api/checkin/", {
+            "reservation": self.resv.id, "room": self.room.id,
+            "id_type": "Passport", "id_number": "P1234567", "mobile": "9876543210",
+            "id_scan": PIXEL, "signature": PIXEL,
+        }, format="json")
+        self.assertEqual(r.status_code, 201, r.data)
+        # Folio payload: presence flags only, no blobs.
+        self.assertTrue(r.data["has_id_scan"] and r.data["has_signature"])
+        self.assertNotIn("id_scan", r.data)
+        # The registration endpoint returns the evidence…
+        reg = desk.get(f"/api/folios/{r.data['id']}/registration/")
+        self.assertEqual(reg.status_code, 200)
+        self.assertEqual(reg.data["id_scan"], PIXEL)
+        self.assertEqual(reg.data["signature"], PIXEL)
+        # …and reading it left an audit entry.
+        from apps.accounts.models import AuditLog
+        self.assertTrue(AuditLog.objects.filter(
+            action="registration_viewed", entity_id=str(r.data["id"])).exists())
+
+    def test_checkin_rejects_non_image_scan(self):
+        desk = APIClient()
+        desk.force_authenticate(User.objects.create_user(
+            username="fo2", password="Tk9$mZ2pQw!7", role="Front Office"))
+        r = desk.post("/api/checkin/", {
+            "reservation": self.resv.id, "room": self.room.id,
+            "id_type": "Passport", "id_number": "P1234567", "mobile": "9876543210",
+            "id_scan": "data:text/html,<script>alert(1)</script>",
+        }, format="json")
+        self.assertEqual(r.status_code, 400)
+        self.assertIn("must be an image", r.data["detail"])
 
     def test_post_charge_applies_gst(self):
         folio = services.check_in(self.resv, self.room)

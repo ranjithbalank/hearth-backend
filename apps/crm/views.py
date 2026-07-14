@@ -139,6 +139,13 @@ class CustomerViewSet(ModuleViewSetMixin, viewsets.ModelViewSet):
         cust.marketing_consent = False
         cust.tags = []
         cust.save()
+        # Registration-card evidence (ID scan, signature) on this guest's
+        # folios is PII too — erase it with the profile. The financial rows
+        # (charges/settlements) stay, as SR-053 requires.
+        from apps.frontoffice.models import Folio
+        wiped = (Folio.objects.filter(reservation__guest=cust)
+                 .exclude(id_scan="", signature="")
+                 .update(id_scan="", signature=""))
         log_action(request.user, "dpdp_erase", entity="Customer", entity_id=cust.id,
-                   before=before, after={"anonymised": True})
+                   before=before, after={"anonymised": True, "registration_scans_wiped": wiped})
         return Response({"erased": True, "customer": CustomerSerializer(cust).data})

@@ -174,8 +174,13 @@ class TillViewSet(CounterOnlyMixin, ModuleViewSetMixin, viewsets.ViewSet):
             return Response({"detail": "open till session not found"}, status=404)
         counted = Decimal(str(request.data.get("counted_cash", 0)))
         ins, outs = s.cash_in_out()
+        # Every tender flagged counts_as_cash in the master lands in the
+        # physical drawer, so all of them belong in the expected-cash math.
+        from apps.masters.models import PaymentMethod
+        cash_tenders = list(PaymentMethod.objects
+                            .filter(counts_as_cash=True).values_list("name", flat=True)) or ["Cash"]
         cash_taken = (Settlement.objects
-                      .filter(tender="Cash", created_at__gte=s.opened_at)
+                      .filter(tender__in=cash_tenders, created_at__gte=s.opened_at)
                       .aggregate(t=Sum("amount"))["t"] or Decimal("0"))
         s.expected_cash = s.opening_float + ins - outs + cash_taken
         s.counted_cash = counted
@@ -1254,8 +1259,14 @@ class OrderViewSet(AnyModuleViewSetMixin, viewsets.ModelViewSet):
                             status=400)
         t = order.totals()
         tender = request.data.get("tender", "Cash")
-        # Role↔tender mapping: e.g. captains settle UPI/gateway tableside,
-        # but cash is handled only at the cashier counter (BRD 5.10).
+        # Tender must be an active row in the payment-methods master
+        # (Settings > Masters) — a disabled or unknown tender can't take money.
+        from apps.masters.models import PaymentMethod
+        if not PaymentMethod.objects.filter(name=tender, active=True).exists():
+            return Response({"detail": f"'{tender}' is not an active payment method"}, status=400)
+        # Role↔tender mapping: e.g. captains settle digital tenders tableside,
+        # but drawer-cash tenders belong at the cashier counter (BRD 5.10) —
+        # per-tender behavior comes from the master's captain_allowed flag.
         from apps.accounts.constants import role_can_tender
         if not role_can_tender(getattr(request.user, "role", ""), tender):
             return Response(
@@ -1280,9 +1291,10 @@ class OrderViewSet(AnyModuleViewSetMixin, viewsets.ModelViewSet):
         self._free_table_if_idle(order.bar_table)
         # Receipt notification to the customer (FR-NOT-001).
         if order.customer:
+            from apps.accounts.constants import currency_symbol
             from apps.integrations import services as integ
             integ.notify("sms", order.customer.mobile,
-                         f"Thanks for dining with Hearth! Bill {reference}: ₹{t['total']}.")
+                         f"Thanks for dining with Hearth! Bill {reference}: {currency_symbol()}{t['total']}.")
         log_action(request.user, "pos_settle", entity="Order", entity_id=order.id,
                    after={"total": str(t["total"]), "discount": str(t["discount"]), "tender": tender})
         return Response(OrderSerializer(order).data)

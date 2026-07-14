@@ -2,6 +2,7 @@ from django.urls import include, path
 from rest_framework.routers import DefaultRouter
 
 from .views import (
+    AuditLogView,
     EntitlementView,
     HearthTokenView,
     MeView,
@@ -24,6 +25,7 @@ urlpatterns = [
     path("setup/", SetupView.as_view(), name="setup"),
     path("entitlements/", EntitlementView.as_view(), name="entitlements"),
     path("roles/matrix/", RoleMatrixView.as_view(), name="roles-matrix"),
+    path("audit/", AuditLogView.as_view(), name="audit-log"),
     path("mfa/setup/", MfaSetupView.as_view(), name="mfa-setup"),
     path("mfa/verify/", MfaVerifyView.as_view(), name="mfa-verify"),
     path("mfa/disable/", MfaDisableView.as_view(), name="mfa-disable"),
