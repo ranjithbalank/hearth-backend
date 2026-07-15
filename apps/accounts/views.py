@@ -51,10 +51,18 @@ class MeView(APIView):
 
 class PropertyView(APIView):
     """Property + entitlement state. Setup is open (AllowAny) for the first-run screen;
-    reads require auth otherwise. PATCH edits the business details (name/GSTIN/address)."""
+    reads require auth otherwise. PATCH edits business/branding details (name, GSTIN,
+    currency, document prefixes, aggregator commission) — configuration that belongs to
+    settings-capable roles only. It was previously IsAuthenticated, letting any logged-in
+    user (a cashier, a captain) rewrite the property's GSTIN/currency/prefixes
+    (go-live QA finding CX-RBAC: PATCH /auth/property/)."""
+
+    module = "settings"
 
     def get_permissions(self):
-        return [AllowAny()] if self.request.method == "GET" else [IsAuthenticated()]
+        if self.request.method == "GET":
+            return [AllowAny()]
+        return [IsAuthenticated(), ModulePermission()]
 
     def get(self, request):
         return Response(PropertySerializer(get_property()).data)
