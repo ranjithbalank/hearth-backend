@@ -24,7 +24,7 @@ def _m(v):
     return "INR " + f"{Decimal(str(v)):,.2f}"
 
 
-def build_bill_pdf(order, property_name, doc_footer=""):
+def build_bill_pdf(order, property_name, doc_footer="", doc_footer_align="center"):
     buf = io.BytesIO()
     # A slim receipt page.
     doc = SimpleDocTemplate(buf, pagesize=(80 * mm, 200 * mm), topMargin=8 * mm,
@@ -77,9 +77,11 @@ def build_bill_pdf(order, property_name, doc_footer=""):
         story.append(Spacer(1, 4))
     # Letterhead footer (Settings → Letterhead), e.g. FSSAI no. / thank-you line.
     if doc_footer:
+        _align = {"left": 0, "center": 1, "right": 2}.get(doc_footer_align, 1)
+        foot_style = ParagraphStyle("bf", parent=small, alignment=_align)
         for ln in doc_footer.splitlines()[:3]:
             if ln.strip():
-                story.append(Paragraph(ln.strip(), small))
+                story.append(Paragraph(ln.strip(), foot_style))
     story.append(Paragraph(f"Thank you · {property_name}", small))
     doc.build(story)
     buf.seek(0)

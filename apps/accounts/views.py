@@ -70,7 +70,7 @@ class PropertyView(APIView):
     def patch(self, request):
         prop = get_property()
         for f in ["name", "gstin", "address", "phone", "logo", "currency",
-                  "doc_header", "doc_footer",
+                  "doc_header", "doc_footer", "doc_header_align", "doc_footer_align",
                   "zomato_commission_pct", "swiggy_commission_pct",
                   "invoice_prefix", "bill_prefix", "po_prefix", "grn_prefix", "beo_prefix"]:
             if f in request.data:
