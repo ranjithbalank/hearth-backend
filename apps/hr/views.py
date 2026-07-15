@@ -717,7 +717,12 @@ class LeaveViewSet(ModuleViewSetMixin, viewsets.ViewSet):
             if not emp:
                 return Response({"detail": "no staff record is linked to your login — ask HR to link one"},
                                 status=400)
-        lt = LeaveType.objects.filter(pk=request.data.get("leave_type"), active=True).first()
+        try:
+            lt_id = int(request.data.get("leave_type"))
+        except (TypeError, ValueError):
+            # A non-numeric id crashed with a 500 here (QA finding TC-095).
+            return Response({"detail": "pick a leave type"}, status=400)
+        lt = LeaveType.objects.filter(pk=lt_id, active=True).first()
         if not lt:
             return Response({"detail": "pick a leave type"}, status=400)
         try:

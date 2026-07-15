@@ -5,14 +5,17 @@ from rest_framework.decorators import action
 from rest_framework.response import Response
 
 from apps.accounts.models import log_action
-from apps.accounts.permissions import ModuleViewSetMixin
+from apps.accounts.permissions import AnyModuleViewSetMixin
 
 from .models import Customer
 from .serializers import CustomerSerializer
 
 
-class CustomerViewSet(ModuleViewSetMixin, viewsets.ModelViewSet):
-    module = "crm"
+class CustomerViewSet(AnyModuleViewSetMixin, viewsets.ModelViewSet):
+    # Serves two desks: the CRM module proper (campaigns, loyalty) and the
+    # Customers master screen, which Admin/Front Office reach via "customers"
+    # without holding "crm" (QA finding TC-100 — same split as HrViewSet).
+    modules = ["crm", "customers"]
     queryset = Customer.objects.all()
     serializer_class = CustomerSerializer
 

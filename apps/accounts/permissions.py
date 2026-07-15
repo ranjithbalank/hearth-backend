@@ -33,6 +33,13 @@ def user_branch_ids(user):
     """
     if getattr(user, "role", None) in PROTECTED:
         return "*"
+    # Single-property mode: with no branches configured there is nothing to
+    # scope BY — strict scoping would blank every floor screen (tables, rooms,
+    # bar) for every non-executive role (QA finding TC-048/065: the cashier's
+    # POS floor was empty on upgraded installs that predate branches).
+    from .models import Branch
+    if not Branch.objects.exists():
+        return "*"
     from datetime import date
 
     today = date.today()

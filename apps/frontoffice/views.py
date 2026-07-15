@@ -313,6 +313,11 @@ class CheckInView(ModuleViewSetMixin, viewsets.ViewSet):
         resv = Reservation.objects.filter(pk=resv_id).first()
         if not resv:
             return Response({"detail": "reservation not found"}, status=404)
+        # Re-running check-in on an in-house/closed stay would double-assign
+        # rooms and re-write KYC over the live folio (QA finding TC-037).
+        if resv.status != Reservation.BOOKED:
+            return Response({"detail": f"reservation is already {resv.get_status_display().lower()}"},
+                            status=400)
         room = Room.objects.filter(pk=room_id).first() if room_id else None
         # A stay can only go into a room at its own branch — catch a stale
         # or cross-branch room id before opening the folio against it.
@@ -338,6 +343,17 @@ class CheckInView(ModuleViewSetMixin, viewsets.ViewSet):
         mobile_digits = "".join(ch for ch in (request.data.get("mobile") or "") if ch.isdigit())
         if len(mobile_digits) < 7:
             return Response({"detail": "A valid mobile number is required to check in."}, status=400)
+        # Registration-card evidence must be validated BEFORE check_in runs —
+        # a rejected scan used to leave the guest already checked in (room
+        # occupied, folio open) behind a 400 response (QA finding TC-033/034).
+        id_scan = request.data.get("id_scan") or ""
+        signature = request.data.get("signature") or ""
+        for label, blob in (("ID scan", id_scan), ("signature", signature)):
+            if blob and not blob.startswith("data:image/"):
+                return Response({"detail": f"{label} must be an image"}, status=400)
+            if len(blob) > 800_000:
+                return Response({"detail": f"{label} is too large — retake at a smaller size"},
+                                status=400)
         folio = services.check_in(resv, room, user=request.user)
         # Persist the guest's contact to the customer store for later enquiry.
         mobile = (request.data.get("mobile") or "").strip()
@@ -357,17 +373,6 @@ class CheckInView(ModuleViewSetMixin, viewsets.ViewSet):
         id_number = request.data.get("id_number", "")
         guest_type = request.data.get("guest_type", "")
         company_name = (request.data.get("company_name") or "").strip()
-        # Registration-card evidence: scanned ID proof + digital signature
-        # (image data URLs from the wizard). Size-capped so a raw phone photo
-        # can't bloat the row — the frontend downscales before sending.
-        id_scan = request.data.get("id_scan") or ""
-        signature = request.data.get("signature") or ""
-        for label, blob in (("ID scan", id_scan), ("signature", signature)):
-            if blob and not blob.startswith("data:image/"):
-                return Response({"detail": f"{label} must be an image"}, status=400)
-            if len(blob) > 800_000:
-                return Response({"detail": f"{label} is too large — retake at a smaller size"},
-                                status=400)
         if id_type or guest_type or id_number:
             from apps.accounts.models import log_action
             folio.id_type = id_type
