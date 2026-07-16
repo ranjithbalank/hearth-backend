@@ -43,10 +43,14 @@ def _logo_flowable(logo_data_url):
         return None
 
 
+_ALIGN = {"left": 0, "center": 1, "right": 2}
+
+
 def build_invoice_pdf(folio, property_name, gstin, address="", with_gst=True,
-                      logo="", doc_header="", doc_footer=""):
+                      logo="", doc_header="", doc_footer="",
+                      doc_header_align="left", doc_footer_align="center"):
     """with_gst=True → GST tax invoice; False → bill of supply (no tax columns).
-    logo/doc_header/doc_footer come from Settings → Letterhead."""
+    logo/doc_header/doc_footer/alignment come from Settings → Letterhead."""
     buf = io.BytesIO()
     doc = SimpleDocTemplate(buf, pagesize=A4, topMargin=18 * mm, bottomMargin=18 * mm,
                             leftMargin=16 * mm, rightMargin=16 * mm, title=f"Invoice {folio.invoice_no or folio.id}")
@@ -59,12 +63,15 @@ def build_invoice_pdf(folio, property_name, gstin, address="", with_gst=True,
     doc_title = "TAX INVOICE" if with_gst else "BILL OF SUPPLY"
 
     # Letterhead: logo + name/address/GSTIN + custom header lines (Settings).
-    extra_lines = "".join(
-        f"<br/>{ln.strip()}" for ln in (doc_header or "").splitlines() if ln.strip())
     brand_cell = [Paragraph(f"{property_name}<br/>"
                             f"<font size=8 color='#8A8478'>{address + '<br/>' if address else ''}"
                             f"{'GSTIN: ' + gstin if gstin and with_gst else ''}"
-                            f"{extra_lines}</font>", h_brand)]
+                            f"</font>", h_brand)]
+    # Custom header lines get their own alignment (left/center/right).
+    header_lines = [ln.strip() for ln in (doc_header or "").splitlines() if ln.strip()]
+    if header_lines:
+        h_extra = ParagraphStyle("hx", parent=small, alignment=_ALIGN.get(doc_header_align, 0))
+        brand_cell.append(Paragraph("<br/>".join(header_lines), h_extra))
     logo_img = _logo_flowable(logo) if logo else None
     if logo_img:
         brand_cell.insert(0, logo_img)
@@ -138,9 +145,10 @@ def build_invoice_pdf(folio, property_name, gstin, address="", with_gst=True,
     story += [tot, Spacer(1, 14)]
     # Custom terms & conditions / bank details footer (Settings → Letterhead).
     if doc_footer:
+        f_style = ParagraphStyle("fx", parent=small, alignment=_ALIGN.get(doc_footer_align, 1))
         for ln in doc_footer.splitlines():
             if ln.strip():
-                story.append(Paragraph(f"<font size=8 color='#8A8478'>{ln.strip()}</font>", small))
+                story.append(Paragraph(f"<font size=8 color='#8A8478'>{ln.strip()}</font>", f_style))
         story.append(Spacer(1, 8))
     footer = ("GST-compliant tax invoice" if with_gst
               else "bill of supply — GST not applicable")

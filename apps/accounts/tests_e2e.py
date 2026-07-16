@@ -33,7 +33,7 @@ class GuestJourneyE2E(TestCase):
         c = self.client
         # 1. Walk-in -> reservation
         resv = c.post(reverse("reservation-walkin"),
-                      {"guest_name": "E2E Guest", "mobile": "9000000009",
+                      {"guest_name": "Journey Guest", "mobile": "9000000009",
                        "room_type": "DLX", "nights": 1}, format="json").data
         # 2. Check in -> folio + room occupied
         folio = c.post(reverse("checkin-list"),

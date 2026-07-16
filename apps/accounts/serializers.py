@@ -62,6 +62,30 @@ class UserSerializer(serializers.ModelSerializer):
             obj.branch_access.select_related("branch").all(), many=True
         ).data
 
+    def validate_first_name(self, value):
+        from .validators import validate_person_name
+        return validate_person_name(value)
+
+    def validate_last_name(self, value):
+        from .validators import validate_person_name
+        return validate_person_name(value)
+
+    def validate_passcode(self, value):
+        from .validators import validate_digits
+        return validate_digits(value, field="POS passcode", max_len=12)
+
+    def validate_password(self, value):
+        # set_password() alone skips AUTH_PASSWORD_VALIDATORS — without this,
+        # Settings > Users happily accepted "123" (QA finding TC-007).
+        if value:
+            from django.contrib.auth.password_validation import validate_password
+            from django.core.exceptions import ValidationError as DjangoValidationError
+            try:
+                validate_password(value)
+            except DjangoValidationError as e:
+                raise serializers.ValidationError(list(e.messages))
+        return value
+
     def create(self, validated_data):
         password = validated_data.pop("password", "") or ""
         user = User(**validated_data)
@@ -94,6 +118,7 @@ class PropertySerializer(serializers.ModelSerializer):
         fields = [
             "id", "name", "edition", "setup_done", "business_date",
             "gstin", "address", "phone", "logo", "doc_header", "doc_footer",
+            "doc_header_align", "doc_footer_align",
             "currency", "entitlement", "gst_billing_mode",
             "zomato_commission_pct", "swiggy_commission_pct",
             "invoice_prefix", "bill_prefix", "po_prefix", "grn_prefix", "beo_prefix",

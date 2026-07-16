@@ -106,6 +106,12 @@ class ReservationViewSet(ModuleViewSetMixin, viewsets.ModelViewSet):
         rt = RoomType.objects.filter(code=request.data.get("room_type")).first()
         if not rt:
             return Response({"detail": "room_type not found"}, status=400)
+        from apps.accounts.validators import validate_person_name
+        from rest_framework.serializers import ValidationError as DRFValidationError
+        try:
+            validate_person_name(request.data.get("guest_name", ""))
+        except DRFValidationError as e:
+            return Response({"detail": e.detail[0] if isinstance(e.detail, list) else str(e.detail)}, status=400)
         nights = int(request.data.get("nights", 1))
         guest = None
         mobile = request.data.get("mobile", "").strip()

@@ -30,6 +30,11 @@ class Property(models.Model):
                                   help_text="extra letterhead lines (tagline, CIN, FSSAI…)")
     doc_footer = models.TextField(blank=True, default="",
                                   help_text="terms & conditions / bank details footer")
+    # Text alignment for the header/footer letterhead blocks on printed
+    # documents — left / center / right (Settings > Letterhead).
+    ALIGN_CHOICES = [("left", "Left"), ("center", "Center"), ("right", "Right")]
+    doc_header_align = models.CharField(max_length=6, choices=ALIGN_CHOICES, default="left")
+    doc_footer_align = models.CharField(max_length=6, choices=ALIGN_CHOICES, default="center")
     # Configurable prefixes for each document type's sequential number
     # (PREFIX-YYYYMM-NNNNN — see apps/accounts/numbering.py).
     invoice_prefix = models.CharField(max_length=12, default="HRT")

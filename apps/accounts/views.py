@@ -51,10 +51,18 @@ class MeView(APIView):
 
 class PropertyView(APIView):
     """Property + entitlement state. Setup is open (AllowAny) for the first-run screen;
-    reads require auth otherwise. PATCH edits the business details (name/GSTIN/address)."""
+    reads require auth otherwise. PATCH edits business/branding details (name, GSTIN,
+    currency, document prefixes, aggregator commission) — configuration that belongs to
+    settings-capable roles only. It was previously IsAuthenticated, letting any logged-in
+    user (a cashier, a captain) rewrite the property's GSTIN/currency/prefixes
+    (go-live QA finding CX-RBAC: PATCH /auth/property/)."""
+
+    module = "settings"
 
     def get_permissions(self):
-        return [AllowAny()] if self.request.method == "GET" else [IsAuthenticated()]
+        if self.request.method == "GET":
+            return [AllowAny()]
+        return [IsAuthenticated(), ModulePermission()]
 
     def get(self, request):
         return Response(PropertySerializer(get_property()).data)
@@ -62,7 +70,7 @@ class PropertyView(APIView):
     def patch(self, request):
         prop = get_property()
         for f in ["name", "gstin", "address", "phone", "logo", "currency",
-                  "doc_header", "doc_footer",
+                  "doc_header", "doc_footer", "doc_header_align", "doc_footer_align",
                   "zomato_commission_pct", "swiggy_commission_pct",
                   "invoice_prefix", "bill_prefix", "po_prefix", "grn_prefix", "beo_prefix"]:
             if f in request.data:
@@ -294,3 +302,40 @@ class RoleMatrixView(APIView):
         log_action(request.user, "role_permission", entity="RoleConfig", entity_id=role,
                    after={"module": module, "allowed": allowed})
         return Response({"role": role, "modules": mods})
+
+
+class AuditLogView(APIView):
+    """Read-only trail of security-relevant actions (BRD FR-USR-007 / SR-090):
+    who did what, when, with before → after values. The table itself is
+    append-only and immutable — this endpoint only ever reads it.
+
+    Filters: ?entity=Department  ?action=master_updated  ?q=<username substring>
+    Newest first, capped at `limit` rows (default 200, max 1000)."""
+
+    permission_classes = [IsAuthenticated, ModulePermission]
+    module = "settings"
+
+    def get(self, request):
+        from .models import AuditLog
+        qs = AuditLog.objects.select_related("user")
+        entity = request.query_params.get("entity")
+        action_ = request.query_params.get("action")
+        q = request.query_params.get("q")
+        if entity:
+            qs = qs.filter(entity=entity)
+        if action_:
+            qs = qs.filter(action=action_)
+        if q:
+            qs = qs.filter(user__username__icontains=q)
+        try:
+            limit = min(max(int(request.query_params.get("limit", 200)), 1), 1000)
+        except ValueError:
+            limit = 200
+        return Response([
+            {"id": a.id, "created_at": a.created_at,
+             "user": a.user.username if a.user else "system",
+             "user_name": (a.user.get_full_name() or a.user.username) if a.user else "System",
+             "action": a.action, "entity": a.entity, "entity_id": a.entity_id,
+             "before": a.before, "after": a.after, "note": a.note}
+            for a in qs[:limit]
+        ])
