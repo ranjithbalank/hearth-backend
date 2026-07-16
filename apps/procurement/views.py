@@ -41,17 +41,44 @@ def _requester_branch(request):
     return location
 
 
+def _supplier_dict(s):
+    return {"id": s.id, "name": s.name, "gstin": s.gstin, "contact": s.contact,
+            "payment_terms": s.payment_terms, "lead_time_days": s.lead_time_days,
+            "rating": str(s.rating), "location": s.location_id}
+
+
 class SupplierViewSet(ModuleViewSetMixin, viewsets.ViewSet):
     module = "suppliers"
 
     def list(self, request):
         qs = shared_or_visible(Supplier.objects.all(), request)
-        return Response([
-            {"id": s.id, "name": s.name, "gstin": s.gstin, "contact": s.contact,
-             "payment_terms": s.payment_terms, "lead_time_days": s.lead_time_days,
-             "rating": str(s.rating), "location": s.location_id}
-            for s in qs
-        ])
+        return Response([_supplier_dict(s) for s in qs])
+
+    def create(self, request):
+        """Register a supplier — POs can't be raised for one that isn't on
+        file, and until go-live QA (TC-086) this master was seed-only."""
+        from apps.accounts.models import log_action
+        name = (request.data.get("name") or "").strip()
+        if not name:
+            return Response({"detail": "supplier name is required"}, status=400)
+        if Supplier.objects.filter(name__iexact=name).exists():
+            return Response({"detail": f"'{name}' is already on the supplier list"}, status=400)
+        s = Supplier.objects.create(
+            name=name,
+            gstin=(request.data.get("gstin") or "").strip(),
+            contact=(request.data.get("contact") or "").strip(),
+            payment_terms=(request.data.get("payment_terms") or "").strip(),
+            lead_time_days=int(request.data.get("lead_time_days") or 2),
+            location_id=request.data.get("location") or _requester_branch(request),
+        )
+        log_action(request.user, "supplier_created", entity="Supplier", entity_id=s.id,
+                   after={"name": s.name})
+        return Response(_supplier_dict(s), status=201)
+
+
+def _vendor_dict(v):
+    return {"id": v.id, "name": v.name, "category": v.category, "contact": v.contact,
+            "payment_terms": v.payment_terms, "status": v.status, "location": v.location_id}
 
 
 class VendorViewSet(ModuleViewSetMixin, viewsets.ViewSet):
@@ -59,11 +86,26 @@ class VendorViewSet(ModuleViewSetMixin, viewsets.ViewSet):
 
     def list(self, request):
         qs = shared_or_visible(Vendor.objects.all(), request)
-        return Response([
-            {"id": v.id, "name": v.name, "category": v.category, "contact": v.contact,
-             "payment_terms": v.payment_terms, "status": v.status, "location": v.location_id}
-            for v in qs
-        ])
+        return Response([_vendor_dict(v) for v in qs])
+
+    def create(self, request):
+        """Register a service vendor (same seed-only gap as suppliers)."""
+        from apps.accounts.models import log_action
+        name = (request.data.get("name") or "").strip()
+        if not name:
+            return Response({"detail": "vendor name is required"}, status=400)
+        if Vendor.objects.filter(name__iexact=name).exists():
+            return Response({"detail": f"'{name}' is already on the vendor list"}, status=400)
+        v = Vendor.objects.create(
+            name=name,
+            category=(request.data.get("category") or "").strip(),
+            contact=(request.data.get("contact") or "").strip(),
+            payment_terms=(request.data.get("payment_terms") or "").strip(),
+            location_id=request.data.get("location") or _requester_branch(request),
+        )
+        log_action(request.user, "vendor_created", entity="Vendor", entity_id=v.id,
+                   after={"name": v.name})
+        return Response(_vendor_dict(v), status=201)
 
 
 class PurchaseOrderViewSet(AnyModuleViewSetMixin, viewsets.ViewSet):

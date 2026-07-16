@@ -29,6 +29,21 @@ class FolioViewSet(ModuleViewSetMixin, viewsets.ModelViewSet):
             qs = qs.filter(room__number=room)
         return qs
 
+    @action(detail=True, methods=["get"])
+    def registration(self, request, pk=None):
+        """The stay's registration-card evidence: ID proof scan + guest
+        signature. Kept out of the folio list/detail payloads (sensitive PII
+        and big base64 blobs) — and every read of it leaves an audit entry."""
+        from apps.accounts.models import log_action
+        folio = self.get_object()
+        log_action(request.user, "registration_viewed", entity="Folio", entity_id=folio.id,
+                   note="ID scan / signature viewed")
+        return Response({
+            "id": folio.id, "guest_name": folio.guest_name,
+            "id_type": folio.id_type, "id_number": folio.id_number,
+            "id_scan": folio.id_scan, "signature": folio.signature,
+        })
+
     @action(detail=True, methods=["post"])
     def settle(self, request, pk=None):
         folio = self.get_object()
@@ -65,7 +80,9 @@ class FolioViewSet(ModuleViewSetMixin, viewsets.ModelViewSet):
         with_gst = services.effective_billing_mode(folio) == "with_gst"
         pdf = build_invoice_pdf(folio, prop.name, prop.gstin, prop.address, with_gst=with_gst,
                                 logo=prop.logo, doc_header=prop.doc_header,
-                                doc_footer=prop.doc_footer)
+                                doc_footer=prop.doc_footer,
+                                doc_header_align=prop.doc_header_align,
+                                doc_footer_align=prop.doc_footer_align)
         resp = HttpResponse(pdf.read(), content_type="application/pdf")
         name = folio.invoice_no or f"folio-{folio.id}"
         resp["Content-Disposition"] = f'attachment; filename="{name}.pdf"'
@@ -79,8 +96,9 @@ class FolioViewSet(ModuleViewSetMixin, viewsets.ModelViewSet):
         guest = folio.reservation.guest if folio.reservation else None
         email = getattr(guest, "email", "") or ""
         mobile = getattr(guest, "mobile", "") or ""
+        from apps.accounts.constants import currency_symbol
         body = (f"{folio.guest_name}, your invoice {folio.invoice_no or '(pending)'} "
-                f"total ₹{folio.charges_total}. Thank you for staying with us.")
+                f"total {currency_symbol()}{folio.charges_total}. Thank you for staying with us.")
         if email:
             integ.notify("email", email, body)
             return Response({"sent": True, "channel": "email", "to": email})
@@ -297,6 +315,11 @@ class CheckInView(ModuleViewSetMixin, viewsets.ViewSet):
         resv = Reservation.objects.filter(pk=resv_id).first()
         if not resv:
             return Response({"detail": "reservation not found"}, status=404)
+        # Re-running check-in on an in-house/closed stay would double-assign
+        # rooms and re-write KYC over the live folio (QA finding TC-037).
+        if resv.status != Reservation.BOOKED:
+            return Response({"detail": f"reservation is already {resv.get_status_display().lower()}"},
+                            status=400)
         room = Room.objects.filter(pk=room_id).first() if room_id else None
         # A stay can only go into a room at its own branch — catch a stale
         # or cross-branch room id before opening the folio against it.
@@ -322,6 +345,17 @@ class CheckInView(ModuleViewSetMixin, viewsets.ViewSet):
         mobile_digits = "".join(ch for ch in (request.data.get("mobile") or "") if ch.isdigit())
         if len(mobile_digits) < 7:
             return Response({"detail": "A valid mobile number is required to check in."}, status=400)
+        # Registration-card evidence must be validated BEFORE check_in runs —
+        # a rejected scan used to leave the guest already checked in (room
+        # occupied, folio open) behind a 400 response (QA finding TC-033/034).
+        id_scan = request.data.get("id_scan") or ""
+        signature = request.data.get("signature") or ""
+        for label, blob in (("ID scan", id_scan), ("signature", signature)):
+            if blob and not blob.startswith("data:image/"):
+                return Response({"detail": f"{label} must be an image"}, status=400)
+            if len(blob) > 800_000:
+                return Response({"detail": f"{label} is too large — retake at a smaller size"},
+                                status=400)
         folio = services.check_in(resv, room, user=request.user)
         # Persist the guest's contact to the customer store for later enquiry.
         mobile = (request.data.get("mobile") or "").strip()
@@ -346,16 +380,19 @@ class CheckInView(ModuleViewSetMixin, viewsets.ViewSet):
             folio.id_type = id_type
             folio.id_number = id_number
             folio.guest_type = guest_type
+            folio.id_scan = id_scan
+            folio.signature = signature
             # Company name only applies when billing to a company.
             folio.company_name = company_name if guest_type == "corporate" else ""
             if guest_type == "corporate":
                 folio.routing = "city_ledger"
                 folio.company = services.company_account(company_name) if company_name else None
             folio.save(update_fields=["id_type", "id_number", "guest_type", "company_name",
-                                      "company", "routing"])
+                                      "company", "routing", "id_scan", "signature"])
             log_action(
                 request.user, "kyc_capture", entity="Folio", entity_id=folio.id,
                 after={"id_type": id_type, "id_number_present": bool(id_number),
+                       "id_scan_present": bool(id_scan), "signature_present": bool(signature),
                        "guest_type": guest_type, "company": folio.company_name},
                 note="Check-in KYC captured",
             )

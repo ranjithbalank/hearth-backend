@@ -211,6 +211,25 @@ MODULE_ENTITLEMENT = {
 }
 
 
+# --- Currency ---
+# Symbol for each supported property currency (Settings > Masters > Currency).
+# Mirrors the frontend's CURRENCIES list in lib/currency.ts — keep in sync.
+CURRENCY_SYMBOLS = {
+    "INR": "₹", "USD": "$", "EUR": "€", "GBP": "£", "AED": "د.إ",
+    "SAR": "﷼", "LKR": "Rs", "NPR": "रू", "BDT": "৳", "SGD": "S$",
+    "MYR": "RM", "THB": "฿",
+}
+
+
+def currency_symbol() -> str:
+    """The active property's currency symbol, for guest-facing message text
+    (receipt SMS, report labels). Falls back to the code itself for a
+    currency we don't have a symbol for, and to ₹ pre-setup."""
+    from .models import Property
+    code = (Property.objects.values_list("currency", flat=True).first() or "INR").upper()
+    return CURRENCY_SYMBOLS.get(code, code + " ")
+
+
 # --- Approval chains (segregation of duties) ---
 # Spending money (PO approval) is a manager's call; issuing held stock
 # (indent approval) is the store's call — never the requester's own.
@@ -373,8 +392,10 @@ def role_can_view_report(role: str, report: str) -> bool:
 
 # --- POS tender mapping (BRD 5.10 role mapping) ---
 # Which tenders each role may accept when settling a bill. "*" == all tenders.
-# Captains take digital payments (UPI / gateway) tableside; cash is counted and
-# reconciled only at the cashier counter, so it stays with cashier/managers.
+# Captains take digital payments tableside; whether a specific tender is
+# captain-safe now comes from the PaymentMethod master's captain_allowed flag
+# (Settings > Masters) — the static list below is only the fallback for
+# tenders that predate the master or bypass it (aggregator prepaid rows).
 ROLE_TENDERS = {
     ROLE_SUPER_ADMIN: "*",
     ROLE_MD: "*",
@@ -392,10 +413,16 @@ ROLE_TENDERS = {
 
 def role_can_tender(role: str, tender: str) -> bool:
     allow = ROLE_TENDERS.get(role)
-    if allow == "*":
-        return True
     if allow is None:
         return False
+    from apps.masters.models import PaymentMethod
+    pm = PaymentMethod.objects.filter(name=tender).first()
+    if pm is not None:
+        if not pm.active:
+            return False
+        return True if allow == "*" else pm.captain_allowed
+    if allow == "*":
+        return True
     return tender in allow
 
 

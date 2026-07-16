@@ -113,6 +113,12 @@ class BanquetViewSet(ModuleViewSetMixin, viewsets.ViewSet):
             food_veg = 0
         food_covers = food_veg + food_nonveg
         # Rates fall back to the property's standard catering prices when omitted.
+        from apps.accounts.validators import validate_person_name
+        from rest_framework.serializers import ValidationError as DRFValidationError
+        try:
+            validate_person_name(request.data.get("host", ""))  # event host is a person
+        except DRFValidationError as ex:
+            return Response({"detail": ex.detail[0] if isinstance(ex.detail, list) else str(ex.detail)}, status=400)
         defaults = CateringRate.get_solo()
         veg_rate = Decimal(str(request.data.get("veg_rate") or 0)) or defaults.veg_rate
         nonveg_rate = Decimal(str(request.data.get("nonveg_rate") or 0)) or defaults.nonveg_rate

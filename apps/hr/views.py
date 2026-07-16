@@ -1,6 +1,6 @@
 import calendar
 from datetime import date, timedelta
-from decimal import Decimal
+from decimal import Decimal, InvalidOperation
 
 from django.db import transaction
 from django.utils import timezone
@@ -9,7 +9,12 @@ from rest_framework.decorators import action
 from rest_framework.response import Response
 
 from apps.accounts.models import log_action
-from apps.accounts.permissions import ModuleViewSetMixin, resolve_active_branch, shared_or_visible
+from apps.accounts.permissions import (
+    AnyModuleViewSetMixin,
+    ModuleViewSetMixin,
+    resolve_active_branch,
+    shared_or_visible,
+)
 
 from .models import (
     AdvanceRecovery,
@@ -36,8 +41,11 @@ def _employee_dict(e):
     }
 
 
-class HrViewSet(ModuleViewSetMixin, viewsets.ViewSet):
-    module = "hr"
+class HrViewSet(AnyModuleViewSetMixin, viewsets.ViewSet):
+    # Serves two desks: the HR module proper (attendance, payroll) and the
+    # Employees master screen, which Admin reaches via "employees" without
+    # holding the full "hr" module.
+    modules = ["hr", "employees"]
 
     def list(self, request):
         # Payroll/attendance covers everyone on the roster whether or not
@@ -55,6 +63,20 @@ class HrViewSet(ModuleViewSetMixin, viewsets.ViewSet):
         role = (request.data.get("role") or "").strip()
         if not name or not department or not role:
             return Response({"detail": "name, department and role are required"}, status=400)
+        from apps.accounts.validators import validate_digits, validate_person_name
+        from rest_framework.serializers import ValidationError as DRFValidationError
+        try:
+            validate_person_name(name)
+            validate_digits(request.data.get("phone", ""), field="Phone", max_len=15)
+        except DRFValidationError as e:
+            return Response({"detail": e.detail[0] if isinstance(e.detail, list) else str(e.detail)}, status=400)
+        # Department and designation must be active rows in the masters
+        # (Settings > Masters) — same pattern as Ingredient.unit vs UoM.
+        from apps.masters.models import Department, Designation
+        if not Department.objects.filter(name=department, active=True).exists():
+            return Response({"detail": f"'{department}' is not an active department"}, status=400)
+        if not Designation.objects.filter(name=role, active=True).exists():
+            return Response({"detail": f"'{role}' is not an active designation"}, status=400)
         branch_id = request.data.get("branch") or resolve_active_branch(request)
         wage_type = request.data.get("wage_type") or Employee.MONTHLY
         if wage_type not in (Employee.MONTHLY, Employee.DAILY):
@@ -74,6 +96,22 @@ class HrViewSet(ModuleViewSetMixin, viewsets.ViewSet):
         log_action(request.user, "employee_add", entity="Employee", entity_id=e.id,
                    after={"name": name, "department": department, "branch": branch_id})
         return Response(_employee_dict(e), status=201)
+
+    @action(detail=True, methods=["post"])
+    def set_status(self, request, pk=None):
+        """Toggle Active/Inactive — inactive staff drop off attendance & payroll."""
+        e = Employee.objects.filter(pk=pk).first()
+        if not e:
+            return Response({"detail": "not found"}, status=404)
+        status_ = request.data.get("status")
+        if status_ not in ("Active", "Inactive"):
+            return Response({"detail": "status must be Active or Inactive"}, status=400)
+        before = e.status
+        e.status = status_
+        e.save(update_fields=["status"])
+        log_action(request.user, "employee_status", entity="Employee", entity_id=e.id,
+                   before={"status": before}, after={"status": status_})
+        return Response(_employee_dict(e))
 
     @action(detail=False, methods=["get"])
     def attendance(self, request):
@@ -686,7 +724,12 @@ class LeaveViewSet(ModuleViewSetMixin, viewsets.ViewSet):
             if not emp:
                 return Response({"detail": "no staff record is linked to your login — ask HR to link one"},
                                 status=400)
-        lt = LeaveType.objects.filter(pk=request.data.get("leave_type"), active=True).first()
+        try:
+            lt_id = int(request.data.get("leave_type"))
+        except (TypeError, ValueError):
+            # A non-numeric id crashed with a 500 here (QA finding TC-095).
+            return Response({"detail": "pick a leave type"}, status=400)
+        lt = LeaveType.objects.filter(pk=lt_id, active=True).first()
         if not lt:
             return Response({"detail": "pick a leave type"}, status=400)
         try:

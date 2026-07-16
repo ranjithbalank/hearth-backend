@@ -5,14 +5,17 @@ from rest_framework.decorators import action
 from rest_framework.response import Response
 
 from apps.accounts.models import log_action
-from apps.accounts.permissions import ModuleViewSetMixin
+from apps.accounts.permissions import AnyModuleViewSetMixin
 
 from .models import Customer
 from .serializers import CustomerSerializer
 
 
-class CustomerViewSet(ModuleViewSetMixin, viewsets.ModelViewSet):
-    module = "crm"
+class CustomerViewSet(AnyModuleViewSetMixin, viewsets.ModelViewSet):
+    # Serves two desks: the CRM module proper (campaigns, loyalty) and the
+    # Customers master screen, which Admin/Front Office reach via "customers"
+    # without holding "crm" (QA finding TC-100 — same split as HrViewSet).
+    modules = ["crm", "customers"]
     queryset = Customer.objects.all()
     serializer_class = CustomerSerializer
 
@@ -139,6 +142,13 @@ class CustomerViewSet(ModuleViewSetMixin, viewsets.ModelViewSet):
         cust.marketing_consent = False
         cust.tags = []
         cust.save()
+        # Registration-card evidence (ID scan, signature) on this guest's
+        # folios is PII too — erase it with the profile. The financial rows
+        # (charges/settlements) stay, as SR-053 requires.
+        from apps.frontoffice.models import Folio
+        wiped = (Folio.objects.filter(reservation__guest=cust)
+                 .exclude(id_scan="", signature="")
+                 .update(id_scan="", signature=""))
         log_action(request.user, "dpdp_erase", entity="Customer", entity_id=cust.id,
-                   before=before, after={"anonymised": True})
+                   before=before, after={"anonymised": True, "registration_scans_wiped": wiped})
         return Response({"erased": True, "customer": CustomerSerializer(cust).data})

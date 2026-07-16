@@ -281,6 +281,35 @@ class KotBillFlowTests(TestCase):
         self.assertEqual(r2.status_code, 409)
         self.assertEqual(Settlement.objects.count(), 1)  # no duplicate payment row
 
+    def test_refund_settled_bill_with_override(self):
+        from apps.frontoffice.models import Settlement
+        o = self._order()
+        self.client.post(reverse("order-settle", args=[o.id]), {"tender": "Cash"}, format="json")
+        o.refresh_from_db()
+        total = Settlement.objects.filter(amount__gt=0).first().amount
+        # No reason → 400
+        r = self.client.post(reverse("order-refund", args=[o.id]),
+                             {"override": "4321"}, format="json")
+        self.assertEqual(r.status_code, 400)
+        # No manager override → 403
+        r = self.client.post(reverse("order-refund", args=[o.id]),
+                             {"reason": "wrong item"}, format="json")
+        self.assertEqual(r.status_code, 403)
+        # Full refund posts a reversing (negative) settlement
+        r = self.client.post(reverse("order-refund", args=[o.id]),
+                             {"reason": "wrong item", "override": "4321"}, format="json")
+        self.assertEqual(r.status_code, 200, r.data)
+        self.assertEqual(Settlement.objects.filter(amount__lt=0).count(), 1)
+        # Day-end nets to zero for this order (settle + refund)
+        net = sum(s.amount for s in Settlement.objects.all())
+        self.assertEqual(net, 0)
+
+    def test_refund_rejects_unsettled_order(self):
+        o = self._order()
+        r = self.client.post(reverse("order-refund", args=[o.id]),
+                             {"reason": "x", "override": "4321"}, format="json")
+        self.assertEqual(r.status_code, 400)
+
     def test_bill_requires_all_lines_fired(self):
         o = self._order(fired=False)
         r = self.client.post(reverse("order-bill", args=[o.id]), format="json")
