@@ -668,6 +668,10 @@ class OrderViewSet(AnyModuleViewSetMixin, viewsets.ModelViewSet):
         # ?open=1 → orders still on the floor (so the POS resumes a running table).
         if self.request.query_params.get("open"):
             qs = qs.filter(status__in=[Order.OPEN, Order.KOT_FIRED, Order.BILLED])
+        # ?bill_no= → recall a settled bill by its printed number (for refunds).
+        bill_no = self.request.query_params.get("bill_no")
+        if bill_no:
+            qs = qs.filter(bill_no__iexact=bill_no.strip())
         return qs
 
     def _reload(self, order):
@@ -1193,6 +1197,40 @@ class OrderViewSet(AnyModuleViewSetMixin, viewsets.ModelViewSet):
         log_action(request.user, "order_void", entity="Order", entity_id=order.id,
                    after={"override": mgr.username, "reason": request.data.get("reason", "")})
         return Response(OrderSerializer(order).data)
+
+    @action(detail=True, methods=["post"])
+    def refund(self, request, pk=None):
+        """Refund / reverse a settled bill (FR-PAY / FR-POS-008). Manager
+        override required. Records a reversing settlement (negative amount) so
+        the day-end Z-report nets out, with a mandatory reason; the order stays
+        closed. A full refund reverses the whole bill; pass `amount` for a
+        partial (sales-return / correction)."""
+        order = self.get_object()
+        if order.status != Order.SETTLED:
+            return Response({"detail": "Only a settled bill can be refunded"}, status=400)
+        mgr = _valid_override(request.data.get("override"))
+        if not mgr:
+            return Response({"detail": "Manager override required to refund", "override_required": True},
+                            status=403)
+        reason = (request.data.get("reason") or "").strip()
+        if not reason:
+            return Response({"detail": "A reason is required for a refund"}, status=400)
+        from django.db.models import Sum
+        settled = (Settlement.objects.filter(reference__endswith=f"POS order {order.id}")
+                   .aggregate(t=Sum("amount"))["t"] or order.totals()["total"])
+        try:
+            amount = Decimal(str(request.data.get("amount"))) if request.data.get("amount") else settled
+        except (ArithmeticError, TypeError):
+            return Response({"detail": "invalid refund amount"}, status=400)
+        if amount <= 0 or amount > settled:
+            return Response({"detail": f"Refund must be between 0 and {settled}"}, status=400)
+        tender = request.data.get("tender", "Cash")
+        Settlement.objects.create(tender=f"Refund ({tender})", amount=-amount,
+                                  reference=f"REFUND POS order {order.id}: {reason}")
+        log_action(request.user, "pos_refund", entity="Order", entity_id=order.id,
+                   after={"amount": str(amount), "tender": tender, "reason": reason,
+                          "override": mgr.username})
+        return Response({"refunded": str(amount), "order": order.id, "reason": reason})
 
     @action(detail=True, methods=["get"])
     def bill_pdf(self, request, pk=None):
