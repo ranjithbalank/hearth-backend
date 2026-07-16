@@ -63,6 +63,13 @@ class HrViewSet(AnyModuleViewSetMixin, viewsets.ViewSet):
         role = (request.data.get("role") or "").strip()
         if not name or not department or not role:
             return Response({"detail": "name, department and role are required"}, status=400)
+        from apps.accounts.validators import validate_digits, validate_person_name
+        from rest_framework.serializers import ValidationError as DRFValidationError
+        try:
+            validate_person_name(name)
+            validate_digits(request.data.get("phone", ""), field="Phone", max_len=15)
+        except DRFValidationError as e:
+            return Response({"detail": e.detail[0] if isinstance(e.detail, list) else str(e.detail)}, status=400)
         # Department and designation must be active rows in the masters
         # (Settings > Masters) — same pattern as Ingredient.unit vs UoM.
         from apps.masters.models import Department, Designation

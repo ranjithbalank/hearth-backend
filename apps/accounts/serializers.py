@@ -62,6 +62,18 @@ class UserSerializer(serializers.ModelSerializer):
             obj.branch_access.select_related("branch").all(), many=True
         ).data
 
+    def validate_first_name(self, value):
+        from .validators import validate_person_name
+        return validate_person_name(value)
+
+    def validate_last_name(self, value):
+        from .validators import validate_person_name
+        return validate_person_name(value)
+
+    def validate_passcode(self, value):
+        from .validators import validate_digits
+        return validate_digits(value, field="POS passcode", max_len=12)
+
     def validate_password(self, value):
         # set_password() alone skips AUTH_PASSWORD_VALIDATORS — without this,
         # Settings > Users happily accepted "123" (QA finding TC-007).

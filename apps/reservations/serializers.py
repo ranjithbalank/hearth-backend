@@ -20,3 +20,7 @@ class ReservationSerializer(serializers.ModelSerializer):
             "precheckin", "precheckin_done", "location",
         ]
         read_only_fields = ["location"]  # set server-side from the booker's active branch
+
+    def validate_guest_name(self, value):
+        from apps.accounts.validators import validate_person_name
+        return validate_person_name(value)
