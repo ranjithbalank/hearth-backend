@@ -9,7 +9,7 @@ from apps.reservations.models import Reservation
 from apps.rooms.models import Room
 
 from . import services
-from .models import Folio, NightAuditRun
+from .models import Folio, FolioLine, NightAuditRun
 from .serializers import FolioSerializer, NightAuditRunSerializer
 
 
@@ -43,6 +43,37 @@ class FolioViewSet(ModuleViewSetMixin, viewsets.ModelViewSet):
             "id_type": folio.id_type, "id_number": folio.id_number,
             "id_scan": folio.id_scan, "signature": folio.signature,
         })
+
+    @action(detail=True, methods=["post"])
+    def transfer_charge(self, request, pk=None):
+        """Move a charge line to another OPEN folio (FR-PMS-006 split/route):
+        the room-service dinner posted to 102 that actually belongs to the
+        companion in 103, or splitting incidentals between two stays.
+        Body: {line: <FolioLine id>, to_folio: <Folio id>}. Room-night and tax
+        lines stay put — they belong to the stay that slept in the room."""
+        from apps.accounts.models import log_action
+        folio = self.get_object()
+        if folio.status != Folio.OPEN:
+            return Response({"detail": "the source folio is not open"}, status=400)
+        line = folio.lines.filter(pk=request.data.get("line")).first()
+        if not line:
+            return Response({"detail": "charge line not found on this folio"}, status=404)
+        if line.kind in (FolioLine.KIND_ROOM, FolioLine.KIND_TAX):
+            return Response({"detail": "room and tax charges belong to the stay — only F&B and "
+                                        "incidentals can transfer"}, status=400)
+        target = Folio.objects.filter(pk=request.data.get("to_folio"), status=Folio.OPEN).first()
+        if not target:
+            return Response({"detail": "target folio not found or not open"}, status=400)
+        if target.pk == folio.pk:
+            return Response({"detail": "target is the same folio"}, status=400)
+        before = {"folio": folio.id, "description": line.description, "total": str(line.total)}
+        line.folio = target
+        line.source = (line.source + " · " if line.source else "") + f"moved from folio {folio.id}"
+        line.save(update_fields=["folio", "source"])
+        log_action(request.user, "charge_transfer", entity="FolioLine", entity_id=line.id,
+                   before=before, after={"folio": target.id},
+                   note=f"{line.description} → {target.guest_name}")
+        return Response({"moved": line.id, "to_folio": target.id, "to_guest": target.guest_name})
 
     @action(detail=True, methods=["post"])
     def settle(self, request, pk=None):

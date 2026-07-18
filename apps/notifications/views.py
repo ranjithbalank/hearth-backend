@@ -3,7 +3,7 @@ from rest_framework.response import Response
 from rest_framework.views import APIView
 
 from apps.accounts.constants import entitlement_allows, role_can_access
-from apps.accounts.permissions import active_entitlements
+from apps.accounts.permissions import ModulePermission, active_entitlements
 
 
 def _build_alerts():
@@ -16,9 +16,12 @@ def _build_alerts():
     from apps.inventory.models import Ingredient
     low = [i for i in Ingredient.objects.all() if i.below_par]
     for i in low:
+        # At (or below) zero the kitchen can't plate the dish at all —
+        # that's an outage, not a reorder reminder.
+        out = i.current_stock <= 0
         alerts.append({
-            "severity": "warning", "module": "inventory",
-            "title": f"Low stock: {i.name}",
+            "severity": "critical" if out else "warning", "module": "inventory",
+            "title": f"{'Out of stock' if out else 'Low stock'}: {i.name}",
             "detail": f"{i.current_stock} {i.unit} left (reorder at {i.reorder_level})",
         })
 
@@ -169,18 +172,125 @@ def _build_alerts():
             "detail": "Function-space holds awaiting confirmation",
         })
 
+    # A rolling 24h window — an all-time count only ever grows, which turns
+    # the alert (and the bell badge) into permanent noise nobody can clear.
+    from datetime import timedelta
+    from django.utils import timezone
     from apps.accounts.models import AuditLog
     sensitive = AuditLog.objects.filter(
-        action__in=["folio_settle", "pos_settle", "dpdp_erase", "entitlement_update"]
+        action__in=["folio_settle", "pos_settle", "dpdp_erase", "entitlement_update"],
+        created_at__gte=timezone.now() - timedelta(hours=24),
     ).count()
     if sensitive:
+        # Gated on "settings" — the audit trail lives at Settings > Audit Log,
+        # so only roles that can actually open it get told to review it.
         alerts.append({
-            "severity": "info", "module": "reports",
-            "title": f"{sensitive} sensitive action(s) logged",
+            "severity": "info", "module": "settings",
+            "title": f"{sensitive} sensitive action(s) in the last 24h",
             "detail": "Review the audit trail for settlements and admin changes",
         })
 
     return alerts
+
+
+class ApprovalInboxView(APIView):
+    """One inbox for everything awaiting the signed-in user's sign-off:
+    pending POs, indents (approve + issue stages), Chef-proposed dishes,
+    and leave requests at whichever level this role decides. Sections only
+    appear when the role can act AND something is actually waiting — the
+    same segregation-of-duty rules as the underlying endpoints (never your
+    own request)."""
+
+    permission_classes = [IsAuthenticated, ModulePermission]
+    module = "approvals"
+
+    def get(self, request):
+        from apps.accounts.constants import (
+            INDENT_ISSUER_ROLES,
+            LEAVE_FINAL_APPROVERS,
+            MENU_APPROVER_ROLES,
+            PO_APPROVER_ROLES,
+            indent_approvers_for,
+            leave_approvers_for,
+        )
+        from apps.accounts.permissions import shared_or_visible
+        role = getattr(request.user, "role", "")
+        username = request.user.username
+        sections = []
+
+        if role in PO_APPROVER_ROLES:
+            from apps.procurement.models import PurchaseOrder
+            items = [{
+                "id": po.id,
+                "title": f"{po.po_no or f'PO #{po.id}'} — {po.supplier.name}",
+                "detail": f"{po.lines.count()} line(s) · ₹{po.total}",
+            } for po in (PurchaseOrder.objects.filter(status=PurchaseOrder.PENDING)
+                         .select_related("supplier").prefetch_related("lines"))]
+            if items:
+                sections.append({"key": "po", "title": "Purchase orders",
+                                 "route": "/procurement", "items": items})
+
+        from apps.matreq.models import MaterialRequest
+        indents = list(shared_or_visible(
+            MaterialRequest.objects.prefetch_related("lines__ingredient"), request)
+            .filter(status__in=[MaterialRequest.REQUESTED, MaterialRequest.APPROVED]))
+
+        def indent_item(r):
+            lines = ", ".join(f"{l.qty} {l.ingredient.unit} {l.ingredient.name}"
+                              for l in r.lines.all()[:4])
+            return {"id": r.id, "title": f"Indent #{r.id} — {r.department}",
+                    "detail": f"{lines} · by {r.requested_by or '—'}"}
+
+        to_approve = [indent_item(r) for r in indents
+                      if r.status == MaterialRequest.REQUESTED
+                      and role in indent_approvers_for(r.department)
+                      and r.requested_by != username]
+        if to_approve:
+            sections.append({"key": "indents", "title": "Material requests",
+                             "route": "/material-requests", "items": to_approve})
+        if role in INDENT_ISSUER_ROLES:
+            to_issue = [indent_item(r) for r in indents
+                        if r.status == MaterialRequest.APPROVED]
+            if to_issue:
+                sections.append({"key": "issues", "title": "Approved indents — ready to issue",
+                                 "route": "/material-requests", "items": to_issue})
+
+        if role in MENU_APPROVER_ROLES:
+            from apps.pos.models import MenuItem
+            items = [{
+                "id": m.id, "title": m.name,
+                "detail": f"₹{m.price} · {m.category.name if m.category_id else '—'}",
+            } for m in (MenuItem.objects.filter(approval_status=MenuItem.PENDING)
+                        .select_related("category"))]
+            if items:
+                sections.append({"key": "dishes", "title": "New dishes",
+                                 "route": "/recipes?tab=pending", "items": items})
+
+        from apps.hr.models import LeaveRequest
+        own = getattr(request.user, "employee_record", None)
+        items = []
+        for r in (LeaveRequest.objects.select_related("employee", "leave_type")
+                  .filter(status__in=[LeaveRequest.PENDING, LeaveRequest.MANAGER_APPROVED])):
+            if r.requested_by == username or (own and own.id == r.employee_id):
+                continue  # never your own request
+            if r.status == LeaveRequest.PENDING and role in leave_approvers_for(r.employee.department):
+                stage = "manager sign-off"
+            elif r.status == LeaveRequest.MANAGER_APPROVED and role in LEAVE_FINAL_APPROVERS:
+                stage = "final sign-off"
+            else:
+                continue
+            items.append({
+                "id": r.id,
+                "title": f"{r.employee.name} — {r.leave_type.name}",
+                "detail": (f"{r.start_date.strftime('%d %b')} → {r.end_date.strftime('%d %b')}"
+                           f" · {r.days} day(s) · {stage}"),
+            })
+        if items:
+            sections.append({"key": "leave", "title": "Leave requests",
+                             "route": "/leave", "items": items})
+
+        return Response({"count": sum(len(s["items"]) for s in sections),
+                         "sections": sections})
 
 
 class NotificationView(APIView):

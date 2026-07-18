@@ -281,6 +281,73 @@ class FrontOfficeFlowTests(TestCase):
         self.assertEqual(run1.rooms_posted, 1)
 
 
+class ChargeTransferTests(TestCase):
+    """Move a mis-posted F&B/incidental charge to another open folio —
+    the companion's dinner on the wrong room, split bills (FR-PMS-006)."""
+
+    def setUp(self):
+        self.client = APIClient()
+        self.client.force_authenticate(User.objects.create_user(
+            username="fo3", password="Tk9$mZ2pQw!7", role="Front Office"))
+        rt = RoomType.objects.create(code="STD2", name="Standard",
+                                     base_rate=Decimal("4000"), gst_slab=Decimal("12"))
+        r1 = Room.objects.create(number="301", room_type=rt, status=Room.VACANT_CLEAN)
+        r2 = Room.objects.create(number="302", room_type=rt, status=Room.VACANT_CLEAN)
+
+        def mk(name, room):
+            return services.check_in(Reservation.objects.create(
+                guest_name=name, room_type=rt, checkin_date=date.today(),
+                checkout_date=date.today() + timedelta(days=1), nights=1,
+                rate=Decimal("4000")), room)
+        self.src = mk("Wrong Room", r1)
+        self.dst = mk("Right Room", r2)
+        self.dinner = services.post_charge(
+            self.src, kind=FolioLine.KIND_FNB, description="Dinner",
+            amount=Decimal("1000"), gst_rate=Decimal("5"))
+
+    def _move(self, line_id, to_folio):
+        return self.client.post(f"/api/folios/{self.src.id}/transfer_charge/",
+                                {"line": line_id, "to_folio": to_folio}, format="json")
+
+    def test_fnb_charge_moves_to_other_open_folio(self):
+        r = self._move(self.dinner.id, self.dst.id)
+        self.assertEqual(r.status_code, 200, r.data)
+        self.assertEqual(r.data["to_guest"], "Right Room")
+        self.dinner.refresh_from_db()
+        self.assertEqual(self.dinner.folio_id, self.dst.id)
+        self.assertIn("moved from folio", self.dinner.source)
+        self.assertEqual(self.src.balance, Decimal("0"))
+        self.assertEqual(self.dst.balance, Decimal("1050.00"))
+        from apps.accounts.models import AuditLog
+        self.assertTrue(AuditLog.objects.filter(
+            action="charge_transfer", entity_id=str(self.dinner.id)).exists())
+
+    def test_room_and_tax_lines_stay_put(self):
+        room_line = services.post_charge(
+            self.src, kind=FolioLine.KIND_ROOM, description="Room night",
+            amount=Decimal("4000"), gst_rate=Decimal("12"))
+        r = self._move(room_line.id, self.dst.id)
+        self.assertEqual(r.status_code, 400)
+        self.assertIn("belong to the stay", r.data["detail"])
+
+    def test_target_must_be_a_different_open_folio(self):
+        r = self._move(self.dinner.id, self.src.id)
+        self.assertEqual(r.status_code, 400)
+        self.dst.status = Folio.SETTLED
+        self.dst.save()
+        r = self._move(self.dinner.id, self.dst.id)
+        self.assertEqual(r.status_code, 400)
+        self.dinner.refresh_from_db()
+        self.assertEqual(self.dinner.folio_id, self.src.id)  # nothing moved
+
+    def test_line_must_belong_to_source_folio(self):
+        stray = services.post_charge(
+            self.dst, kind=FolioLine.KIND_FNB, description="Their own snack",
+            amount=Decimal("100"), gst_rate=Decimal("5"))
+        r = self._move(stray.id, self.dst.id)
+        self.assertEqual(r.status_code, 404)
+
+
 class BillingModeTests(TestCase):
     """Room bill with or without GST (BRD 5.23): per-folio override + recompute."""
 

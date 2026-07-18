@@ -283,6 +283,75 @@ class OperationalReportsTests(TestCase):
             self.assertEqual(rm.get(f"/api/reports/view/?report={report}").status_code, 403)
 
 
+class DashboardTrendTests(TestCase):
+    """The dashboard's 14-day revenue trend: rooms from night-audit posts,
+    F&B from settled orders, role-scoped like the rest of the dashboard."""
+
+    def test_dashboard_carries_revenue_trend(self):
+        from django.utils import timezone
+        from apps.frontoffice.models import NightAuditRun
+        client = APIClient()
+        client.force_authenticate(User.objects.create_user(
+            username="gmtrend", password="Tk9$mZ2pQw!7", role="General Manager"))
+        today = timezone.localdate()
+        NightAuditRun.objects.create(business_date=today, rooms_posted=2,
+                                     room_revenue=Decimal("9000"),
+                                     tax_posted=Decimal("1080"), completed=True)
+        cat = Category.objects.create(name="TrendCat")
+        item = MenuItem.objects.create(name="Tea", category=cat,
+                                       price=Decimal("100"), gst_rate=Decimal("0"))
+        o = Order.objects.create(mode=Order.TAKEAWAY, status=Order.SETTLED)
+        OrderLine.objects.create(order=o, menu_item=item, qty=3,
+                                 unit_price=Decimal("100"), kot_fired=True)
+
+        t = client.get("/api/reports/dashboard/").data["trend"]
+        self.assertEqual(len(t["days"]), 14)
+        self.assertEqual(t["rooms"][-1], 9000.0)   # today's audit post
+        self.assertEqual(t["fnb"][-1], 300.0)      # today's settled order
+        self.assertEqual(t["rooms"][0], 0.0)       # quiet days read zero
+
+        # Restaurant Manager sees only the F&B line; Hotel Manager only rooms.
+        rm = APIClient()
+        rm.force_authenticate(User.objects.create_user(
+            username="rmtrend", password="Tk9$mZ2pQw!7", role="Restaurant Manager"))
+        t = rm.get("/api/reports/dashboard/").data["trend"]
+        self.assertNotIn("rooms", t)
+        self.assertEqual(t["fnb"][-1], 300.0)
+
+        hm = APIClient()
+        hm.force_authenticate(User.objects.create_user(
+            username="hmtrend", password="Tk9$mZ2pQw!7", role="Hotel Manager"))
+        t = hm.get("/api/reports/dashboard/").data["trend"]
+        self.assertNotIn("fnb", t)
+        self.assertEqual(t["rooms"][-1], 9000.0)
+
+    def test_trend_endpoint_ranges_and_banquets(self):
+        """/reports/revenue-trend/: preset windows via ?trend_days=, custom
+        via ?from/&to, and a banquets series from confirmed events."""
+        from django.utils import timezone
+        from datetime import timedelta
+        from apps.banquets.models import Event, FunctionSpace
+        client = APIClient()
+        client.force_authenticate(User.objects.create_user(
+            username="gmtrend2", password="Tk9$mZ2pQw!7", role="General Manager"))
+        today = timezone.localdate()
+        hall = FunctionSpace.objects.create(name="Lotus Hall")
+        Event.objects.create(space=hall, title="Wedding", event_date=today,
+                             package_amount=Decimal("50000"),
+                             status=Event.CONFIRMED)
+        Event.objects.create(space=hall, title="Maybe Party", event_date=today,
+                             package_amount=Decimal("99999"))  # tentative — excluded
+
+        t = client.get("/api/reports/revenue-trend/?trend_days=90").data
+        self.assertEqual(len(t["days"]), 90)
+        self.assertEqual(t["banquets"][-1], 50000.0)
+
+        start = (today - timedelta(days=29)).isoformat()
+        t = client.get(f"/api/reports/revenue-trend/?from={start}&to={today}").data
+        self.assertEqual(len(t["days"]), 30)
+        self.assertEqual(t["banquets"][-1], 50000.0)
+
+
 class ReportsRbacTests(TestCase):
     """Having the 'reports' module only gates opening the Reports screen —
     these confirm WHICH report each non-universal role may actually pull is

@@ -104,7 +104,7 @@ ROLE_ALLOW = {
     ROLE_FINANCE: [
         "accounting", "tax", "gstmaster", "reports",
         "customers", "vendors", "suppliers", "pomanage", "hr", "notifications",
-        "matreq", "leave",
+        "matreq", "leave", "approvals",
     ],
     # Restaurant Manager — runs the whole restaurant side: POS/KDS/online,
     # the store & supply chain (approves indents and POs), recipes and the
@@ -114,7 +114,7 @@ ROLE_ALLOW = {
     ROLE_REST_MGR: [
         "dashboard", "pos", "barpos", "kds", "online", "inventory", "procurement",
         "pomanage", "matreq", "recipes", "suppliers", "vendors",
-        "menumaster", "tablemaster", "reports", "notifications", "leave",
+        "menumaster", "tablemaster", "reports", "notifications", "leave", "approvals",
     ],
     # Hotel Manager — the hotel-side counterpart to Restaurant Manager: runs
     # the hotel dashboard, oversees Front Desk's operations, and approves
@@ -124,7 +124,7 @@ ROLE_ALLOW = {
     ROLE_HOTEL_MGR: [
         "dashboard", "frontdesk", "checkin", "checkout", "livegrid", "folio",
         "reservations", "housekeeping", "banquets", "roommaster", "cateringmaster",
-        "customers", "reports", "matreq", "notifications", "leave",
+        "customers", "reports", "matreq", "notifications", "leave", "approvals",
     ],
     # Front Office / Reception — the guest-facing desk only: front desk, room
     # assignment & status, reservations, folios/cashiering, banquets and guest
@@ -154,6 +154,7 @@ ROLE_ALLOW = {
     # Maintenance-department indents (it already owns the engineering module).
     ROLE_HOUSEKEEPING: [
         "housekeeping", "livegrid", "engineering", "notifications", "matreq", "leave",
+        "approvals",  # approves Maintenance indents (see DEPARTMENT_APPROVERS)
     ],
     # Chef / Kitchen — kitchen display, recipes/BOM, kitchen stock and
     # material requests to the store. No sales, no purchasing.
@@ -165,6 +166,7 @@ ROLE_ALLOW = {
     ROLE_STORE: [
         "inventory", "procurement", "pomanage", "matreq", "suppliers",
         "vendors", "notifications", "leave",
+        "approvals",  # the issue step of approved indents is the store's
     ],
     # Bar Captain — runs the bar as its own desk: bar tables, bar tabs. Never
     # the restaurant POS/tables, and the restaurant floor never sees "barpos".
@@ -181,6 +183,7 @@ ROLE_ALLOW = {
     # No floor operations, no guest money, no RBAC config.
     ROLE_HR: [
         "hr", "employees", "leave", "matreq", "notifications",
+        "approvals",  # final sign-off on leave (LEAVE_FINAL_APPROVERS)
     ],
 }
 

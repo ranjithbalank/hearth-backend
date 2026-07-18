@@ -106,6 +106,51 @@ def _receivables():
     }
 
 
+def _revenue_trend(include_rooms=True, include_fnb=True, include_banquets=False,
+                   days=14, f=None, t=None):
+    """Per-day revenue for the dashboard's trend chart: rooms from night-audit
+    runs (revenue posts by business date), F&B from settled/room-posted orders
+    by order date, banquets from confirmed/completed events by event date.
+    Either the rolling `days` window or an explicit from/to range."""
+    from datetime import timedelta
+    end = t or _business_date()
+    start = f or (end - timedelta(days=days - 1))
+    if start > end:
+        start, end = end, start
+    span = min((end - start).days + 1, 366)
+    labels = [start + timedelta(days=i) for i in range(span)]
+    # Longer windows label months for readability; short ones keep day+month.
+    date_fmt = "%d %b" if span <= 60 else "%d %b %y"
+    out = {"days": [d.strftime(date_fmt) for d in labels]}
+    if include_rooms:
+        from apps.frontoffice.models import NightAuditRun
+        by = {}
+        for r in NightAuditRun.objects.filter(business_date__gte=labels[0],
+                                              business_date__lte=labels[-1]):
+            by[r.business_date] = by.get(r.business_date, Decimal("0")) + r.room_revenue
+        out["rooms"] = [float(by.get(d, 0)) for d in labels]
+    if include_fnb:
+        by = {}
+        orders = (Order.objects.filter(status__in=[Order.SETTLED, Order.POSTED_TO_ROOM],
+                                       created_at__date__gte=labels[0],
+                                       created_at__date__lte=labels[-1])
+                  .prefetch_related("lines__menu_item"))
+        for o in orders:
+            d = o.created_at.date()
+            by[d] = by.get(d, Decimal("0")) + o.totals()["total"]
+        out["fnb"] = [float(by.get(d, 0)) for d in labels]
+    if include_banquets:
+        from apps.banquets.models import Event
+        by = {}
+        events = Event.objects.filter(status__in=[Event.CONFIRMED, Event.COMPLETED],
+                                      event_date__gte=labels[0],
+                                      event_date__lte=labels[-1])
+        for e in events:
+            by[e.event_date] = by.get(e.event_date, Decimal("0")) + e.bill_subtotal
+        out["banquets"] = [float(by.get(d, 0)) for d in labels]
+    return out
+
+
 class DashboardView(ModuleAPIView):
     """Rooms + F&B side by side for cross-cutting roles (Admin, Finance, and
     Super Admin/MD/GM if they land here) — but Hotel Manager only runs the
@@ -123,9 +168,43 @@ class DashboardView(ModuleAPIView):
             body["receivables"] = _receivables()
         if role != ROLE_HOTEL_MGR:
             body["fnb"] = _fnb_kpis()
+        body["trend"] = _trend_for(request)
         body["view"] = ("hotel" if role == ROLE_HOTEL_MGR
                         else "restaurant" if role == ROLE_REST_MGR else "combined")
         return Response(body)
+
+
+def _trend_for(request):
+    """Role/entitlement-scoped revenue trend, honoring ?trend_days= or a
+    custom ?from=&to= window."""
+    from apps.accounts.constants import (
+        ROLE_HOTEL_MGR, ROLE_REST_MGR, entitlement_allows, role_can_access,
+    )
+    from apps.accounts.permissions import active_entitlements
+    role = getattr(request.user, "role", "")
+    ent = active_entitlements()
+    try:
+        days = max(7, min(366, int(request.query_params.get("trend_days", 14))))
+    except ValueError:
+        days = 14
+    f, t = _parse_range(request)
+    return _revenue_trend(
+        include_rooms=role != ROLE_REST_MGR,
+        include_fnb=role != ROLE_HOTEL_MGR,
+        include_banquets=(role_can_access(role, "banquets")
+                          and entitlement_allows(ent, "banquets")),
+        days=days, f=f, t=t,
+    )
+
+
+class RevenueTrendView(ModuleAPIView):
+    """The dashboard trend on its own — lets the card refetch a different
+    range (3/6/12 months, custom dates) without recomputing every KPI."""
+
+    module = "dashboard"
+
+    def get(self, request):
+        return Response(_trend_for(request))
 
 
 class ExecutiveView(ModuleAPIView):
