@@ -75,6 +75,42 @@ class SupplierViewSet(ModuleViewSetMixin, viewsets.ViewSet):
                    after={"name": s.name})
         return Response(_supplier_dict(s), status=201)
 
+    def partial_update(self, request, pk=None):
+        """Edit a supplier as terms change — including the rating, which is
+        the buyer's own scorecard of them."""
+        from decimal import Decimal, InvalidOperation
+        s = shared_or_visible(Supplier.objects.all(), request).filter(pk=pk).first()
+        if not s:
+            return Response({"detail": "not found"}, status=404)
+        before = _supplier_dict(s)
+        if "name" in request.data:
+            name = (request.data.get("name") or "").strip()
+            if not name:
+                return Response({"detail": "supplier name is required"}, status=400)
+            if Supplier.objects.exclude(pk=s.pk).filter(name__iexact=name).exists():
+                return Response({"detail": f"'{name}' is already on the supplier list"}, status=400)
+            s.name = name
+        for f in ("gstin", "contact", "payment_terms"):
+            if f in request.data:
+                setattr(s, f, (request.data.get(f) or "").strip())
+        if "lead_time_days" in request.data:
+            try:
+                s.lead_time_days = max(0, int(request.data.get("lead_time_days") or 0))
+            except (TypeError, ValueError):
+                return Response({"detail": "lead time must be a number of days"}, status=400)
+        if "rating" in request.data:
+            try:
+                rating = Decimal(str(request.data.get("rating")))
+            except InvalidOperation:
+                return Response({"detail": "rating must be a number"}, status=400)
+            if not (0 <= rating <= 5):
+                return Response({"detail": "rating is 0–5"}, status=400)
+            s.rating = rating
+        s.save()
+        log_action(request.user, "supplier_updated", entity="Supplier", entity_id=s.id,
+                   before=before, after=_supplier_dict(s))
+        return Response(_supplier_dict(s))
+
 
 def _vendor_dict(v):
     return {"id": v.id, "name": v.name, "category": v.category, "contact": v.contact,

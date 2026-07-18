@@ -21,6 +21,31 @@ class ProcurementApiTests(TestCase):
         PurchaseOrderLine.objects.create(purchase_order=self.po, ingredient=self.ing,
                                           qty=Decimal("40"), rate=Decimal("90"))
 
+    def test_supplier_master_edit(self):
+        """The supplier master is editable: terms/lead time/rating change,
+        duplicate names are refused, rating stays within 0–5."""
+        r = self.client.patch(f"/api/suppliers/{self.sup.id}/", {
+            "payment_terms": "Net 30", "lead_time_days": 5, "rating": "4.5",
+            "contact": "9876543210",
+        }, format="json")
+        self.assertEqual(r.status_code, 200, r.data)
+        self.sup.refresh_from_db()
+        self.assertEqual(self.sup.payment_terms, "Net 30")
+        self.assertEqual(self.sup.lead_time_days, 5)
+        self.assertEqual(self.sup.rating, Decimal("4.5"))
+
+        Supplier.objects.create(name="Fresh Farms")
+        r = self.client.patch(f"/api/suppliers/{self.sup.id}/", {"name": "fresh farms"},
+                              format="json")
+        self.assertEqual(r.status_code, 400)  # case-insensitive duplicate
+
+        r = self.client.patch(f"/api/suppliers/{self.sup.id}/", {"rating": "9"}, format="json")
+        self.assertEqual(r.status_code, 400)
+
+        from apps.accounts.models import AuditLog
+        self.assertTrue(AuditLog.objects.filter(
+            action="supplier_updated", entity_id=str(self.sup.id)).exists())
+
     def test_approve_then_receive_updates_stock(self):
         r = self.client.post(reverse("po-approve", args=[self.po.id]))
         self.assertEqual(r.data["status"], "approved")
