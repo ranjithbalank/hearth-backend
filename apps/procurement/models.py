@@ -75,6 +75,9 @@ class PurchaseOrder(models.Model):
     )
     status = models.CharField(max_length=12, choices=STATUS_CHOICES, default=PENDING)
     po_no = models.CharField(max_length=30, blank=True)
+    # Username of whoever raised it — approval is refused to the same person
+    # (segregation of duties, same rule as material requests).
+    requested_by = models.CharField(max_length=120, blank=True)
     created_at = models.DateTimeField(auto_now_add=True)
 
     def __str__(self):
@@ -102,6 +105,9 @@ class GoodsReceipt(models.Model):
     purchase_order = models.ForeignKey(PurchaseOrder, on_delete=models.PROTECT, related_name="grns")
     note = models.CharField(max_length=200, blank=True)
     grn_no = models.CharField(max_length=30, blank=True)
+    # Photo of the supplier's bill/delivery challan (data URL, same storage
+    # convention as check-in ID scans and menu photos).
+    bill_image = models.TextField(blank=True, default="")
     created_at = models.DateTimeField(auto_now_add=True)
 
     class Meta:

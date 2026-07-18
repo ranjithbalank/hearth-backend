@@ -225,7 +225,8 @@ class ApprovalInboxView(APIView):
                 "title": f"{po.po_no or f'PO #{po.id}'} — {po.supplier.name}",
                 "detail": f"{po.lines.count()} line(s) · ₹{po.total}",
             } for po in (PurchaseOrder.objects.filter(status=PurchaseOrder.PENDING)
-                         .select_related("supplier").prefetch_related("lines"))]
+                         .select_related("supplier").prefetch_related("lines"))
+                if po.requested_by != username]
             if items:
                 sections.append({"key": "po", "title": "Purchase orders",
                                  "route": "/procurement", "items": items})

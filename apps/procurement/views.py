@@ -19,13 +19,18 @@ from .models import GoodsReceipt, PurchaseOrder, PurchaseOrderLine, Supplier, Ve
 def _po_dict(po):
     return {
         "id": po.id, "po_no": po.po_no, "supplier": po.supplier.name, "status": po.status,
+        "requested_by": po.requested_by,
         "location": po.location_id, "location_name": po.location.name if po.location_id else None,
         "total": str(po.total), "created_at": po.created_at,
         "lines": [
-            {"ingredient": l.ingredient.name, "qty": str(l.qty),
+            {"id": l.id, "ingredient": l.ingredient.name, "qty": str(l.qty),
              "rate": str(l.rate), "received_qty": str(l.received_qty)}
             for l in po.lines.all()
         ],
+        # Receipts on file — presence flag only; the image comes from
+        # /goods-receipts/{id}/bill/ on demand.
+        "grns": [{"id": g.id, "grn_no": g.grn_no, "has_bill": bool(g.bill_image)}
+                 for g in po.grns.all()],
     }
 
 
@@ -204,7 +209,8 @@ class PurchaseOrderViewSet(AnyModuleViewSetMixin, viewsets.ViewSet):
         with transaction.atomic():
             from apps.accounts.models import Property
             from apps.accounts.numbering import next_document_number
-            po = PurchaseOrder.objects.create(supplier=supplier, location_id=_requester_branch(request))
+            po = PurchaseOrder.objects.create(supplier=supplier, location_id=_requester_branch(request),
+                                              requested_by=request.user.username)
             prop = Property.objects.first()
             po.po_no = next_document_number(PurchaseOrder, "po_no", prop.po_prefix if prop else "PO")
             po.save(update_fields=["po_no"])
@@ -225,6 +231,9 @@ class PurchaseOrderViewSet(AnyModuleViewSetMixin, viewsets.ViewSet):
         po = shared_or_visible(PurchaseOrder.objects.all(), request).filter(pk=pk).first()
         if not po or po.status != PurchaseOrder.PENDING:
             return Response({"detail": "PO not pending"}, status=400)
+        if po.requested_by and po.requested_by == request.user.username:
+            return Response({"detail": "you raised this PO — someone else must approve the spend"},
+                            status=403)
         po.status = PurchaseOrder.APPROVED
         po.save(update_fields=["status"])
         log_action(request.user, "po_approve", entity="PurchaseOrder", entity_id=po.id)
@@ -232,7 +241,12 @@ class PurchaseOrderViewSet(AnyModuleViewSetMixin, viewsets.ViewSet):
 
     @action(detail=True, methods=["post"])
     def receive(self, request, pk=None):
-        """Goods receipt: post each line's qty to stock and mark the PO received."""
+        """Goods receipt: post received quantities to stock. With no body the
+        full outstanding quantity is received (the common case); pass
+        {lines: [{line: <id>, qty: "..."}]} to book a short/partial delivery —
+        the PO stays approved with the remainder outstanding, and a later
+        receipt (another GRN) closes it."""
+        from decimal import Decimal, InvalidOperation
         from apps.accounts.constants import PO_HANDLER_ROLES
         if getattr(request.user, "role", "") not in PO_HANDLER_ROLES:
             return Response(
@@ -242,37 +256,78 @@ class PurchaseOrderViewSet(AnyModuleViewSetMixin, viewsets.ViewSet):
             "lines__ingredient").filter(pk=pk).first()
         if not po or po.status != PurchaseOrder.APPROVED:
             return Response({"detail": "PO must be approved before receipt"}, status=400)
+
+        # Resolve how much of each line this delivery brings.
+        requested = request.data.get("lines")
+        to_receive = {}
+        if requested is None:
+            for line in po.lines.all():
+                to_receive[line.id] = line.qty - line.received_qty
+        else:
+            if not isinstance(requested, list) or not requested:
+                return Response({"detail": "lines must be a non-empty list"}, status=400)
+            lines_by_id = {l.id: l for l in po.lines.all()}
+            for row in requested:
+                line = lines_by_id.get(row.get("line"))
+                if not line:
+                    return Response({"detail": "unknown PO line"}, status=400)
+                try:
+                    qty = Decimal(str(row.get("qty")))
+                except InvalidOperation:
+                    return Response({"detail": f"{line.ingredient.name}: qty must be a number"},
+                                    status=400)
+                outstanding = line.qty - line.received_qty
+                if qty < 0:
+                    return Response({"detail": f"{line.ingredient.name}: qty can't be negative"},
+                                    status=400)
+                if qty > outstanding:
+                    return Response({"detail": f"{line.ingredient.name}: only {outstanding} "
+                                               f"outstanding on this PO"}, status=400)
+                to_receive[line.id] = qty
+        if not any(q > 0 for q in to_receive.values()):
+            return Response({"detail": "nothing to receive — every quantity is zero"}, status=400)
+
+        # Optional photo of the supplier's bill/challan (same rules as ID scans).
+        bill_image = request.data.get("bill_image") or ""
+        if bill_image and not bill_image.startswith("data:image/"):
+            return Response({"detail": "the bill must be an image"}, status=400)
+        if len(bill_image) > 800_000:
+            return Response({"detail": "the bill photo is too large — retake at a smaller size"},
+                            status=400)
+
         with transaction.atomic():
             from apps.accounts.models import Property
             from apps.accounts.numbering import next_document_number
-            grn = GoodsReceipt.objects.create(purchase_order=po, note=request.data.get("note", ""))
+            grn = GoodsReceipt.objects.create(purchase_order=po, note=request.data.get("note", ""),
+                                              bill_image=bill_image)
             prop = Property.objects.first()
             grn.grn_no = next_document_number(GoodsReceipt, "grn_no", prop.grn_prefix if prop else "GRN")
             grn.save(update_fields=["grn_no"])
             for line in po.lines.all():
-                outstanding = line.qty - line.received_qty
-                if outstanding <= 0:
+                qty = to_receive.get(line.id, Decimal("0"))
+                if qty <= 0:
                     continue
                 ing = line.ingredient
                 # Re-cost on receipt (weighted average of held stock + this
                 # consignment) so plate costs track what stock actually cost.
                 if line.rate and line.rate > 0:
-                    from decimal import Decimal
                     held = max(ing.current_stock or Decimal("0"), Decimal("0"))
-                    total_qty = held + outstanding
+                    total_qty = held + qty
                     if total_qty > 0:
                         ing.unit_cost = round(
                             ((held * (ing.unit_cost or Decimal("0")))
-                             + outstanding * line.rate) / total_qty, 2)
+                             + qty * line.rate) / total_qty, 2)
                         ing.save(update_fields=["unit_cost"])
-                apply_movement(ing, "receipt", outstanding,
+                apply_movement(ing, "receipt", qty,
                                reason="GRN", source=f"PO:{po.id}", user=request.user)
-                line.received_qty = line.qty
+                line.received_qty += qty
                 line.save(update_fields=["received_qty"])
-            po.status = PurchaseOrder.RECEIVED
-            po.save(update_fields=["status"])
+            fully = all(l.received_qty >= l.qty for l in po.lines.all())
+            if fully:
+                po.status = PurchaseOrder.RECEIVED
+                po.save(update_fields=["status"])
         log_action(request.user, "goods_receipt", entity="PurchaseOrder", entity_id=po.id,
-                   after={"grn": grn.id})
+                   after={"grn": grn.id, "partial": not fully})
         return Response(_po_dict(po))
 
 
@@ -288,6 +343,17 @@ class GoodsReceiptViewSet(ModuleViewSetMixin, viewsets.ViewSet):
         return Response([
             {"id": g.id, "grn_no": g.grn_no, "po": g.purchase_order_id,
              "po_no": g.purchase_order.po_no, "supplier": g.purchase_order.supplier.name,
-             "note": g.note, "created_at": g.created_at}
+             "note": g.note, "has_bill": bool(g.bill_image), "created_at": g.created_at}
             for g in qs[:30]
         ])
+
+    @action(detail=True, methods=["get"])
+    def bill(self, request, pk=None):
+        """The supplier-bill photo attached at receipt, on demand."""
+        g = shared_or_visible(GoodsReceipt.objects.all(), request,
+                              field="purchase_order__location").filter(pk=pk).first()
+        if not g:
+            return Response({"detail": "not found"}, status=404)
+        if not g.bill_image:
+            return Response({"detail": "no bill photo on this GRN"}, status=404)
+        return Response({"id": g.id, "grn_no": g.grn_no, "bill_image": g.bill_image})

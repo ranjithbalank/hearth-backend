@@ -21,6 +21,38 @@ class ProcurementApiTests(TestCase):
         PurchaseOrderLine.objects.create(purchase_order=self.po, ingredient=self.ing,
                                           qty=Decimal("40"), rate=Decimal("90"))
 
+    def test_po_raiser_cannot_approve_their_own(self):
+        """Segregation of duties: the Restaurant Manager who raises a PO
+        can't also approve the spend — another approver must sign it off."""
+        rm = APIClient()
+        rm.force_authenticate(User.objects.create_user(
+            username="rmpo", password="Tk9$mZ2pQw!7", role="Restaurant Manager"))
+        r = rm.post("/api/purchase-orders/", {
+            "supplier": self.sup.id,
+            "lines": [{"ingredient": self.ing.id, "qty": "5", "rate": "90"}],
+        }, format="json")
+        self.assertEqual(r.status_code, 201, r.data)
+        po_id = r.data["id"]
+        self.assertEqual(r.data["requested_by"], "rmpo")
+
+        r = rm.post(reverse("po-approve", args=[po_id]))
+        self.assertEqual(r.status_code, 403)
+        self.assertIn("someone else", r.data["detail"])
+
+        # A different approver signs it off fine.
+        r = self.client.post(reverse("po-approve", args=[po_id]))
+        self.assertEqual(r.status_code, 200)
+        self.assertEqual(r.data["status"], "approved")
+
+        # And the raiser's own approvals inbox never showed it.
+        r2 = rm.post("/api/purchase-orders/", {
+            "supplier": self.sup.id,
+            "lines": [{"ingredient": self.ing.id, "qty": "1", "rate": "10"}],
+        }, format="json")
+        inbox = rm.get("/api/approvals/").data
+        po_ids = [i["id"] for s in inbox["sections"] if s["key"] == "po" for i in s["items"]]
+        self.assertNotIn(r2.data["id"], po_ids)
+
     def test_supplier_master_edit(self):
         """The supplier master is editable: terms/lead time/rating change,
         duplicate names are refused, rating stays within 0–5."""
@@ -54,6 +86,62 @@ class ProcurementApiTests(TestCase):
         self.ing.refresh_from_db()
         self.assertEqual(self.ing.current_stock, Decimal("50.000"))  # 10 + 40
         self.assertTrue(GoodsReceipt.objects.filter(purchase_order=self.po).exists())
+
+    def test_partial_receipt_keeps_po_open_until_closed(self):
+        """A short delivery books only what arrived: stock rises by the
+        received qty, the PO stays approved with the remainder outstanding,
+        and a second receipt (its own GRN) closes it."""
+        self.client.post(reverse("po-approve", args=[self.po.id]))
+        line = self.po.lines.first()
+
+        r = self.client.post(reverse("po-receive", args=[self.po.id]),
+                             {"lines": [{"line": line.id, "qty": "25"}]}, format="json")
+        self.assertEqual(r.status_code, 200, r.data)
+        self.assertEqual(r.data["status"], "approved")   # still open
+        self.assertEqual(r.data["lines"][0]["received_qty"], "25.000")
+        self.ing.refresh_from_db()
+        self.assertEqual(self.ing.current_stock, Decimal("35.000"))  # 10 + 25
+
+        # Over-receiving the remainder is refused.
+        r = self.client.post(reverse("po-receive", args=[self.po.id]),
+                             {"lines": [{"line": line.id, "qty": "20"}]}, format="json")
+        self.assertEqual(r.status_code, 400)
+        self.assertIn("outstanding", r.data["detail"])
+
+        # Receiving the remaining 15 closes the PO; two GRNs on file.
+        r = self.client.post(reverse("po-receive", args=[self.po.id]),
+                             {"lines": [{"line": line.id, "qty": "15"}]}, format="json")
+        self.assertEqual(r.data["status"], "received")
+        self.ing.refresh_from_db()
+        self.assertEqual(self.ing.current_stock, Decimal("50.000"))
+        self.assertEqual(GoodsReceipt.objects.filter(purchase_order=self.po).count(), 2)
+
+        # A zero-quantity receipt is meaningless.
+        po2 = PurchaseOrder.objects.create(supplier=self.sup, status=PurchaseOrder.APPROVED)
+        line2 = PurchaseOrderLine.objects.create(purchase_order=po2, ingredient=self.ing,
+                                                 qty=Decimal("5"), rate=Decimal("90"))
+        r = self.client.post(reverse("po-receive", args=[po2.id]),
+                             {"lines": [{"line": line2.id, "qty": "0"}]}, format="json")
+        self.assertEqual(r.status_code, 400)
+
+    def test_receipt_stores_bill_photo(self):
+        """A photo of the supplier's bill rides along with the GRN; junk that
+        isn't an image is refused; the image comes back from /bill/."""
+        pixel = ("data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAf"
+                 "FcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==")
+        self.client.post(reverse("po-approve", args=[self.po.id]))
+        r = self.client.post(reverse("po-receive", args=[self.po.id]),
+                             {"bill_image": "data:text/html,<script>x</script>"}, format="json")
+        self.assertEqual(r.status_code, 400)
+        r = self.client.post(reverse("po-receive", args=[self.po.id]),
+                             {"bill_image": pixel, "note": "all good"}, format="json")
+        self.assertEqual(r.status_code, 200, r.data)
+        grn = GoodsReceipt.objects.filter(purchase_order=self.po).latest("created_at")
+        self.assertEqual(grn.bill_image, pixel)
+        self.assertEqual(r.data["grns"][0]["has_bill"], True)
+        b = self.client.get(f"/api/goods-receipts/{grn.id}/bill/")
+        self.assertEqual(b.status_code, 200)
+        self.assertEqual(b.data["bill_image"], pixel)
 
     def test_cannot_receive_before_approval(self):
         r = self.client.post(reverse("po-receive", args=[self.po.id]))
