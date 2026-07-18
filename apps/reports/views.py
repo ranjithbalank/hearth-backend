@@ -15,14 +15,41 @@ from apps.pos.models import Order
 from apps.rooms.models import Room
 
 
-def _room_kpis():
+def _parse_range(request):
+    """Optional ?from=YYYY-MM-DD&to=YYYY-MM-DD window shared by every report.
+    A malformed date is treated as unset rather than erroring the report."""
+    from datetime import date
+
+    def parse(name):
+        raw = request.query_params.get(name, "")
+        try:
+            return date.fromisoformat(raw) if raw else None
+        except ValueError:
+            return None
+    return parse("from"), parse("to")
+
+
+def _between(qs, field, f, t, date_field=False):
+    """Filter a queryset's datetime (or date) field to the [f, t] day window."""
+    suffix = "" if date_field else "__date"
+    if f:
+        qs = qs.filter(**{f"{field}{suffix}__gte": f})
+    if t:
+        qs = qs.filter(**{f"{field}{suffix}__lte": t})
+    return qs
+
+
+def _room_kpis(f=None, t=None):
+    # Room-status counts are a live snapshot; only the revenue side is
+    # windowed by the date range.
     rooms = list(Room.objects.all())
     total = len(rooms) or 1
     occupied = sum(1 for r in rooms if r.status == Room.OCCUPIED)
     available = sum(1 for r in rooms if r.status in Room.SELLABLE)
     dirty = sum(1 for r in rooms if r.status in (Room.VACANT_DIRTY, Room.CLEANING))
     ooo = sum(1 for r in rooms if r.status == Room.OOO)
-    room_lines = FolioLine.objects.filter(kind=FolioLine.KIND_ROOM)
+    room_lines = _between(FolioLine.objects.filter(kind=FolioLine.KIND_ROOM),
+                          "created_at", f, t)
     room_revenue = sum((l.taxable for l in room_lines), start=Decimal("0"))
     rooms_sold = room_lines.count() or 1
     occupancy = round(occupied / total * 100, 1)
@@ -41,10 +68,10 @@ def _room_kpis():
     }
 
 
-def _fnb_kpis():
-    orders = Order.objects.filter(
+def _fnb_kpis(f=None, t=None):
+    orders = _between(Order.objects.filter(
         status__in=[Order.SETTLED, Order.POSTED_TO_ROOM]
-    ).prefetch_related("lines__menu_item")
+    ), "created_at", f, t).prefetch_related("lines__menu_item")
     total = Decimal("0")
     by_mode = {Order.DINEIN: Decimal("0"), Order.TAKEAWAY: Decimal("0"),
                Order.DELIVERY: Decimal("0")}
@@ -151,14 +178,14 @@ class ExecutiveView(ModuleAPIView):
         return Response(body)
 
 
-def _scoped_sales_kpis(role):
+def _scoped_sales_kpis(role, f=None, t=None):
     """Sales Summary content, scoped like the Dashboard: Restaurant Manager
     sees F&B only, Hotel Manager sees rooms only, everyone else authorized
     for 'sales' (full access, Finance, CEO) sees both. Returns (rooms, fnb),
     either of which is None when that side is hidden from this role."""
     from apps.accounts.constants import ROLE_HOTEL_MGR, ROLE_REST_MGR
-    rooms = _room_kpis() if role != ROLE_REST_MGR else None
-    fnb = _fnb_kpis() if role != ROLE_HOTEL_MGR else None
+    rooms = _room_kpis(f, t) if role != ROLE_REST_MGR else None
+    fnb = _fnb_kpis(f, t) if role != ROLE_HOTEL_MGR else None
     return rooms, fnb
 
 
@@ -176,10 +203,175 @@ class SalesSummaryView(ModuleAPIView):
         return Response(body)
 
 
-def _report_rows(report, role):
+def _business_date():
+    """The property's operational date (advanced by night audit), not the wall
+    clock — reports about 'today' mean the open business day."""
+    from django.utils import timezone
+    from apps.accounts.views import get_property
+    return get_property().business_date or timezone.localdate()
+
+
+def _operational_report(report, f=None, t=None):
+    """Front-office / floor operational reports (arrivals, night audit,
+    no-show & cancellation, discounts & voids): viewer payload, or None."""
+    from datetime import timedelta
+
+    if report == "arrivals":
+        from apps.reservations.models import Reservation
+        qs = list(Reservation.objects.select_related("room", "room_type"))
+        dead = (Reservation.CANCELLED, Reservation.NO_SHOW)
+        # Default: the open business date. With a range: that whole window.
+        lo = f or (t or _business_date())
+        hi = t or (f or _business_date())
+        if lo > hi:
+            lo, hi = hi, lo
+        arriving = [r for r in qs if lo <= r.checkin_date <= hi and r.status not in dead]
+        departing = [r for r in qs if lo <= r.checkout_date <= hi
+                     and r.status in (Reservation.IN_HOUSE, Reservation.CHECKED_OUT)]
+        in_house = sum(1 for r in qs if r.status == Reservation.IN_HOUSE)
+        # Arrivals per day — over the range, or the coming week by default.
+        start, days = (lo, min((hi - lo).days + 1, 31)) if (f or t) else (lo, 7)
+        bars = []
+        for i in range(days):
+            day = start + timedelta(days=i)
+            bars.append({"name": day.strftime("%d %b"),
+                         "value": sum(1 for r in qs
+                                      if r.checkin_date == day and r.status not in dead)})
+        rows = [["Arrival", r.guest_name, r.room.number if r.room else r.room_type.code,
+                 r.get_source_display(), r.get_status_display(), str(r.checkin_date)]
+                for r in arriving]
+        rows += [["Departure", r.guest_name, r.room.number if r.room else r.room_type.code,
+                  r.get_source_display(), r.get_status_display(), str(r.checkout_date)]
+                 for r in departing]
+        when = (lo.strftime("%d %b") if lo == hi
+                else f"{lo.strftime('%d %b')} – {hi.strftime('%d %b')}")
+        return {
+            "title": "Arrivals & Departures",
+            "kpis": [
+                {"label": f"Arrivals ({when})", "value": len(arriving)},
+                {"label": "Departures", "value": len(departing)},
+                {"label": "In-house now", "value": in_house},
+            ],
+            "series_label": "Arrivals by day" if (f or t) else "Expected arrivals — next 7 days",
+            "bars": bars,
+            "records": {"columns": ["Movement", "Guest", "Room", "Source", "Status", "Date"],
+                        "rows": rows},
+        }
+
+    if report == "night_audit":
+        from apps.frontoffice.models import NightAuditRun
+        runs = list(_between(NightAuditRun.objects.all(), "business_date", f, t,
+                             date_field=True)[:60])  # newest first
+        revenue = sum((r.room_revenue for r in runs), start=Decimal("0"))
+        tax = sum((r.tax_posted for r in runs), start=Decimal("0"))
+        last = runs[0] if runs else None
+        return {
+            "title": "Night Audit / Daily Revenue",
+            "kpis": [
+                {"label": "Last audit", "value":
+                    last.business_date.strftime("%d %b %Y") if last else "never"},
+                {"label": "Room nights posted", "value": sum(r.rooms_posted for r in runs)},
+                {"label": "Room revenue posted", "value": str(revenue), "money": True},
+                {"label": "Tax posted", "value": str(tax), "money": True},
+            ],
+            "series_label": "Room revenue by business date",
+            "bars": [{"name": r.business_date.strftime("%d %b"), "value": float(r.room_revenue)}
+                     for r in reversed(runs[:14])],
+            "records": {"columns": ["Business date", "Rooms posted", "Room revenue",
+                                    "Tax posted", "Status"],
+                        "rows": [[str(r.business_date), r.rooms_posted, str(r.room_revenue),
+                                  str(r.tax_posted), "done" if r.completed else "pending"]
+                                 for r in runs]},
+        }
+
+    if report == "noshow":
+        from apps.reservations.models import Reservation
+        lost = list(_between(Reservation.objects.filter(
+            status__in=[Reservation.CANCELLED, Reservation.NO_SHOW]),
+            "checkin_date", f, t, date_field=True).select_related("room_type"))
+        noshows = [r for r in lost if r.status == Reservation.NO_SHOW]
+        value_lost = sum((r.rate * r.nights for r in lost), start=Decimal("0"))
+        by_source = {}
+        for r in lost:
+            src = r.get_source_display()
+            by_source[src] = by_source.get(src, Decimal("0")) + r.rate * r.nights
+        return {
+            "title": "No-show & Cancellation",
+            "kpis": [
+                {"label": "Cancellations", "value": len(lost) - len(noshows)},
+                {"label": "No-shows", "value": len(noshows)},
+                {"label": "Room nights lost", "value": sum(r.nights for r in lost)},
+                {"label": "Value lost", "value": str(value_lost), "money": True},
+            ],
+            "series_label": "Value lost by booking source",
+            "bars": [{"name": k, "value": float(v)}
+                     for k, v in sorted(by_source.items(), key=lambda x: -x[1])],
+            "records": {"columns": ["Guest", "Type", "Check-in", "Nights", "Rate",
+                                    "Source", "Status"],
+                        "rows": [[r.guest_name, r.room_type.code, str(r.checkin_date),
+                                  r.nights, str(r.rate), r.get_source_display(),
+                                  r.get_status_display()] for r in lost]},
+        }
+
+    if report == "discounts":
+        from apps.accounts.models import AuditLog
+        orders = (_between(Order.objects.exclude(status=Order.OPEN), "created_at", f, t)
+                  .select_related("coupon").prefetch_related("lines__menu_item"))
+        buckets = {"Manual": Decimal("0"), "Coupon": Decimal("0"),
+                   "Loyalty": Decimal("0"), "Voids": Decimal("0")}
+        rows, disc_bills, void_bills = [], 0, 0
+        disc_total = Decimal("0")
+        for o in orders:
+            # Voided bills are closed with the audit trail in discount_reason
+            # (see OrderViewSet.void) — their full value came off the books.
+            if o.discount_reason.startswith("VOID by"):
+                voided = o.totals()["total"]
+                void_bills += 1
+                buckets["Voids"] += voided
+                rows.append([o.bill_no or f"#{o.id}", o.get_mode_display(), "Void",
+                             str(voided), o.discount_reason])
+                continue
+            tot = o.totals()
+            if tot["discount"] <= 0:
+                continue
+            disc_bills += 1
+            disc_total += tot["discount"]
+            sub = tot["subtotal"]
+            if o.discount_kind == Order.DISC_PERCENT:
+                buckets["Manual"] += sub * o.discount_value / Decimal("100")
+            elif o.discount_kind == Order.DISC_FIXED:
+                buckets["Manual"] += min(o.discount_value, sub)
+            if o.coupon:
+                buckets["Coupon"] += o.coupon.reduction(sub)
+            if o.loyalty_redeemed:
+                buckets["Loyalty"] += Decimal(o.loyalty_redeemed)
+            reason = o.discount_reason or (o.coupon.code if o.coupon else "") or "—"
+            rows.append([o.bill_no or f"#{o.id}", o.get_mode_display(), "Discount",
+                         str(tot["discount"]), reason])
+        item_voids = _between(AuditLog.objects.filter(action="item_void"),
+                              "created_at", f, t).count()
+        return {
+            "title": "Discounts & Voids",
+            "kpis": [
+                {"label": "Discounted bills", "value": disc_bills},
+                {"label": "Discounts given", "value": str(disc_total), "money": True},
+                {"label": "Voided bills", "value": void_bills},
+                {"label": "Item voids (fired lines reduced)", "value": item_voids},
+            ],
+            "series_label": "Reduction by type",
+            "bars": [{"name": k, "value": float(round(v, 2))}
+                     for k, v in buckets.items() if v > 0],
+            "records": {"columns": ["Bill", "Mode", "Type", "Amount", "Reason"],
+                        "rows": rows},
+        }
+
+    return None
+
+
+def _report_rows(report, role, f=None, t=None):
     """Return (title, header, rows) for an exportable report."""
     if report == "sales":
-        rooms, fnb = _scoped_sales_kpis(role)
+        rooms, fnb = _scoped_sales_kpis(role, f, t)
         rows = []
         if rooms is not None:
             rows += [
@@ -197,7 +389,8 @@ def _report_rows(report, role):
     if report == "tax":
         from collections import defaultdict
         agg = defaultdict(lambda: [Decimal("0")] * 4)
-        for line in FolioLine.objects.exclude(kind=FolioLine.KIND_TAX):
+        for line in _between(FolioLine.objects.exclude(kind=FolioLine.KIND_TAX),
+                             "created_at", f, t):
             a = agg[str(line.gst_rate)]
             a[0] += line.taxable; a[1] += line.cgst; a[2] += line.sgst; a[3] += line.total
         rows = [[rate, v[0], v[1], v[2], v[3]] for rate, v in sorted(agg.items())]
@@ -205,14 +398,15 @@ def _report_rows(report, role):
     if report == "accounting":
         # ERP-importable daybook: revenue, output tax and purchases (FR-ACC-005).
         from apps.procurement.models import PurchaseOrder
-        r, f = _room_kpis(), _fnb_kpis()
-        tax_total = sum((l.cgst + l.sgst for l in FolioLine.objects.exclude(kind=FolioLine.KIND_TAX)),
-                        start=Decimal("0"))
-        purchases = sum((po.total for po in PurchaseOrder.objects.filter(
-            status=PurchaseOrder.RECEIVED)), start=Decimal("0"))
+        r, fnb = _room_kpis(f, t), _fnb_kpis(f, t)
+        tax_total = sum((l.cgst + l.sgst for l in _between(
+            FolioLine.objects.exclude(kind=FolioLine.KIND_TAX), "created_at", f, t)),
+            start=Decimal("0"))
+        purchases = sum((po.total for po in _between(PurchaseOrder.objects.filter(
+            status=PurchaseOrder.RECEIVED), "created_at", f, t)), start=Decimal("0"))
         rows = [
             ["Revenue", "Rooms", r["room_revenue"]],
-            ["Revenue", "F&B", f["fnb_sales"]],
+            ["Revenue", "F&B", fnb["fnb_sales"]],
             ["Tax", "Output GST", str(tax_total)],
             ["Purchases", "Goods received", str(purchases)],
         ]
@@ -220,30 +414,37 @@ def _report_rows(report, role):
     if report == "source":
         from apps.reservations.models import Reservation
         counts = {}
-        for r in Reservation.objects.all():
+        for r in _between(Reservation.objects.all(), "checkin_date", f, t, date_field=True):
             counts[r.get_source_display()] = counts.get(r.get_source_display(), 0) + 1
         return ("Bookings by Source", ["Source", "Reservations"], [[k, v] for k, v in counts.items()])
     if report == "guests":
         # Statutory guest report (BRD FR-PMS-012): in-house/checked guests with KYC.
         from apps.frontoffice.models import Folio
         rows = []
-        for fo in Folio.objects.select_related("room").exclude(id_number=""):
+        for fo in _between(Folio.objects.select_related("room").exclude(id_number=""),
+                           "opened_at", f, t):
             rows.append([fo.guest_name, fo.room.number if fo.room else "—",
                          fo.id_type, fo.id_number, fo.opened_at.strftime("%Y-%m-%d")])
         return ("Guest Report", ["Guest", "Room", "ID type", "ID number", "Check-in"], rows)
     if report == "aggregator":
         # Reuse the viewer's records (already carry gross/commission/net).
-        data = _restaurant_report(report)
+        data = _restaurant_report(report, f, t)
         return ("Aggregator Order Records (Gross / Commission / Net)",
                 data["records"]["columns"], data["records"]["rows"])
-    restaurant = _restaurant_report(report)
+    operational = _operational_report(report, f, t)
+    if operational:
+        # Operational exports are the record-level rows (one per reservation /
+        # audit run / bill) — the useful thing to open in a spreadsheet.
+        return (operational["title"], operational["records"]["columns"],
+                operational["records"]["rows"])
+    restaurant = _restaurant_report(report, f, t)
     if restaurant:
         # §7 exports reuse the viewer payload: KPI rows then the series.
         rows = [[k["label"], k["value"]] for k in restaurant["kpis"]]
         rows += [[b["name"], b["value"]] for b in restaurant["bars"]]
         return (restaurant["title"], ["Metric / " + restaurant["series_label"], "Value"], rows)
     # occupancy / rooms
-    rows = [[r.number, r.room_type_code, r.get_status_display()]
+    rows = [[r.number, r.room_type.code, r.get_status_display()]
             for r in Room.objects.select_related("room_type")]
     return ("Room Status", ["Room", "Type", "Status"], rows)
 
@@ -259,7 +460,8 @@ class ReportExportView(ModuleAPIView):
             return Response({"detail": f"not authorized for the '{report}' report"}, status=403)
         # NB: avoid the query param name 'format' — DRF reserves it as a renderer override.
         fmt = request.query_params.get("fmt", "xlsx")
-        title, header, rows = _report_rows(report, role)
+        f, t = _parse_range(request)
+        title, header, rows = _report_rows(report, role, f, t)
 
         if fmt == "csv":
             buf = io.StringIO()
@@ -271,10 +473,12 @@ class ReportExportView(ModuleAPIView):
             resp["Content-Disposition"] = f'attachment; filename="{report}.csv"'
             return resp
 
+        import re
         from openpyxl import Workbook
         wb = Workbook()
         ws = wb.active
-        ws.title = title[:31]
+        # openpyxl rejects \ / * ? : [ ] in sheet names ("Night Audit / Daily Revenue").
+        ws.title = re.sub(r"[\\/*?:\[\]]", "-", title)[:31]
         ws.append(header)
         for row in rows:
             ws.append([str(c) for c in row])
@@ -312,13 +516,13 @@ class DayEndView(ModuleAPIView):
         return Response({"tenders": tenders, "total": str(total), "tips": str(tips)})
 
 
-def _item_sales():
+def _item_sales(f=None, t=None):
     """Per-menu-item sold qty and revenue across settled/posted orders."""
     from apps.pos.models import OrderLine
     rows = {}
-    lines = (OrderLine.objects
-             .filter(order__status__in=[Order.SETTLED, Order.POSTED_TO_ROOM])
-             .select_related("menu_item"))
+    lines = _between(OrderLine.objects
+                     .filter(order__status__in=[Order.SETTLED, Order.POSTED_TO_ROOM]),
+                     "order__created_at", f, t).select_related("menu_item")
     for l in lines:
         r = rows.setdefault(l.menu_item_id, {
             "item": l.menu_item, "qty": 0, "revenue": Decimal("0")})
@@ -327,13 +531,16 @@ def _item_sales():
     return rows
 
 
-def _consumption_cost(days=None):
-    """Total recipe-consumption cost, and per-day / per-ingredient splits (spec §7)."""
+def _consumption_cost(days=None, f=None, t=None):
+    """Total recipe-consumption cost, and per-day / per-ingredient splits (spec §7).
+    An explicit from/to window replaces the rolling `days` default."""
     from django.utils import timezone
     from datetime import timedelta
     from apps.inventory.models import StockMovement
     qs = StockMovement.objects.filter(kind=StockMovement.CONSUMPTION).select_related("ingredient")
-    if days:
+    if f or t:
+        qs = _between(qs, "created_at", f, t)
+    elif days:
         qs = qs.filter(created_at__gte=timezone.now() - timedelta(days=days))
     total = Decimal("0")
     by_day, by_ingredient = {}, {}
@@ -346,13 +553,13 @@ def _consumption_cost(days=None):
     return total, by_day, by_ingredient
 
 
-def _restaurant_report(report):
+def _restaurant_report(report, f=None, t=None):
     """§7 restaurant analytics: returns the viewer payload, or None if not ours."""
     from apps.inventory.models import StockMovement
     from apps.recipes.models import Recipe
 
     if report == "recipe_consumption":
-        sales = _item_sales()
+        sales = _item_sales(f, t)
         rows = []
         for r in Recipe.objects.select_related("menu_item").prefetch_related("lines__ingredient"):
             sold = sales.get(r.menu_item_id, {"qty": 0})["qty"]
@@ -374,11 +581,14 @@ def _restaurant_report(report):
     if report == "sales_vs_consumption":
         from datetime import datetime, timedelta
         from django.utils import timezone
-        _, by_day, _ = _consumption_cost(days=14)
+        ranged = bool(f or t)
+        _, by_day, _ = _consumption_cost(days=None if ranged else 14, f=f, t=t)
         sales_by_day = {}
-        since = timezone.now() - timedelta(days=14)
-        orders = Order.objects.filter(status__in=[Order.SETTLED, Order.POSTED_TO_ROOM],
-                                      created_at__gte=since)
+        orders = Order.objects.filter(status__in=[Order.SETTLED, Order.POSTED_TO_ROOM])
+        if ranged:
+            orders = _between(orders, "created_at", f, t)
+        else:
+            orders = orders.filter(created_at__gte=timezone.now() - timedelta(days=14))
         for o in orders.prefetch_related("lines__menu_item"):
             day = o.created_at.date().isoformat()
             sales_by_day[day] = sales_by_day.get(day, Decimal("0")) + o.totals()["total"]
@@ -386,11 +596,12 @@ def _restaurant_report(report):
         total_cons = sum(by_day.values(), start=Decimal("0"))
         pct = round(float(total_cons / total_sales * 100), 1) if total_sales else 0
         days = sorted(set(by_day) | set(sales_by_day))  # ISO dates sort chronologically
+        win = "" if ranged else " (14d)"
         return {
             "title": "Daily Sales vs Consumption",
             "kpis": [
-                {"label": "F&B sales (14d)", "value": str(total_sales), "money": True},
-                {"label": "Consumption cost (14d)", "value": str(round(total_cons, 2)), "money": True},
+                {"label": f"F&B sales{win}", "value": str(total_sales), "money": True},
+                {"label": f"Consumption cost{win}", "value": str(round(total_cons, 2)), "money": True},
                 {"label": "Food cost", "value": f"{pct}%"},
             ],
             "series_label": f"Consumption cost by day ({currency_symbol()})",
@@ -402,9 +613,9 @@ def _restaurant_report(report):
         from apps.inventory.models import Ingredient
         purchased = consumed = Decimal("0")
         by_ing = {}
-        for m in (StockMovement.objects
-                  .filter(kind__in=[StockMovement.RECEIPT, StockMovement.CONSUMPTION])
-                  .select_related("ingredient")):
+        for m in _between(StockMovement.objects
+                          .filter(kind__in=[StockMovement.RECEIPT, StockMovement.CONSUMPTION]),
+                          "created_at", f, t).select_related("ingredient"):
             value = abs(m.qty) * (m.ingredient.unit_cost or Decimal("0"))
             if m.kind == StockMovement.RECEIPT:
                 purchased += value
@@ -424,8 +635,8 @@ def _restaurant_report(report):
         }
 
     if report == "food_cost":
-        total_cons, _, by_ingredient = _consumption_cost()
-        fnb = Decimal(_fnb_kpis()["fnb_sales"])
+        total_cons, _, by_ingredient = _consumption_cost(f=f, t=t)
+        fnb = Decimal(_fnb_kpis(f, t)["fnb_sales"])
         pct = round(float(total_cons / fnb * 100), 1) if fnb else 0
         bars = sorted(({"name": k, "value": float(v)} for k, v in by_ingredient.items()),
                       key=lambda x: -x["value"])[:12]
@@ -450,8 +661,8 @@ def _restaurant_report(report):
             "swiggy": prop.swiggy_commission_pct or Decimal("0"),
             "website": Decimal("0"), "qr": Decimal("0"),
         }
-        qs = (Order.objects.filter(source_platform__in=labels)
-              .prefetch_related("lines__menu_item"))
+        qs = _between(Order.objects.filter(source_platform__in=labels),
+                      "created_at", f, t).prefetch_related("lines__menu_item")
         received = 0
         settled_total = Decimal("0")
         net_total = Decimal("0")
@@ -498,7 +709,7 @@ def _restaurant_report(report):
 
     if report == "item_profitability":
         from apps.recipes.models import Recipe
-        sales = _item_sales()
+        sales = _item_sales(f, t)
         recipes = {r.menu_item_id: r for r in
                    Recipe.objects.select_related("menu_item").prefetch_related("lines__ingredient")}
         rows, gross = [], Decimal("0")
@@ -531,11 +742,15 @@ class ReportView(ModuleAPIView):
         role = getattr(request.user, "role", "")
         if not role_can_view_report(role, report):
             return Response({"detail": f"not authorized for the '{report}' report"}, status=403)
-        restaurant = _restaurant_report(report)
+        f, t = _parse_range(request)
+        restaurant = _restaurant_report(report, f, t)
         if restaurant:
             return Response(restaurant)
+        operational = _operational_report(report, f, t)
+        if operational:
+            return Response(operational)
         if report == "sales":
-            rooms, fnb = _scoped_sales_kpis(role)
+            rooms, fnb = _scoped_sales_kpis(role, f, t)
             kpis = []
             if rooms is not None:
                 kpis += [
@@ -560,7 +775,8 @@ class ReportView(ModuleAPIView):
         if report == "tax":
             from collections import defaultdict
             agg = defaultdict(Decimal)
-            for line in FolioLine.objects.exclude(kind=FolioLine.KIND_TAX):
+            for line in _between(FolioLine.objects.exclude(kind=FolioLine.KIND_TAX),
+                                 "created_at", f, t):
                 agg[str(line.gst_rate)] += line.cgst + line.sgst
             return Response({
                 "title": "GST by Slab",
@@ -571,7 +787,7 @@ class ReportView(ModuleAPIView):
         if report == "source":
             from apps.reservations.models import Reservation
             counts = {}
-            for r in Reservation.objects.all():
+            for r in _between(Reservation.objects.all(), "checkin_date", f, t, date_field=True):
                 counts[r.get_source_display()] = counts.get(r.get_source_display(), 0) + 1
             return Response({
                 "title": "Bookings by Source",
@@ -605,6 +821,7 @@ class CatalogueView(ModuleAPIView):
 
         all_reports = [
             "sales", "tax", "source", "occupancy", "accounting", "guests",
+            "arrivals", "night_audit", "noshow", "discounts",
             "aggregator", "recipe_consumption", "sales_vs_consumption",
             "purchase_vs_consumption", "food_cost", "item_profitability",
         ]
@@ -616,10 +833,11 @@ class CatalogueView(ModuleAPIView):
         # category — same slices as ROLE_REPORT_ACCESS, so nobody sees a
         # tile for a report they'd be 403'd on if they actually tried it.
         groups = [
-            {"group": "Rooms", "gate": {"source", "occupancy"}, "tiles": [
+            {"group": "Rooms", "gate": {"source", "occupancy", "arrivals",
+                                        "night_audit", "noshow"}, "tiles": [
                 "Occupancy & RevPAR", "Arrivals & Departures",
                 "Night Audit / Daily Revenue", "No-show & Cancellation"]},
-            {"group": "F&B", "gate": {"sales", "aggregator"}, "tiles": [
+            {"group": "F&B", "gate": {"sales", "aggregator", "discounts"}, "tiles": [
                 "F&B Sales Summary", "Item & Category Performance",
                 "Discounts & Voids", "Zomato / Swiggy Aggregators"]},
             {"group": "Restaurant Inventory", "gate": RESTAURANT_ANALYTICS_REPORTS, "tiles": [

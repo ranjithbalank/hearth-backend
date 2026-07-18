@@ -374,11 +374,16 @@ RESTAURANT_ANALYTICS_REPORTS = {
     "recipe_consumption", "sales_vs_consumption", "purchase_vs_consumption",
     "food_cost", "item_profitability", "aggregator",
 }
+# Front-office operational reports live with the hotel side; "discounts"
+# (discounts & voids) is floor discipline, so the restaurant side and
+# Finance get it; "night_audit" is a money report too.
+HOTEL_OPS_REPORTS = {"arrivals", "night_audit", "noshow"}
 ROLE_REPORT_ACCESS = {
-    ROLE_REST_MGR: {"sales"} | RESTAURANT_ANALYTICS_REPORTS,
-    ROLE_HOTEL_MGR: {"sales", "source", "occupancy"},
-    ROLE_FINANCE: {"sales", "tax", "accounting"} | RESTAURANT_ANALYTICS_REPORTS,
-    ROLE_CEO: {"sales", "tax", "accounting", "source", "occupancy"} | RESTAURANT_ANALYTICS_REPORTS,
+    ROLE_REST_MGR: {"sales", "discounts"} | RESTAURANT_ANALYTICS_REPORTS,
+    ROLE_HOTEL_MGR: {"sales", "source", "occupancy"} | HOTEL_OPS_REPORTS,
+    ROLE_FINANCE: {"sales", "tax", "accounting", "night_audit", "discounts"} | RESTAURANT_ANALYTICS_REPORTS,
+    ROLE_CEO: ({"sales", "tax", "accounting", "source", "occupancy", "discounts"}
+               | HOTEL_OPS_REPORTS | RESTAURANT_ANALYTICS_REPORTS),
 }
 
 

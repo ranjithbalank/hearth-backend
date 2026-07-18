@@ -118,6 +118,171 @@ class RestaurantReportsTests(TestCase):
         self.assertIn("Food cost", r.content.decode())
 
 
+class OperationalReportsTests(TestCase):
+    """Arrivals & departures, night audit history, no-show & cancellation,
+    discounts & voids — the four front-office/floor operational reports."""
+
+    def setUp(self):
+        from django.utils import timezone
+        from apps.frontoffice.models import NightAuditRun
+        from apps.reservations.models import Reservation
+        from apps.rooms.models import RoomType
+        self.client = APIClient()
+        self.client.force_authenticate(User.objects.create_user(
+            username="gmops", password="Tk9$mZ2pQw!7", role="General Manager"))
+        self.today = timezone.localdate()
+        rt = RoomType.objects.create(code="DLX", name="Deluxe", base_rate=Decimal("5000"))
+        Reservation.objects.create(guest_name="Arriving Guest", room_type=rt,
+                                   checkin_date=self.today, checkout_date=self.today,
+                                   nights=2, rate=Decimal("5000"))
+        Reservation.objects.create(guest_name="Ghost Guest", room_type=rt,
+                                   checkin_date=self.today, checkout_date=self.today,
+                                   nights=3, rate=Decimal("4000"),
+                                   status=Reservation.NO_SHOW)
+        Reservation.objects.create(guest_name="Backed Out", room_type=rt,
+                                   checkin_date=self.today, checkout_date=self.today,
+                                   nights=1, rate=Decimal("6000"), source="ota",
+                                   status=Reservation.CANCELLED)
+        NightAuditRun.objects.create(business_date=self.today, rooms_posted=3,
+                                     room_revenue=Decimal("15000"),
+                                     tax_posted=Decimal("1800"), completed=True)
+        # One settled bill with a manual 10% discount, one voided bill.
+        cat = Category.objects.create(name="Ops")
+        item = MenuItem.objects.create(name="Thali", category=cat,
+                                       price=Decimal("500"), gst_rate=Decimal("0"))
+        disc = Order.objects.create(mode=Order.DINEIN, status=Order.SETTLED,
+                                    discount_kind=Order.DISC_PERCENT,
+                                    discount_value=Decimal("10"),
+                                    discount_reason="regular guest")
+        OrderLine.objects.create(order=disc, menu_item=item, qty=2,
+                                 unit_price=Decimal("500"), kot_fired=True)
+        void = Order.objects.create(mode=Order.DINEIN, status=Order.SETTLED,
+                                    discount_reason="VOID by cashier (override gm)")
+        OrderLine.objects.create(order=void, menu_item=item, qty=1,
+                                 unit_price=Decimal("500"), kot_fired=True)
+
+    def _view(self, report):
+        r = self.client.get(f"/api/reports/view/?report={report}")
+        self.assertEqual(r.status_code, 200, report)
+        return r.data
+
+    def test_arrivals_and_departures(self):
+        data = self._view("arrivals")
+        kpis = {k["label"]: k["value"] for k in data["kpis"]}
+        arrivals_key = next(k for k in kpis if k.startswith("Arrivals"))
+        self.assertEqual(kpis[arrivals_key], 1)  # no-show/cancelled don't count
+        movements = {r[0] for r in data["records"]["rows"]}
+        self.assertIn("Arrival", movements)
+        guests = {r[1] for r in data["records"]["rows"]}
+        self.assertNotIn("Ghost Guest", guests)
+
+    def test_night_audit_history(self):
+        data = self._view("night_audit")
+        kpis = {k["label"]: k["value"] for k in data["kpis"]}
+        self.assertEqual(kpis["Room nights posted"], 3)
+        self.assertEqual(Decimal(kpis["Room revenue posted"]), Decimal("15000"))
+        self.assertEqual(data["bars"][0]["value"], 15000.0)
+        self.assertEqual(data["records"]["rows"][0][4], "done")
+
+    def test_noshow_and_cancellation(self):
+        data = self._view("noshow")
+        kpis = {k["label"]: k["value"] for k in data["kpis"]}
+        self.assertEqual(kpis["Cancellations"], 1)
+        self.assertEqual(kpis["No-shows"], 1)
+        self.assertEqual(kpis["Room nights lost"], 4)  # 3 + 1
+        # 3×4000 + 1×6000
+        self.assertEqual(Decimal(kpis["Value lost"]), Decimal("18000"))
+        bars = {b["name"]: b["value"] for b in data["bars"]}
+        self.assertEqual(bars["OTA"], 6000.0)
+
+    def test_discounts_and_voids(self):
+        data = self._view("discounts")
+        kpis = {k["label"]: k["value"] for k in data["kpis"]}
+        self.assertEqual(kpis["Discounted bills"], 1)
+        self.assertEqual(Decimal(kpis["Discounts given"]), Decimal("100"))  # 10% of 1000
+        self.assertEqual(kpis["Voided bills"], 1)
+        bars = {b["name"]: b["value"] for b in data["bars"]}
+        self.assertEqual(bars["Manual"], 100.0)
+        self.assertEqual(bars["Voids"], 500.0)
+        types = {r[2] for r in data["records"]["rows"]}
+        self.assertEqual(types, {"Discount", "Void"})
+
+    def test_operational_exports_are_record_level(self):
+        for report, needle in [("arrivals", "Arriving Guest"),
+                               ("noshow", "Ghost Guest"),
+                               ("night_audit", "15000"),
+                               ("discounts", "regular guest")]:
+            r = self.client.get(f"/api/reports/export/?report={report}&fmt=csv")
+            self.assertEqual(r.status_code, 200, report)
+            self.assertIn(needle, r.content.decode(), report)
+
+    def test_date_range_filters_reports(self):
+        """?from/&to windows the data: a future-only window shows nothing,
+        a window covering today shows everything, junk dates are ignored."""
+        from datetime import timedelta
+        tomorrow = (self.today + timedelta(days=1)).isoformat()
+        data = self.client.get(
+            f"/api/reports/view/?report=discounts&from={tomorrow}").data
+        kpis = {k["label"]: k["value"] for k in data["kpis"]}
+        self.assertEqual(kpis["Discounted bills"], 0)
+        self.assertEqual(kpis["Voided bills"], 0)
+
+        data = self.client.get(
+            f"/api/reports/view/?report=night_audit&from={self.today}&to={self.today}").data
+        self.assertEqual(len(data["records"]["rows"]), 1)
+        data = self.client.get(
+            f"/api/reports/view/?report=night_audit&to={(self.today - timedelta(days=1)).isoformat()}").data
+        self.assertEqual(len(data["records"]["rows"]), 0)
+
+        data = self.client.get(
+            f"/api/reports/view/?report=noshow&from={tomorrow}").data
+        kpis = {k["label"]: k["value"] for k in data["kpis"]}
+        self.assertEqual(kpis["No-shows"], 0)
+
+        # Malformed dates fall back to all-time instead of erroring.
+        r = self.client.get("/api/reports/view/?report=discounts&from=garbage")
+        self.assertEqual(r.status_code, 200)
+        kpis = {k["label"]: k["value"] for k in r.data["kpis"]}
+        self.assertEqual(kpis["Discounted bills"], 1)
+
+        # Exports take the same window.
+        r = self.client.get(
+            f"/api/reports/export/?report=noshow&fmt=csv&from={tomorrow}")
+        self.assertNotIn("Ghost Guest", r.content.decode())
+
+    def test_every_report_exports_in_both_formats(self):
+        """Every report key must export as csv AND xlsx without erroring —
+        catches sheet-title characters openpyxl rejects ('/') and stale
+        attribute references (Room.room_type_code)."""
+        from apps.rooms.models import Room, RoomType
+        rt = RoomType.objects.first() or RoomType.objects.create(
+            code="STD", name="Standard", base_rate=Decimal("3000"))
+        Room.objects.create(number="101", room_type=rt)
+        reports = ["sales", "tax", "source", "occupancy", "accounting", "guests",
+                   "arrivals", "night_audit", "noshow", "discounts", "aggregator",
+                   "recipe_consumption", "sales_vs_consumption",
+                   "purchase_vs_consumption", "food_cost", "item_profitability"]
+        for report in reports:
+            for fmt in ("csv", "xlsx"):
+                r = self.client.get(f"/api/reports/export/?report={report}&fmt={fmt}")
+                self.assertEqual(r.status_code, 200, f"{report} {fmt}")
+
+    def test_operational_rbac_slices(self):
+        hm = APIClient()
+        hm.force_authenticate(User.objects.create_user(
+            username="hmops", password="Tk9$mZ2pQw!7", role="Hotel Manager"))
+        for report in ["arrivals", "night_audit", "noshow"]:
+            self.assertEqual(hm.get(f"/api/reports/view/?report={report}").status_code, 200)
+        self.assertEqual(hm.get("/api/reports/view/?report=discounts").status_code, 403)
+
+        rm = APIClient()
+        rm.force_authenticate(User.objects.create_user(
+            username="rmops", password="Tk9$mZ2pQw!7", role="Restaurant Manager"))
+        self.assertEqual(rm.get("/api/reports/view/?report=discounts").status_code, 200)
+        for report in ["arrivals", "night_audit", "noshow"]:
+            self.assertEqual(rm.get(f"/api/reports/view/?report={report}").status_code, 403)
+
+
 class ReportsRbacTests(TestCase):
     """Having the 'reports' module only gates opening the Reports screen —
     these confirm WHICH report each non-universal role may actually pull is
