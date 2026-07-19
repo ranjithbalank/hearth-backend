@@ -593,6 +593,10 @@ class OrderLine(models.Model):
     # Which fire round this line went out on (null until fired).
     kot = models.ForeignKey(Kot, on_delete=models.SET_NULL, null=True, blank=True,
                             related_name="lines")
+    # Per-item kitchen-ready flag — only meaningful when the property has
+    # partial-ready turned on (Entitlement.kds_partial_ready); otherwise the
+    # whole Kot bumps ready together and this stays unused.
+    ready = models.BooleanField(default=False)
 
     def __str__(self):
         return f"{self.qty}× {self.menu_item.name}"

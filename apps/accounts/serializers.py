@@ -107,7 +107,7 @@ class UserSerializer(serializers.ModelSerializer):
 class EntitlementSerializer(serializers.ModelSerializer):
     class Meta:
         model = Entitlement
-        fields = ["hms", "restaurant", "banquets", "rms", "bar_mode"]
+        fields = ["hms", "restaurant", "banquets", "rms", "bar_mode", "kds_partial_ready"]
 
 
 class PropertySerializer(serializers.ModelSerializer):

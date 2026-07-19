@@ -453,6 +453,19 @@ class QrOrderView(APIView):
                          "ref": order.client_uuid}, status=201)
 
 
+def _recompute_kitchen_status(order):
+    """Order-level summary status: worst state across its fired rounds. The
+    chef's bump is the only source of "ready" for online orders — it flows
+    to the aggregator board so the counter can dispatch."""
+    statuses = set(order.kots.values_list("status", flat=True))
+    order.kitchen_status = ("cooking" if Kot.COOKING in statuses
+                            else "ready" if Kot.READY in statuses else "served")
+    if (order.source_platform and order.kitchen_status in ("ready", "served")
+            and order.online_status in ("received", "accepted")):
+        order.online_status = "ready"
+    order.save(update_fields=["kitchen_status", "online_status"])
+
+
 class KdsViewSet(ModuleViewSetMixin, viewsets.ViewSet):
     """Kitchen Display System: live fired tickets with bump-to-ready (BRD 5.13)."""
 
@@ -479,8 +492,8 @@ class KdsViewSet(ModuleViewSetMixin, viewsets.ViewSet):
                           else o.captain if o.source_platform == "roomservice"
                           else o.get_mode_display()),
                 "created_at": k.created_at,
-                "items": [{"name": l.display_name, "qty": l.qty,
-                           "station": l.menu_item.station} for l in k.lines.all()],
+                "items": [{"line": l.id, "name": l.display_name, "qty": l.qty,
+                           "station": l.menu_item.station, "ready": l.ready} for l in k.lines.all()],
             })
         # Banquet Event Order catering prep (FR-BQT-004).
         from apps.banquets.models import Event as BqEvent
@@ -510,22 +523,47 @@ class KdsViewSet(ModuleViewSetMixin, viewsets.ViewSet):
         if kot.status == Kot.COOKING:
             kot.status = Kot.READY
             kot.ready_at = timezone.now()
+            # Whole-ticket bump overrides any not-yet-checked items — the
+            # board should read as fully ready either way it got there.
+            kot.lines.update(ready=True)
         else:
             kot.status = Kot.SERVED
             kot.served_at = timezone.now()
         kot.save(update_fields=["status", "ready_at", "served_at"])
-        # Order-level summary status: worst state across its rounds.
-        order = kot.order
-        statuses = set(order.kots.values_list("status", flat=True))
-        order.kitchen_status = ("cooking" if Kot.COOKING in statuses
-                                else "ready" if Kot.READY in statuses else "served")
-        # The chef's bump is the ONLY source of "ready" for online orders —
-        # it flows to the aggregator board so the counter can dispatch.
-        if (order.source_platform and order.kitchen_status in ("ready", "served")
-                and order.online_status in ("received", "accepted")):
-            order.online_status = "ready"
-        order.save(update_fields=["kitchen_status", "online_status"])
+        _recompute_kitchen_status(kot.order)
         return Response({"id": kot.id, "kitchen_status": kot.status})
+
+    @action(detail=True, methods=["post"])
+    def bump_item(self, request, pk=None):
+        """Mark one line on a still-cooking ticket ready, independent of the
+        rest — only available when the property has partial-ready turned on
+        (Settings > Kitchen Display). The ticket auto-advances to Ready the
+        moment every line on it is marked.
+        """
+        from apps.accounts.constants import KITCHEN_ROLES
+        if getattr(request.user, "role", "") not in KITCHEN_ROLES:
+            return Response({"detail": "only the kitchen marks food ready"}, status=403)
+        if not active_entitlements().get("kds_partial_ready"):
+            return Response(
+                {"detail": "Partial ready is off — bump the whole ticket instead (Settings > Kitchen Display)"},
+                status=400)
+        kot = Kot.objects.filter(pk=pk).select_related("order").first()
+        if not kot:
+            return Response({"detail": "not found"}, status=404)
+        if kot.status != Kot.COOKING:
+            return Response({"detail": "this ticket is already ready"}, status=400)
+        line = kot.lines.filter(pk=request.data.get("line")).first()
+        if not line:
+            return Response({"detail": "line not found on this ticket"}, status=404)
+        line.ready = not line.ready
+        line.save(update_fields=["ready"])
+        if not kot.lines.filter(ready=False).exists():
+            from django.utils import timezone
+            kot.status = Kot.READY
+            kot.ready_at = timezone.now()
+            kot.save(update_fields=["status", "ready_at"])
+            _recompute_kitchen_status(kot.order)
+        return Response({"id": kot.id, "line": line.id, "ready": line.ready, "kitchen_status": kot.status})
 
     @action(detail=False, methods=["get"])
     def performance(self, request):

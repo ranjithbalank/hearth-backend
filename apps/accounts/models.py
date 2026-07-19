@@ -75,6 +75,11 @@ class Entitlement(models.Model):
     BAR_COMBINED = "combined"
     BAR_MODE_CHOICES = [(BAR_SEPARATE, "Separate operation"), (BAR_COMBINED, "Combined with restaurant")]
     bar_mode = models.CharField(max_length=10, choices=BAR_MODE_CHOICES, default=BAR_SEPARATE)
+    # Off by default: a ticket's items bump to ready together (course served
+    # together). On lets the kitchen mark individual items ready as they
+    # finish — the ticket itself auto-advances once every line on it is
+    # ready (Settings > Kitchen Display).
+    kds_partial_ready = models.BooleanField(default=False)
 
     def as_dict(self):
         return {
@@ -83,6 +88,7 @@ class Entitlement(models.Model):
             "banquets": self.banquets,
             "rms": self.rms,
             "bar_mode": self.bar_mode,
+            "kds_partial_ready": self.kds_partial_ready,
         }
 
     def __str__(self):

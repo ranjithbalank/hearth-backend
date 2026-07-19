@@ -564,6 +564,55 @@ class KotBillFlowTests(TestCase):
         o.refresh_from_db()
         self.assertEqual(o.kitchen_status, "cooking")  # round 2 still cooking
 
+    def test_partial_ready_off_by_default_blocks_item_bump(self):
+        """A ticket's items bump ready together unless the property has
+        opted in to partial-ready (Settings > Kitchen Display)."""
+        o = Order.objects.create(mode=Order.DINEIN, table=self.table)
+        OrderLine.objects.create(order=o, menu_item=self.item, qty=1, unit_price=Decimal("100"))
+        self.client.post(reverse("order-fire-kot", args=[o.id]), format="json")
+        kot = o.kots.get()
+        line = kot.lines.get()
+        r = self.client.post(reverse("kds-bump-item", args=[kot.id]), {"line": line.id}, format="json")
+        self.assertEqual(r.status_code, 400)
+        self.assertIn("off", r.data["detail"])
+
+    def test_partial_ready_advances_ticket_once_every_line_is_marked(self):
+        """With partial-ready on, items bump independently — the ticket
+        auto-advances to ready only once every line on it is checked."""
+        from apps.accounts.models import Entitlement, Property
+        Entitlement.objects.create(property=Property.objects.create(), kds_partial_ready=True)
+        o = Order.objects.create(mode=Order.DINEIN, table=self.table)
+        l1 = OrderLine.objects.create(order=o, menu_item=self.item, qty=1, unit_price=Decimal("100"))
+        l2 = OrderLine.objects.create(order=o, menu_item=self.item, qty=1, unit_price=Decimal("100"))
+        self.client.post(reverse("order-fire-kot", args=[o.id]), format="json")
+        kot = o.kots.get()
+
+        r = self.client.post(reverse("kds-bump-item", args=[kot.id]), {"line": l1.id}, format="json")
+        self.assertEqual(r.status_code, 200)
+        self.assertTrue(r.data["ready"])
+        kot.refresh_from_db()
+        self.assertEqual(kot.status, "cooking")  # one item still outstanding
+
+        r = self.client.post(reverse("kds-bump-item", args=[kot.id]), {"line": l2.id}, format="json")
+        self.assertEqual(r.status_code, 200)
+        kot.refresh_from_db()
+        self.assertEqual(kot.status, "ready")  # last item checked → whole ticket advances
+        o.refresh_from_db()
+        self.assertEqual(o.kitchen_status, "ready")
+
+    def test_whole_ticket_bump_marks_every_line_ready(self):
+        """The manual whole-ticket override still works with partial-ready on,
+        and leaves every line checked so the board reads consistently."""
+        from apps.accounts.models import Entitlement, Property
+        Entitlement.objects.create(property=Property.objects.create(), kds_partial_ready=True)
+        o = Order.objects.create(mode=Order.DINEIN, table=self.table)
+        OrderLine.objects.create(order=o, menu_item=self.item, qty=1, unit_price=Decimal("100"))
+        OrderLine.objects.create(order=o, menu_item=self.item, qty=1, unit_price=Decimal("100"))
+        self.client.post(reverse("order-fire-kot", args=[o.id]), format="json")
+        kot = o.kots.get()
+        self.client.post(reverse("kds-bump", args=[kot.id]), format="json")
+        self.assertTrue(all(kot.lines.values_list("ready", flat=True)))
+
     def test_till_session_lifecycle_and_variance(self):
         """Open float → cash out → cash settle → close: variance surfaces shortfalls."""
         from .models import TillSession
