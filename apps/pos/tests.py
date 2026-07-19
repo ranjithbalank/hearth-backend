@@ -305,6 +305,24 @@ class KotBillFlowTests(TestCase):
                                  unit_price=Decimal("100"), kot_fired=fired)
         return o
 
+    def test_attach_customer_creates_crm_profile_and_accrues_loyalty(self):
+        """Name and number on the bill: the diner lands in Guest CRM and
+        loyalty accrues on settle."""
+        from apps.crm.models import Customer
+        o = self._order()
+        r = self.client.post(reverse("order-attach-customer", args=[o.id]),
+                             {"name": "Meera", "mobile": "98765"}, format="json")
+        self.assertEqual(r.status_code, 400)   # short number refused
+        r = self.client.post(reverse("order-attach-customer", args=[o.id]),
+                             {"name": "Meera", "mobile": "98765 43210"}, format="json")
+        self.assertEqual(r.status_code, 200)
+        self.assertEqual(r.data["customer_name"], "Meera")
+        cust = Customer.objects.get(mobile="9876543210")
+        self.client.post(reverse("order-settle", args=[o.id]), {"tender": "Cash"}, format="json")
+        cust.refresh_from_db()
+        self.assertEqual(cust.orders.count(), 1)
+        self.assertEqual(cust.loyalty_points, 2)   # ₹210 bill → 1 pt per ₹100
+
     def test_settle_rejects_unfired_lines(self):
         o = self._order(fired=False)
         r = self.client.post(reverse("order-settle", args=[o.id]), {"tender": "Cash"}, format="json")

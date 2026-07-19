@@ -1355,6 +1355,36 @@ class OrderViewSet(AnyModuleViewSetMixin, viewsets.ModelViewSet):
         return Response(OrderSerializer(order).data)
 
     @action(detail=True, methods=["post"])
+    def attach_customer(self, request, pk=None):
+        """Put a name and number on the bill (FR-POS-009): finds or creates the
+        CRM profile by mobile, so loyalty accrues, the receipt SMS goes out and
+        the guest shows up in Guest CRM as a diner. Empty mobile detaches."""
+        from apps.crm.models import Customer
+        order = self.get_object()
+        err = _closed_error(order)
+        if err:
+            return err
+        mobile = "".join(ch for ch in str(request.data.get("mobile", "")) if ch.isdigit())
+        name = str(request.data.get("name", "")).strip()
+        if not mobile:
+            order.customer = None
+            order.save(update_fields=["customer"])
+            return Response(OrderSerializer(order).data)
+        if len(mobile) < 10:
+            return Response({"detail": "a 10-digit mobile number is required"}, status=400)
+        cust, created = Customer.objects.get_or_create(
+            mobile=mobile, defaults={"name": name or "Walk-in guest"})
+        # A real name given at the counter upgrades a placeholder profile.
+        if name and (created or cust.name in ("", "Online", "Online Guest", "Walk-in guest")):
+            cust.name = name
+            cust.save(update_fields=["name"])
+        order.customer = cust
+        order.save(update_fields=["customer"])
+        log_action(request.user, "pos_attach_customer", entity="Order", entity_id=order.id,
+                   after={"customer": cust.name, "mobile": cust.mobile, "new": created})
+        return Response(OrderSerializer(order).data)
+
+    @action(detail=True, methods=["post"])
     def redeem_loyalty(self, request, pk=None):
         """Redeem a customer's loyalty points against the bill (1 pt = ₹1, FR-PRO-004)."""
         order = self.get_object()

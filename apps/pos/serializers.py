@@ -130,12 +130,15 @@ class OrderSerializer(serializers.ModelSerializer):
     status_label = serializers.CharField(source="get_status_display", read_only=True)
 
     coupon_code = serializers.CharField(source="coupon.code", read_only=True, default=None)
+    customer_name = serializers.CharField(source="customer.name", read_only=True, default=None)
+    customer_mobile = serializers.CharField(source="customer.mobile", read_only=True, default=None)
+    customer_points = serializers.IntegerField(source="customer.loyalty_points", read_only=True, default=None)
 
     class Meta:
         model = Order
         fields = [
             "id", "mode", "department", "table", "table_name", "bar_table", "bar_table_name",
-            "customer", "covers", "captain",
+            "customer", "customer_name", "customer_mobile", "customer_points", "covers", "captain",
             "status", "status_label", "folio", "kot_no", "bill_no", "lines", "totals", "created_at",
             "discount_kind", "discount_value", "discount_reason", "coupon_code",
             "loyalty_redeemed", "source_platform", "external_ref", "online_status", "prepaid",
