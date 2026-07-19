@@ -76,6 +76,37 @@ class FolioViewSet(ModuleViewSetMixin, viewsets.ModelViewSet):
         return Response({"moved": line.id, "to_folio": target.id, "to_guest": target.guest_name})
 
     @action(detail=True, methods=["post"])
+    def add_charge(self, request, pk=None):
+        """Post a desk-side incidental to the folio (laundry, airport pickup,
+        damages…) — the manual path next to the automatic ones (room nights,
+        POS post-to-room, minibar, room service)."""
+        from decimal import Decimal, InvalidOperation
+        folio = self.get_object()
+        if folio.status != Folio.OPEN:
+            return Response({"detail": "this folio is settled — charges can't be added"}, status=400)
+        description = (request.data.get("description") or "").strip()
+        if not description:
+            return Response({"detail": "a description is required"}, status=400)
+        try:
+            amount = Decimal(str(request.data.get("amount")))
+            gst_rate = Decimal(str(request.data.get("gst_rate", "18")))
+        except InvalidOperation:
+            return Response({"detail": "amount and GST rate must be numbers"}, status=400)
+        if amount <= 0:
+            return Response({"detail": "the amount must be positive"}, status=400)
+        if gst_rate not in (Decimal("0"), Decimal("5"), Decimal("12"), Decimal("18"), Decimal("28")):
+            return Response({"detail": "GST rate must be one of 0 / 5 / 12 / 18 / 28"}, status=400)
+        line = services.post_charge(
+            folio, kind=FolioLine.KIND_INCIDENTAL, description=description,
+            amount=amount, gst_rate=gst_rate, source="frontdesk", user=request.user)
+        from apps.accounts.models import log_action
+        log_action(request.user, "charge_added", entity="FolioLine", entity_id=line.id,
+                   after={"folio": folio.id, "description": description, "total": str(line.total)})
+        # Fresh fetch — the cached prefetch would serialize without the new line.
+        fresh = Folio.objects.prefetch_related("lines", "settlements").get(pk=folio.pk)
+        return Response(FolioSerializer(fresh).data)
+
+    @action(detail=True, methods=["post"])
     def settle(self, request, pk=None):
         folio = self.get_object()
         payments = request.data.get("payments", [])

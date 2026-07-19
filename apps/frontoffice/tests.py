@@ -281,6 +281,52 @@ class FrontOfficeFlowTests(TestCase):
         self.assertEqual(run1.rooms_posted, 1)
 
 
+class DeskChargeAndPaymentTests(TestCase):
+    """Manual incidentals + part-payments from the Folios screen."""
+
+    def setUp(self):
+        self.client = APIClient()
+        self.client.force_authenticate(User.objects.create_user(
+            username="fo9", password="Tk9$mZ2pQw!7", role="Front Office"))
+        rt = RoomType.objects.create(code="STD9", name="Standard",
+                                     base_rate=Decimal("4000"), gst_slab=Decimal("12"))
+        room = Room.objects.create(number="901", room_type=rt, status=Room.VACANT_CLEAN)
+        self.folio = services.check_in(Reservation.objects.create(
+            guest_name="Desk Guest", room_type=rt, checkin_date=date.today(),
+            checkout_date=date.today() + timedelta(days=1), nights=1,
+            rate=Decimal("4000")), room)
+
+    def test_add_charge_posts_incidental_with_gst(self):
+        r = self.client.post(f"/api/folios/{self.folio.id}/add_charge/",
+                             {"description": "Laundry — 3 shirts", "amount": "300",
+                              "gst_rate": "18"}, format="json")
+        self.assertEqual(r.status_code, 200, r.data)
+        line = self.folio.lines.get()
+        self.assertEqual(line.kind, FolioLine.KIND_INCIDENTAL)
+        self.assertEqual(line.total, Decimal("354.00"))   # 300 + 18%
+        self.assertEqual(r.data["balance"], "354.00")     # response carries the new line
+        # Junk is refused.
+        self.assertEqual(self.client.post(f"/api/folios/{self.folio.id}/add_charge/",
+                         {"description": "", "amount": "10"}, format="json").status_code, 400)
+        self.assertEqual(self.client.post(f"/api/folios/{self.folio.id}/add_charge/",
+                         {"description": "x", "amount": "-5"}, format="json").status_code, 400)
+
+    def test_part_payment_keeps_folio_open_until_cleared(self):
+        services.post_charge(self.folio, kind=FolioLine.KIND_INCIDENTAL,
+                             description="Airport pickup", amount=Decimal("1000"),
+                             gst_rate=Decimal("18"))
+        r = self.client.post(f"/api/folios/{self.folio.id}/settle/",
+                             {"payments": [{"tender": "UPI", "amount": "500",
+                                            "reference": "adv-1"}]}, format="json")
+        self.assertEqual(r.status_code, 200, r.data)
+        self.assertEqual(r.data["status"], "open")        # deposit, not closure
+        self.assertEqual(r.data["balance"], "680.00")     # 1180 − 500
+        r = self.client.post(f"/api/folios/{self.folio.id}/settle/",
+                             {"payments": [{"tender": "Cash", "amount": "680"}]}, format="json")
+        self.assertEqual(r.data["status"], "settled")
+        self.assertTrue(r.data["invoice_no"])
+
+
 class ChargeTransferTests(TestCase):
     """Move a mis-posted F&B/incidental charge to another open folio —
     the companion's dinner on the wrong room, split bills (FR-PMS-006)."""
