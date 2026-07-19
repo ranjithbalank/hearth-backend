@@ -138,12 +138,15 @@ class WorkOrderViewSet(ModuleViewSetMixin, viewsets.ModelViewSet):
     serializer_class = WorkOrderSerializer
 
     def perform_create(self, serializer):
-        wo = serializer.save()
+        wo = serializer.save(raised_by=self.request.user.username)
         # Cross-module seam: a maintenance order takes the room out of service.
         if wo.room and wo.room.status != Room.OOO:
             wo.room.status = Room.OOO
             wo.room.ooo_reason = wo.title
             wo.room.save(update_fields=["status", "ooo_reason", "updated_at"])
+        log_action(self.request.user, "workorder_raised", entity="WorkOrder", entity_id=wo.id,
+                   after={"title": wo.title,
+                          "room": wo.room.number if wo.room_id else None})
 
     @action(detail=True, methods=["patch"])
     def advance(self, request, pk=None):
