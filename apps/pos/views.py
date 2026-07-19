@@ -1364,16 +1364,28 @@ class OrderViewSet(AnyModuleViewSetMixin, viewsets.ModelViewSet):
         err = _closed_error(order)
         if err:
             return err
+        import re
         mobile = "".join(ch for ch in str(request.data.get("mobile", "")) if ch.isdigit())
+        country = str(request.data.get("country", "+91")).strip() or "+91"
         name = str(request.data.get("name", "")).strip()
         if not mobile:
             order.customer = None
             order.save(update_fields=["customer"])
             return Response(OrderSerializer(order).data)
-        if len(mobile) < 10:
-            return Response({"detail": "a 10-digit mobile number is required"}, status=400)
+        if not re.fullmatch(r"\+\d{1,4}", country):
+            return Response({"detail": "country code must look like +91"}, status=400)
+        # Indian numbers are stored bare (matches walk-in and demo data);
+        # foreign guests keep their country code, e.g. "+44 7700123456".
+        if country == "+91":
+            if len(mobile) != 10:
+                return Response({"detail": "a 10-digit mobile number is required"}, status=400)
+            full = mobile
+        else:
+            if not 6 <= len(mobile) <= 12:
+                return Response({"detail": "that doesn't look like a valid number"}, status=400)
+            full = f"{country} {mobile}"
         cust, created = Customer.objects.get_or_create(
-            mobile=mobile, defaults={"name": name or "Walk-in guest"})
+            mobile=full, defaults={"name": name or "Walk-in guest"})
         # A real name given at the counter upgrades a placeholder profile.
         if name and (created or cust.name in ("", "Online", "Online Guest", "Walk-in guest")):
             cust.name = name
@@ -1536,11 +1548,14 @@ class OrderViewSet(AnyModuleViewSetMixin, viewsets.ModelViewSet):
         # Free the table only if no other unpaid order (e.g. a split bill) sits on it.
         self._free_table_if_idle(order.table)
         self._free_table_if_idle(order.bar_table)
-        # Receipt notification to the customer (FR-NOT-001).
+        # Receipt notification to the customer (FR-NOT-001) — SMS by default,
+        # WhatsApp when the cashier picks it at settle.
         if order.customer:
             from apps.accounts.constants import currency_symbol
             from apps.integrations import services as integ
-            integ.notify("sms", order.customer.mobile,
+            channel = request.data.get("receipt", "sms")
+            integ.notify(channel if channel in ("sms", "whatsapp") else "sms",
+                         order.customer.mobile,
                          f"Thanks for dining with Hearth! Bill {reference}: {currency_symbol()}{t['total']}.")
         log_action(request.user, "pos_settle", entity="Order", entity_id=order.id,
                    after={"total": str(t["total"]), "discount": str(t["discount"]), "tender": tender})

@@ -318,10 +318,31 @@ class KotBillFlowTests(TestCase):
         self.assertEqual(r.status_code, 200)
         self.assertEqual(r.data["customer_name"], "Meera")
         cust = Customer.objects.get(mobile="9876543210")
-        self.client.post(reverse("order-settle", args=[o.id]), {"tender": "Cash"}, format="json")
+        self.client.post(reverse("order-settle", args=[o.id]),
+                         {"tender": "Cash", "receipt": "whatsapp"}, format="json")
         cust.refresh_from_db()
         self.assertEqual(cust.orders.count(), 1)
         self.assertEqual(cust.loyalty_points, 2)   # ₹210 bill → 1 pt per ₹100
+        # The receipt went out on the channel the cashier picked.
+        from apps.integrations.models import SentMessage
+        msg = SentMessage.objects.latest("id")
+        self.assertEqual(msg.channel, "whatsapp")
+        self.assertEqual(msg.to, "9876543210")
+
+    def test_attach_customer_keeps_foreign_country_code(self):
+        """A foreign guest's number is stored with its country code so the
+        receipt reaches them and the profile is found again next visit."""
+        from apps.crm.models import Customer
+        o = self._order()
+        r = self.client.post(reverse("order-attach-customer", args=[o.id]),
+                             {"name": "Oliver", "mobile": "7700 123456", "country": "+44"},
+                             format="json")
+        self.assertEqual(r.status_code, 200)
+        self.assertTrue(Customer.objects.filter(mobile="+44 7700123456", name="Oliver").exists())
+        # Garbage country code refused.
+        r = self.client.post(reverse("order-attach-customer", args=[o.id]),
+                             {"mobile": "7700123456", "country": "44"}, format="json")
+        self.assertEqual(r.status_code, 400)
 
     def test_settle_rejects_unfired_lines(self):
         o = self._order(fired=False)
