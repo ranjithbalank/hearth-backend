@@ -41,6 +41,34 @@ class ReservationOpsTests(TestCase):
         self.assertEqual(self.r1.status, Room.VACANT_DIRTY)
         self.assertEqual(self.r2.status, Room.OCCUPIED)
 
+    def test_extend_stay(self):
+        """The overstay path: extend pushes the checkout and nights; only
+        in-house stays qualify, and never into another confirmed booking."""
+        # Booked (not in-house) can't extend.
+        r = self.client.post(f"/api/reservations/{self.resv.id}/extend/", {"nights": 1},
+                             format="json")
+        self.assertEqual(r.status_code, 400)
+
+        fo.check_in(self.resv, self.r1)
+        old_checkout = self.resv.checkout_date
+        r = self.client.post(f"/api/reservations/{self.resv.id}/extend/", {"nights": 2},
+                             format="json")
+        self.assertEqual(r.status_code, 200, r.data)
+        self.resv.refresh_from_db()
+        self.assertEqual(self.resv.checkout_date, old_checkout + timedelta(days=2))
+        self.assertEqual(self.resv.nights, 4)
+
+        # A confirmed booking for the same room blocks the extension.
+        Reservation.objects.create(
+            guest_name="Next Guest", room_type=self.rt, room=self.r1,
+            checkin_date=self.resv.checkout_date,
+            checkout_date=self.resv.checkout_date + timedelta(days=1),
+            nights=1, rate=Decimal("6500"))
+        r = self.client.post(f"/api/reservations/{self.resv.id}/extend/", {"nights": 1},
+                             format="json")
+        self.assertEqual(r.status_code, 400)
+        self.assertIn("Next Guest", r.data["detail"])
+
     def test_no_show_posts_penalty(self):
         r = self.client.post(reverse("reservation-no-show", args=[self.resv.id]), {}, format="json")
         self.assertEqual(r.status_code, 200)

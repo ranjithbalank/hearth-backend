@@ -205,6 +205,41 @@ class ReservationViewSet(ModuleViewSetMixin, viewsets.ModelViewSet):
         return Response(ReservationSerializer(resv).data)
 
     @action(detail=True, methods=["post"])
+    def extend(self, request, pk=None):
+        """Extend an in-house stay by N nights — the overstay path: the guest
+        isn't leaving, they're staying on. Room nights keep posting at night
+        audit; the extension is refused if it runs into someone else's
+        confirmed booking for the same room."""
+        from datetime import timedelta
+        resv = self.get_object()
+        if resv.status != Reservation.IN_HOUSE:
+            return Response({"detail": "only an in-house stay can be extended"}, status=400)
+        try:
+            nights = int(request.data.get("nights") or 1)
+        except (TypeError, ValueError):
+            return Response({"detail": "nights must be a number"}, status=400)
+        if not 1 <= nights <= 30:
+            return Response({"detail": "extend by 1–30 nights"}, status=400)
+        old_checkout = resv.checkout_date
+        new_checkout = old_checkout + timedelta(days=nights)
+        if resv.room_id:
+            clash = (Reservation.objects.filter(
+                room=resv.room, status=Reservation.BOOKED,
+                checkin_date__lt=new_checkout, checkin_date__gte=old_checkout)
+                .exclude(pk=resv.pk).order_by("checkin_date").first())
+            if clash:
+                return Response({"detail": f"room {resv.room.number} is booked by "
+                                           f"{clash.guest_name} from {clash.checkin_date} — "
+                                           f"move that booking or change rooms first"},
+                                status=400)
+        resv.checkout_date = new_checkout
+        resv.nights += nights
+        resv.save(update_fields=["checkout_date", "nights"])
+        log_action(request.user, "stay_extended", entity="Reservation", entity_id=resv.id,
+                   after={"nights_added": nights, "new_checkout": str(new_checkout)})
+        return Response(ReservationSerializer(resv).data)
+
+    @action(detail=True, methods=["post"])
     def no_show(self, request, pk=None):
         """Mark a no-show and post the configured penalty (FR-PMS-007)."""
         resv = self.get_object()
