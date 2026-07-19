@@ -42,6 +42,31 @@ class RoomViewSet(BranchScopedMixin, BranchUniqueFriendlyMixin, ModuleViewSetMix
             qs = qs.filter(status=status_)
         return qs
 
+    @action(detail=False, methods=["post"])
+    def infer_floors(self, request):
+        """One-time setup helper: set each room's floor from its number
+        (101 → 1, 204 → 2, 1203 → 12). Rooms whose numbers don't start with
+        digits are left alone. Room-master gated, like the import."""
+        import re
+        from apps.accounts.constants import role_can_access
+        if not role_can_access(getattr(request.user, "role", ""), "roommaster"):
+            return Response({"detail": "floor setup needs the Room Master screen (manager/admin)"},
+                            status=403)
+        changed = 0
+        for room in self.get_queryset():
+            m = re.match(r"(\d+)", room.number)
+            if not m:
+                continue
+            n = int(m.group(1))
+            floor = n // 100 if n >= 100 else n // 10 if n >= 10 else n
+            if floor >= 1 and room.floor != floor:
+                room.floor = floor
+                room.save(update_fields=["floor"])
+                changed += 1
+        log_action(request.user, "rooms_infer_floors", entity="Room",
+                   after={"changed": changed})
+        return Response({"changed": changed})
+
     @action(detail=False, methods=["get", "post"], url_path="import")
     def import_rooms(self, request):
         """Bulk room onboarding: GET the CSV template, POST it filled.
