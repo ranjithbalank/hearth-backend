@@ -196,8 +196,11 @@ MODULE_ENTITLEMENT = {
     "execdashboard": "hms",
     "frontdesk": "hms", "checkin": "hms", "checkout": "hms", "livegrid": "hms",
     "folio": "hms", "reservations": "hms", "housekeeping": "hms", "roommaster": "hms",
-    "accounting": "hms", "engineering": "hms",
+    "engineering": "hms",
     # hr is a shared service — restaurants run staff attendance/payroll too.
+    # accounting is shared for the same reason: a standalone restaurant still
+    # reconciles the day-end and exports its daybook to the ERP — the money
+    # records exist regardless of edition (rooms lines simply read zero).
     # Revenue / distribution
     "revenue": "rms", "channel": "hms", "booking": "hms",
     # Banquets
