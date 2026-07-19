@@ -20,7 +20,14 @@ class CustomerViewSet(AnyModuleViewSetMixin, viewsets.ModelViewSet):
     serializer_class = CustomerSerializer
 
     def get_queryset(self):
-        qs = super().get_queryset()
+        from django.db.models import Count
+        qs = super().get_queryset().annotate(
+            # Which side of the house this customer belongs to: stays and
+            # bill-to-company folios = hotel, POS orders = restaurant.
+            stay_count=Count("reservations", distinct=True),
+            order_count=Count("orders", distinct=True),
+            btc_folio_count=Count("city_ledger_folios", distinct=True),
+        )
         ctype = self.request.query_params.get("type")
         mobile = self.request.query_params.get("mobile")
         if ctype:

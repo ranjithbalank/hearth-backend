@@ -15,6 +15,14 @@ class CrmApiTests(TestCase):
         self.c = Customer.objects.create(name="Asha", mobile="9000000001",
                                          email="asha@example.com")
 
+    def test_list_annotates_hotel_vs_restaurant_activity(self):
+        """The customer list carries stay/order counts so the CRM screen can
+        filter hotel guests apart from restaurant diners."""
+        r = self.client.get(reverse("customer-list"))
+        row = next(c for c in r.data if c["id"] == self.c.id)
+        self.assertEqual(row["stay_count"], 0)
+        self.assertEqual(row["order_count"], 0)
+
     def test_lookup_by_mobile(self):
         r = self.client.get(reverse("customer-lookup") + "?mobile=9000000001")
         self.assertTrue(r.data["found"])
