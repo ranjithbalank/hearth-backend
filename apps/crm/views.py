@@ -130,8 +130,16 @@ class CustomerViewSet(AnyModuleViewSetMixin, viewsets.ModelViewSet):
 
     @action(detail=True, methods=["post"])
     def erase(self, request, pk=None):
-        """DPDP erasure: anonymise PII while preserving financial records (SR-053/054)."""
+        """DPDP erasure: anonymise PII while preserving financial records (SR-053/054).
+        Refused while money is owed — identity is needed to pursue the claim,
+        and DPDP permits retention for exactly that."""
         cust = self.get_object()
+        if cust.outstanding > 0:
+            from apps.accounts.constants import currency_symbol
+            return Response(
+                {"detail": f"{currency_symbol()}{cust.outstanding} is still outstanding — collect "
+                           f"or write it off before erasure (identity may be retained for claims)"},
+                status=400)
         before = {"name": cust.name, "mobile": cust.mobile, "email": cust.email}
         cust.name = f"Erased Customer {cust.id}"
         cust.mobile = f"erased-{cust.id}"

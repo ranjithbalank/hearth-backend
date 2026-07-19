@@ -29,6 +29,25 @@ class CrmApiTests(TestCase):
         self.assertNotEqual(self.c.mobile, "9000000001")
         self.assertEqual(self.c.email, "")
 
+    def test_erase_refused_while_money_is_owed(self):
+        """A debtor can't be anonymised — identity is retained for the claim
+        (DPDP permits this); settle or write off first, then erase."""
+        from decimal import Decimal
+        self.c.outstanding = Decimal("5000")
+        self.c.save(update_fields=["outstanding"])
+        r = self.client.post(reverse("customer-erase", args=[self.c.id]))
+        self.assertEqual(r.status_code, 400)
+        self.assertIn("outstanding", r.data["detail"])
+        self.c.refresh_from_db()
+        self.assertEqual(self.c.name, "Asha")   # untouched
+        # Collect the balance, then erasure goes through.
+        self.client.post(reverse("customer-settle-ar", args=[self.c.id]),
+                         {"amount": "5000"}, format="json")
+        r = self.client.post(reverse("customer-erase", args=[self.c.id]))
+        self.assertEqual(r.status_code, 200)
+        self.c.refresh_from_db()
+        self.assertTrue(self.c.name.startswith("Erased"))
+
 
 class CampaignTests(TestCase):
     def setUp(self):
