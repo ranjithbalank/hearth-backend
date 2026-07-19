@@ -65,9 +65,12 @@ class BanquetTests(TestCase):
         r = self.client.post(reverse("banquet-confirm", args=[e2["id"]]))
         self.assertEqual(r.status_code, 409)
 
-    def test_capacity_guard(self):
+    def test_covers_may_exceed_seated_capacity(self):
+        """Expected customers is an estimate, not a hard cap — standing/
+        cocktail-style events routinely take more than the seated capacity."""
         r = self._create(covers=9999)
-        self.assertEqual(r.status_code, 400)
+        self.assertEqual(r.status_code, 201)
+        self.assertEqual(r.data["covers"], 9999)
 
     def test_confirm_fires_beo_when_catering(self):
         e = self._create(food_pref="both", food_veg=120, food_nonveg=100).data

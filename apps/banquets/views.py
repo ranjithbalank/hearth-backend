@@ -99,10 +99,10 @@ class BanquetViewSet(ModuleViewSetMixin, viewsets.ViewSet):
         clash = _find_clash(space, event_date, start, end)
         if clash:
             return Response({"detail": _clash_msg(space, clash)}, status=status.HTTP_409_CONFLICT)
+        # Expected customers is an estimate, not a hard cap — halls routinely
+        # take more than their seated capacity for standing/cocktail-style
+        # events, so covers may exceed space.capacity.
         covers = int(request.data.get("covers", 0) or 0)
-        if covers > space.capacity:
-            return Response({"detail": f"{space.name} seats {space.capacity}; {covers} requested"},
-                            status=400)
         # Catering: for "both" we take a veg/nonveg split; otherwise a single count.
         food_pref = request.data.get("food_pref", "")
         food_veg = int(request.data.get("food_veg", 0) or 0)
@@ -164,11 +164,8 @@ class BanquetViewSet(ModuleViewSetMixin, viewsets.ViewSet):
         if clash:
             return Response({"detail": _clash_msg(e.space, clash)}, status=status.HTTP_409_CONFLICT)
         if "covers" in d:
-            covers = int(d.get("covers") or 0)
-            if covers > e.space.capacity:
-                return Response({"detail": f"{e.space.name} seats {e.space.capacity}; {covers} requested"},
-                                status=400)
-            e.covers = covers
+            # Estimate, not a hard cap — see create().
+            e.covers = int(d.get("covers") or 0)
 
         for field in ("title", "host", "contact", "event_type"):
             if field in d:
