@@ -139,8 +139,12 @@ class WorkOrderViewSet(ModuleViewSetMixin, viewsets.ModelViewSet):
 
     def perform_create(self, serializer):
         wo = serializer.save(raised_by=self.request.user.username)
-        # Cross-module seam: a maintenance order takes the room out of service.
-        if wo.room and wo.room.status != Room.OOO:
+        # Cross-module seam: a maintenance order takes a VACANT room out of
+        # service. An occupied room stays with its guest — the stay's
+        # occupancy state must never be clobbered by a repair ticket (the
+        # desk moves the guest via room-move if the room is unusable); it
+        # can go OOO after check-out if the fault is still open.
+        if wo.room and wo.room.status not in (Room.OOO, Room.OCCUPIED):
             wo.room.status = Room.OOO
             wo.room.ooo_reason = wo.title
             wo.room.save(update_fields=["status", "ooo_reason", "updated_at"])
