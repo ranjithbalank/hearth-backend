@@ -125,6 +125,7 @@ ROLE_ALLOW = {
         "dashboard", "frontdesk", "checkin", "checkout", "livegrid", "folio",
         "reservations", "housekeeping", "banquets", "roommaster", "cateringmaster",
         "customers", "reports", "matreq", "notifications", "leave", "approvals",
+        "engineering",  # oversees the hotel side incl. the maintenance queue
     ],
     # Front Office / Reception — the guest-facing desk only: front desk, room
     # assignment & status, reservations, folios/cashiering, banquets and guest
@@ -137,6 +138,7 @@ ROLE_ALLOW = {
         "frontdesk", "checkin", "checkout", "livegrid", "folio",
         "reservations", "housekeeping", "banquets", "customers", "notifications",
         "matreq", "leave",
+        "engineering",  # guests report faults at the desk — reception logs the ticket
     ],
     # F&B Cashier — POS & KOT; capped discounts; no rooms, no back-office.
     # Can raise indents for counter supplies; approval still routes elsewhere.
