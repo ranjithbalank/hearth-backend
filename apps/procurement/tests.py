@@ -21,9 +21,10 @@ class ProcurementApiTests(TestCase):
         PurchaseOrderLine.objects.create(purchase_order=self.po, ingredient=self.ing,
                                           qty=Decimal("40"), rate=Decimal("90"))
 
-    def test_po_raiser_cannot_approve_their_own(self):
-        """Segregation of duties: the Restaurant Manager who raises a PO
-        can't also approve the spend — another approver must sign it off."""
+    def test_po_approval_follows_raiser_authority(self):
+        """A spend authority (Restaurant Manager) raising a PO IS the
+        approval — it's approved on creation, ready for GRN. A Store Keeper's
+        PO queues for an approver, and nobody ever approves their own."""
         rm = APIClient()
         rm.force_authenticate(User.objects.create_user(
             username="rmpo", password="Tk9$mZ2pQw!7", role="Restaurant Manager"))
@@ -32,26 +33,51 @@ class ProcurementApiTests(TestCase):
             "lines": [{"ingredient": self.ing.id, "qty": "5", "rate": "90"}],
         }, format="json")
         self.assertEqual(r.status_code, 201, r.data)
-        po_id = r.data["id"]
+        self.assertEqual(r.data["status"], "approved")   # auto-approved
         self.assertEqual(r.data["requested_by"], "rmpo")
 
+        # Store Keeper's PO waits for a real approver…
+        store = APIClient()
+        store.force_authenticate(User.objects.create_user(
+            username="storepo", password="Tk9$mZ2pQw!7", role="Store Keeper"))
+        r = store.post("/api/purchase-orders/", {
+            "supplier": self.sup.id,
+            "lines": [{"ingredient": self.ing.id, "qty": "2", "rate": "90"}],
+        }, format="json")
+        self.assertEqual(r.data["status"], "pending")
+        po_id = r.data["id"]
+        # …the store itself can't approve (not a spend authority)…
+        self.assertEqual(store.post(reverse("po-approve", args=[po_id])).status_code, 403)
+        # …and it shows in the RM's approvals inbox, who signs it off.
+        inbox = rm.get("/api/approvals/").data
+        po_ids = [i["id"] for s in inbox["sections"] if s["key"] == "po" for i in s["items"]]
+        self.assertIn(po_id, po_ids)
         r = rm.post(reverse("po-approve", args=[po_id]))
+        self.assertEqual(r.data["status"], "approved")
+
+        # A legacy pending PO raised by an approver still can't self-approve.
+        stale = PurchaseOrder.objects.create(supplier=self.sup, requested_by="gm")
+        r = self.client.post(reverse("po-approve", args=[stale.id]))
         self.assertEqual(r.status_code, 403)
         self.assertIn("someone else", r.data["detail"])
 
-        # A different approver signs it off fine.
-        r = self.client.post(reverse("po-approve", args=[po_id]))
+    def test_supplier_import(self):
+        """Bulk supplier onboarding via CSV: template + per-row report."""
+        from io import BytesIO
+        r = self.client.get("/api/suppliers/import/")
         self.assertEqual(r.status_code, 200)
-        self.assertEqual(r.data["status"], "approved")
-
-        # And the raiser's own approvals inbox never showed it.
-        r2 = rm.post("/api/purchase-orders/", {
-            "supplier": self.sup.id,
-            "lines": [{"ingredient": self.ing.id, "qty": "1", "rate": "10"}],
-        }, format="json")
-        inbox = rm.get("/api/approvals/").data
-        po_ids = [i["id"] for s in inbox["sections"] if s["key"] == "po" for i in s["items"]]
-        self.assertNotIn(r2.data["id"], po_ids)
+        self.assertIn("name,gstin", r.content.decode())
+        body = ("name,gstin,contact,payment_terms,lead_time_days\n"
+                "Metro,,x,Net 30,3\n"                      # exists → skipped
+                "Green Valley Farms,29ABCDE1234F1Z5,9876500000,Net 15,2\n")
+        f = BytesIO(body.encode())
+        f.name = "suppliers.csv"
+        r = self.client.post("/api/suppliers/import/", {"file": f}, format="multipart")
+        self.assertEqual(r.status_code, 200, r.data)
+        self.assertEqual(r.data["created"], 1)
+        self.assertEqual(r.data["skipped_existing"], ["Metro"])
+        s = Supplier.objects.get(name="Green Valley Farms")
+        self.assertEqual(s.lead_time_days, 2)
 
     def test_supplier_master_edit(self):
         """The supplier master is editable: terms/lead time/rating change,
@@ -157,7 +183,8 @@ class ProcurementApiTests(TestCase):
         }, format="json")
         self.assertEqual(r.status_code, 201, r.data)
         po = PurchaseOrder.objects.get(pk=r.data["id"])
-        self.assertEqual(po.status, PurchaseOrder.PENDING)
+        # GM is a spend authority — their PO is approved on creation.
+        self.assertEqual(po.status, PurchaseOrder.APPROVED)
         self.assertEqual(po.lines.get().rate, Decimal("85"))
         # Validation: unknown material / empty lines / bad qty.
         self.assertEqual(self.client.post("/api/purchase-orders/", {

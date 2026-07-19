@@ -42,6 +42,53 @@ class RoomViewSet(BranchScopedMixin, BranchUniqueFriendlyMixin, ModuleViewSetMix
             qs = qs.filter(status=status_)
         return qs
 
+    @action(detail=False, methods=["get", "post"], url_path="import")
+    def import_rooms(self, request):
+        """Bulk room onboarding: GET the CSV template, POST it filled.
+        Master-level only (roommaster) — the shared livegrid read gate lets
+        the whole desk see rooms, not mass-create them. Unknown room types
+        are created on the fly with the given base rate."""
+        from decimal import Decimal, InvalidOperation
+        from apps.accounts.constants import role_can_access
+        from apps.accounts.csv_import import parse_upload, template_response
+        if not role_can_access(getattr(request.user, "role", ""), "roommaster"):
+            return Response({"detail": "room import needs the Room Master screen (manager/admin)"},
+                            status=403)
+        columns = ["number", "room_type_code", "room_type_name", "base_rate", "floor"]
+        if request.method == "GET":
+            return template_response("rooms-template.csv", columns, [
+                ["101", "STD", "Standard", "4500", "1"],
+                ["102", "STD", "Standard", "4500", "1"],
+                ["201", "DLX", "Deluxe", "6500", "2"],
+            ])
+        try:
+            rows = parse_upload(request)
+        except ValueError as e:
+            return Response({"detail": str(e)}, status=400)
+        created, skipped, errors = [], [], []
+        for lineno, row in rows:
+            number = row.get("number", "")
+            if not number:
+                continue
+            if Room.objects.filter(number__iexact=number).exists():
+                skipped.append(number)
+                continue
+            try:
+                code = (row.get("room_type_code") or "STD").upper()
+                rt, _ = RoomType.objects.get_or_create(
+                    code=code,
+                    defaults={"name": row.get("room_type_name") or code,
+                              "base_rate": Decimal(row.get("base_rate") or "0")})
+                Room.objects.create(number=number, room_type=rt,
+                                    floor=int(row.get("floor") or 1))
+                created.append(number)
+            except (ValueError, InvalidOperation) as e:
+                errors.append({"row": lineno, "name": number, "reason": str(e)[:120]})
+        log_action(request.user, "room_import", entity="Room",
+                   after={"created": len(created), "errors": len(errors)})
+        return Response({"created": len(created), "skipped_existing": skipped,
+                         "errors": errors})
+
     @action(detail=True, methods=["patch"])
     def status(self, request, pk=None):
         room = self.get_object()

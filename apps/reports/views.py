@@ -130,13 +130,16 @@ def _revenue_trend(include_rooms=True, include_fnb=True, include_banquets=False,
             by[r.business_date] = by.get(r.business_date, Decimal("0")) + r.room_revenue
         out["rooms"] = [float(by.get(d, 0)) for d in labels]
     if include_fnb:
+        from django.utils import timezone
         by = {}
         orders = (Order.objects.filter(status__in=[Order.SETTLED, Order.POSTED_TO_ROOM],
                                        created_at__date__gte=labels[0],
                                        created_at__date__lte=labels[-1])
                   .prefetch_related("lines__menu_item"))
         for o in orders:
-            d = o.created_at.date()
+            # Local date, not UTC — an order at 00:30 IST belongs to that
+            # local day (the __date lookup above already converts).
+            d = timezone.localtime(o.created_at).date()
             by[d] = by.get(d, Decimal("0")) + o.totals()["total"]
         out["fnb"] = [float(by.get(d, 0)) for d in labels]
     if include_banquets:

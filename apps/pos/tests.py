@@ -12,6 +12,50 @@ from .models import (
 )
 
 
+class MenuImportTests(TestCase):
+    """Bulk menu onboarding via CSV — template, per-row report, master-gated."""
+
+    def _csv(self, body):
+        from io import BytesIO
+        f = BytesIO(body.encode())
+        f.name = "menu.csv"
+        return f
+
+    def test_menu_import_creates_items_and_reports_rows(self):
+        gm = APIClient()
+        gm.force_authenticate(User.objects.create_user(
+            username="gmimp", password="Tk9$mZ2pQw!7", role="General Manager"))
+        # Template downloads.
+        r = gm.get("/api/pos/menu-items/import/")
+        self.assertEqual(r.status_code, 200)
+        self.assertIn("name,category,price", r.content.decode())
+
+        MenuItem.objects.create(name="Paneer Tikka", price=Decimal("300"),
+                                category=Category.objects.create(name="Old"))
+        body = ("name,category,price,gst_rate,diet,station,short_code\n"
+                "Paneer Tikka,Starters,320,5,veg,kitchen,PT\n"     # duplicate → skipped
+                "Chicken Biryani,Mains,380,5,nonveg,kitchen,CB\n"
+                "Bad Dish,Mains,0,5,veg,kitchen,\n"               # zero price → error
+                "Mojito,Cocktails,250,5,veg,bar,MJ\n")
+        r = gm.post("/api/pos/menu-items/import/", {"file": self._csv(body)},
+                    format="multipart")
+        self.assertEqual(r.status_code, 200, r.data)
+        self.assertEqual(r.data["created"], 2)
+        self.assertEqual(r.data["skipped_existing"], ["Paneer Tikka"])
+        self.assertEqual(len(r.data["errors"]), 1)
+        biryani = MenuItem.objects.get(name="Chicken Biryani")
+        self.assertEqual(biryani.category.name, "Mains")
+        self.assertEqual(biryani.diet, "nonveg")
+        mojito = MenuItem.objects.get(name="Mojito")
+        self.assertTrue(mojito.bar_menu)   # bar-station dishes join the bar menu
+
+    def test_menu_import_is_master_gated(self):
+        captain = APIClient()
+        captain.force_authenticate(User.objects.create_user(
+            username="capimp", password="Tk9$mZ2pQw!7", role="Captain"))
+        self.assertEqual(captain.get("/api/pos/menu-items/import/").status_code, 403)
+
+
 class DiscountLoyaltyTests(TestCase):
     def setUp(self):
         self.client = APIClient()

@@ -592,9 +592,67 @@ class CategoryViewSet(AnyModuleViewSetMixin, viewsets.ModelViewSet):
 
 
 class MenuItemViewSet(AnyModuleViewSetMixin, viewsets.ModelViewSet):
-    modules = ["pos", "barpos"]
+    modules = ["pos", "barpos", "menumaster"]
     queryset = MenuItem.objects.select_related("category").all()
     serializer_class = MenuItemSerializer
+
+    @action(detail=False, methods=["get", "post"], url_path="import")
+    def import_menu(self, request):
+        """Bulk menu onboarding: GET the CSV template, POST it back filled.
+        Master-level only (menumaster) — the floor roles that share this
+        viewset can sell dishes, not mass-create them."""
+        from decimal import Decimal, InvalidOperation
+        from apps.accounts.constants import role_can_access
+        from apps.accounts.csv_import import parse_upload, template_response
+        if not role_can_access(getattr(request.user, "role", ""), "menumaster"):
+            return Response({"detail": "menu import needs the Menu Master screen (manager/admin)"},
+                            status=403)
+        columns = ["name", "category", "price", "gst_rate", "diet", "station", "short_code"]
+        if request.method == "GET":
+            return template_response("menu-template.csv", columns, [
+                ["Paneer Tikka", "Starters", "320", "5", "veg", "kitchen", "PT"],
+                ["Chicken Biryani", "Mains", "380", "5", "nonveg", "kitchen", "CB"],
+                ["Fresh Lime Soda", "Beverages", "90", "5", "veg", "kitchen", "FLS"],
+            ])
+        try:
+            rows = parse_upload(request)
+        except ValueError as e:
+            return Response({"detail": str(e)}, status=400)
+        created, skipped, errors = [], [], []
+        for lineno, row in rows:
+            name = row.get("name", "")
+            if not name:
+                continue
+            if MenuItem.objects.filter(name__iexact=name).exists():
+                skipped.append(name)
+                continue
+            try:
+                price = Decimal(row.get("price") or "0")
+                if price <= 0:
+                    raise ValueError("price must be positive")
+                diet = (row.get("diet") or "veg").lower()
+                if diet not in (MenuItem.VEG, MenuItem.NONVEG, MenuItem.EGG):
+                    raise ValueError("diet must be veg / nonveg / egg")
+                station = (row.get("station") or "kitchen").lower()
+                if station not in ("kitchen", "bar"):
+                    raise ValueError("station must be kitchen or bar")
+                cat, _ = Category.objects.get_or_create(
+                    name=row.get("category") or "General",
+                    defaults={"is_bar": station == "bar"})
+                MenuItem.objects.create(
+                    name=name, category=cat, price=price,
+                    gst_rate=Decimal(row.get("gst_rate") or "5"),
+                    diet=diet, station=station, bar_menu=station == "bar",
+                    short_code=row.get("short_code", ""),
+                    created_by=request.user.username,
+                )
+                created.append(name)
+            except (ValueError, InvalidOperation) as e:
+                errors.append({"row": lineno, "name": name, "reason": str(e)[:120]})
+        log_action(request.user, "menu_import", entity="MenuItem",
+                   after={"created": len(created), "errors": len(errors)})
+        return Response({"created": len(created), "skipped_existing": skipped,
+                         "errors": errors})
 
     def get_queryset(self):
         qs = shared_or_visible(super().get_queryset(), self.request)

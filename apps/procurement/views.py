@@ -80,6 +80,43 @@ class SupplierViewSet(ModuleViewSetMixin, viewsets.ViewSet):
                    after={"name": s.name})
         return Response(_supplier_dict(s), status=201)
 
+    @action(detail=False, methods=["get", "post"], url_path="import")
+    def import_suppliers(self, request):
+        """Bulk supplier onboarding: GET the CSV template, POST it filled."""
+        from apps.accounts.csv_import import parse_upload, template_response
+        columns = ["name", "gstin", "contact", "payment_terms", "lead_time_days"]
+        if request.method == "GET":
+            return template_response("suppliers-template.csv", columns, [
+                ["Fresh Farms Pvt Ltd", "29ABCDE1234F1Z5", "9876543210", "Net 15", "2"],
+                ["Metro Cash & Carry", "", "sales@metro.example", "Net 30", "3"],
+            ])
+        try:
+            rows = parse_upload(request)
+        except ValueError as e:
+            return Response({"detail": str(e)}, status=400)
+        created, skipped, errors = [], [], []
+        for lineno, row in rows:
+            name = row.get("name", "")
+            if not name:
+                continue
+            if Supplier.objects.filter(name__iexact=name).exists():
+                skipped.append(name)
+                continue
+            try:
+                Supplier.objects.create(
+                    name=name, gstin=row.get("gstin", ""), contact=row.get("contact", ""),
+                    payment_terms=row.get("payment_terms", ""),
+                    lead_time_days=int(row.get("lead_time_days") or 2),
+                    location_id=_requester_branch(request),
+                )
+                created.append(name)
+            except (TypeError, ValueError) as e:
+                errors.append({"row": lineno, "name": name, "reason": str(e)[:120]})
+        log_action(request.user, "supplier_import", entity="Supplier",
+                   after={"created": len(created), "errors": len(errors)})
+        return Response({"created": len(created), "skipped_existing": skipped,
+                         "errors": errors})
+
     def partial_update(self, request, pk=None):
         """Edit a supplier as terms change — including the rating, which is
         the buyer's own scorecard of them."""
@@ -177,7 +214,7 @@ class PurchaseOrderViewSet(AnyModuleViewSetMixin, viewsets.ViewSet):
         Rate defaults to the material's current purchase rate."""
         from decimal import Decimal, InvalidOperation
 
-        from apps.accounts.constants import PO_HANDLER_ROLES
+        from apps.accounts.constants import PO_APPROVER_ROLES, PO_HANDLER_ROLES
         from apps.inventory.models import Ingredient
 
         if getattr(request.user, "role", "") not in PO_HANDLER_ROLES:
@@ -206,11 +243,17 @@ class PurchaseOrderViewSet(AnyModuleViewSetMixin, viewsets.ViewSet):
             if qty <= 0:
                 return Response({"detail": "quantities must be positive"}, status=400)
             parsed.append((ing, qty, rate))
+        # A raiser who IS a spend authority (Restaurant Manager, Finance,
+        # GM/MD/SA) doesn't queue behind themselves — their PO is approved on
+        # creation. Only non-approver raisers (Store Keeper) need a sign-off.
+        auto_approved = getattr(request.user, "role", "") in PO_APPROVER_ROLES
         with transaction.atomic():
             from apps.accounts.models import Property
             from apps.accounts.numbering import next_document_number
-            po = PurchaseOrder.objects.create(supplier=supplier, location_id=_requester_branch(request),
-                                              requested_by=request.user.username)
+            po = PurchaseOrder.objects.create(
+                supplier=supplier, location_id=_requester_branch(request),
+                requested_by=request.user.username,
+                status=PurchaseOrder.APPROVED if auto_approved else PurchaseOrder.PENDING)
             prop = Property.objects.first()
             po.po_no = next_document_number(PurchaseOrder, "po_no", prop.po_prefix if prop else "PO")
             po.save(update_fields=["po_no"])
@@ -218,7 +261,8 @@ class PurchaseOrderViewSet(AnyModuleViewSetMixin, viewsets.ViewSet):
                 PurchaseOrderLine.objects.create(purchase_order=po, ingredient=ing,
                                                  qty=qty, rate=rate)
         log_action(request.user, "po_create", entity="PurchaseOrder", entity_id=po.id,
-                   after={"supplier": supplier.name, "lines": len(parsed)})
+                   after={"supplier": supplier.name, "lines": len(parsed),
+                          "auto_approved": auto_approved})
         return Response(_po_dict(po), status=201)
 
     @action(detail=True, methods=["post"])
