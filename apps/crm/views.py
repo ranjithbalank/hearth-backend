@@ -105,6 +105,48 @@ class CustomerViewSet(AnyModuleViewSetMixin, viewsets.ModelViewSet):
         return Response({"received": str(applied), "outstanding": str(cust.outstanding)})
 
     @action(detail=True, methods=["get"])
+    def history(self, request, pk=None):
+        """The customer's activity for the CRM profile drawer: lifetime
+        headline numbers, stays, recent F&B orders and bill-to-company
+        folios. (Routine CRM use — distinct from the audited DPDP export.)"""
+        from apps.pos.models import Order
+        cust = self.get_object()
+        reservations = list(cust.reservations.select_related("room_type", "room")
+                            .order_by("-checkin_date")[:20])
+        orders = list(cust.orders.prefetch_related("lines__menu_item")
+                      .order_by("-created_at")[:20])
+        settled = [o for o in cust.orders.prefetch_related("lines__menu_item")
+                   if o.status in (Order.SETTLED, Order.POSTED_TO_ROOM)]
+        fnb_spend = sum((o.totals()["total"] for o in settled), Decimal("0"))
+        stays = [r for r in cust.reservations.all()
+                 if r.status in ("in_house", "checked_out")]
+        last_visit = max((r.checkin_date for r in stays), default=None)
+        return Response({
+            "profile": CustomerSerializer(cust).data,
+            "stats": {
+                "stays": len(stays),
+                "nights": sum(r.nights for r in stays),
+                "fnb_orders": len(settled),
+                "fnb_spend": str(fnb_spend),
+                "last_visit": last_visit,
+            },
+            "reservations": [{
+                "id": r.id, "checkin_date": r.checkin_date, "checkout_date": r.checkout_date,
+                "nights": r.nights, "room": r.room.number if r.room_id else None,
+                "room_type": r.room_type.name, "status": r.get_status_display(),
+                "rate": str(r.rate),
+            } for r in reservations],
+            "orders": [{
+                "id": o.id, "created_at": o.created_at, "mode": o.get_mode_display(),
+                "status": o.get_status_display(), "total": str(o.totals()["total"]),
+            } for o in orders],
+            "city_ledger": [{
+                "folio": f.id, "guest": f.guest_name, "invoice_no": f.invoice_no,
+                "amount": str(f.charges_total), "settled_at": f.settled_at,
+            } for f in cust.city_ledger_folios.all()[:20]],
+        })
+
+    @action(detail=True, methods=["get"])
     def export(self, request, pk=None):
         """DPDP data-subject access request: full profile + linked activity (SR-054)."""
         cust = self.get_object()
