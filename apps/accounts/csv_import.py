@@ -22,6 +22,35 @@ def template_response(filename, columns, examples):
     return resp
 
 
+def export_response(filename_base, header, rows, fmt="xlsx"):
+    """CSV or XLSX download of `rows` under `header`. Mirrors
+    ReportExportView's two-format branch, kept local to the setup
+    masters so a report-view change never touches this."""
+    if fmt == "csv":
+        buf = io.StringIO()
+        w = csv.writer(buf)
+        w.writerow(header)
+        for row in rows:
+            w.writerow(row)
+        resp = HttpResponse(buf.getvalue(), content_type="text/csv")
+        resp["Content-Disposition"] = f'attachment; filename="{filename_base}.csv"'
+        return resp
+    from openpyxl import Workbook
+    wb = Workbook()
+    ws = wb.active
+    ws.append(header)
+    for row in rows:
+        ws.append([str(c) for c in row])
+    out = io.BytesIO()
+    wb.save(out)
+    resp = HttpResponse(
+        out.getvalue(),
+        content_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    )
+    resp["Content-Disposition"] = f'attachment; filename="{filename_base}.xlsx"'
+    return resp
+
+
 def parse_upload(request):
     """Rows from an uploaded CSV/XLSX `file` as (lineno, {column: value}),
     keyed by the header row. Raises ValueError with a user-facing message."""

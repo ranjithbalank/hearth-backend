@@ -629,6 +629,61 @@ class CategoryViewSet(AnyModuleViewSetMixin, viewsets.ModelViewSet):
             qs = qs.filter(is_bar=is_bar in ("1", "true", "True"))
         return qs
 
+    @action(detail=False, methods=["get", "post"], url_path="import")
+    def import_categories(self, request):
+        """Bulk category onboarding — same shape as MenuItemViewSet.import_menu."""
+        from apps.accounts.constants import role_can_access
+        from apps.accounts.csv_import import parse_upload, template_response
+        if not role_can_access(getattr(request.user, "role", ""), "menumaster"):
+            return Response({"detail": "category import needs the Menu Master screen (manager/admin)"},
+                            status=403)
+        columns = ["name", "sort_order", "is_bar"]
+        if request.method == "GET":
+            return template_response("category-template.csv", columns, [
+                ["Starters", "1", "0"],
+                ["Mains", "2", "0"],
+                ["Cocktails", "1", "1"],
+            ])
+        try:
+            rows = parse_upload(request)
+        except ValueError as e:
+            return Response({"detail": str(e)}, status=400)
+        created, skipped, errors = [], [], []
+        for lineno, row in rows:
+            name = row.get("name", "")
+            if not name:
+                continue
+            if Category.objects.filter(name__iexact=name).exists():
+                skipped.append(name)
+                continue
+            try:
+                sort_raw = (row.get("sort_order") or "0").strip()
+                sort_order = int(sort_raw) if sort_raw else 0
+                if sort_order < 0:
+                    raise ValueError("sort_order must be zero or a positive whole number")
+                is_bar_val = (row.get("is_bar") or "").strip().lower() in ("1", "true", "yes")
+                Category.objects.create(name=name, sort_order=sort_order, is_bar=is_bar_val)
+                created.append(name)
+            except ValueError as e:
+                errors.append({"row": lineno, "name": name, "reason": str(e)[:120]})
+        log_action(request.user, "category_import", entity="Category",
+                   after={"created": len(created), "errors": len(errors)})
+        return Response({"created": len(created), "skipped_existing": skipped,
+                         "errors": errors})
+
+    @action(detail=False, methods=["get"], url_path="export")
+    def export_categories(self, request):
+        from apps.accounts.constants import role_can_access
+        from apps.accounts.csv_import import export_response
+        if not role_can_access(getattr(request.user, "role", ""), "menumaster"):
+            return Response({"detail": "category export needs the Menu Master screen (manager/admin)"},
+                            status=403)
+        fmt = request.query_params.get("fmt", "xlsx")
+        header = ["name", "sort_order", "is_bar"]
+        rows = [[c.name, c.sort_order, int(c.is_bar)]
+                for c in Category.objects.order_by("sort_order", "name")]
+        return export_response("categories", header, rows, fmt)
+
 
 class MenuItemViewSet(AnyModuleViewSetMixin, viewsets.ModelViewSet):
     modules = ["pos", "barpos", "menumaster"]
@@ -694,6 +749,23 @@ class MenuItemViewSet(AnyModuleViewSetMixin, viewsets.ModelViewSet):
                    after={"created": len(created), "errors": len(errors)})
         return Response({"created": len(created), "skipped_existing": skipped,
                          "errors": errors})
+
+    @action(detail=False, methods=["get"], url_path="export")
+    def export_menu(self, request):
+        """Mirror of import_menu's column set, for round-tripping the sheet
+        (edit in Excel, re-upload). Master-level only, same gate as import."""
+        from apps.accounts.constants import role_can_access
+        from apps.accounts.csv_import import export_response
+        if not role_can_access(getattr(request.user, "role", ""), "menumaster"):
+            return Response({"detail": "menu export needs the Menu Master screen (manager/admin)"},
+                            status=403)
+        fmt = request.query_params.get("fmt", "xlsx")
+        header = ["name", "category", "price", "gst_rate", "diet", "station", "short_code"]
+        rows = [
+            [m.name, m.category.name, m.price, m.gst_rate, m.diet, m.station, m.short_code]
+            for m in MenuItem.objects.select_related("category").order_by("category__sort_order", "name")
+        ]
+        return export_response("menu-items", header, rows, fmt)
 
     def get_queryset(self):
         qs = shared_or_visible(super().get_queryset(), self.request)

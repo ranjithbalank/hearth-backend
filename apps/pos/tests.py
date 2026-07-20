@@ -56,6 +56,110 @@ class MenuImportTests(TestCase):
         self.assertEqual(captain.get("/api/pos/menu-items/import/").status_code, 403)
 
 
+class MenuExportTests(TestCase):
+    """Menu item export — same column set as import, CSV or XLSX."""
+
+    def test_menu_export_csv_and_xlsx(self):
+        gm = APIClient()
+        gm.force_authenticate(User.objects.create_user(
+            username="gmexp", password="Tk9$mZ2pQw!7", role="General Manager"))
+        cat = Category.objects.create(name="Starters", sort_order=1)
+        MenuItem.objects.create(name="Paneer Tikka", price=Decimal("320"), category=cat,
+                                gst_rate=Decimal("5"), diet="veg", station="kitchen", short_code="PT")
+
+        r = gm.get("/api/pos/menu-items/export/?fmt=csv")
+        self.assertEqual(r.status_code, 200)
+        self.assertIn("text/csv", r["Content-Type"])
+        body = r.content.decode()
+        self.assertIn("name,category,price,gst_rate,diet,station,short_code", body)
+        self.assertIn("Paneer Tikka,Starters,320.00,5.0,veg,kitchen,PT", body)
+
+        r = gm.get("/api/pos/menu-items/export/")
+        self.assertEqual(r.status_code, 200)
+        self.assertIn("spreadsheetml", r["Content-Type"])
+        from io import BytesIO
+        from openpyxl import load_workbook
+        ws = load_workbook(BytesIO(r.content)).active
+        rows = list(ws.iter_rows(values_only=True))
+        self.assertEqual(list(rows[0]), ["name", "category", "price", "gst_rate", "diet", "station", "short_code"])
+        self.assertEqual(rows[1][0], "Paneer Tikka")
+        self.assertEqual(rows[1][1], "Starters")
+
+    def test_menu_export_is_master_gated(self):
+        captain = APIClient()
+        captain.force_authenticate(User.objects.create_user(
+            username="capexp", password="Tk9$mZ2pQw!7", role="Captain"))
+        self.assertEqual(captain.get("/api/pos/menu-items/export/").status_code, 403)
+
+
+class CategoryImportExportTests(TestCase):
+    """Bulk category onboarding + export — same shape as MenuImportTests."""
+
+    def _csv(self, body):
+        from io import BytesIO
+        f = BytesIO(body.encode())
+        f.name = "categories.csv"
+        return f
+
+    def test_category_import_creates_skips_and_reports_errors(self):
+        gm = APIClient()
+        gm.force_authenticate(User.objects.create_user(
+            username="gmcatimp", password="Tk9$mZ2pQw!7", role="General Manager"))
+        r = gm.get("/api/pos/categories/import/")
+        self.assertEqual(r.status_code, 200)
+        self.assertIn("name,sort_order,is_bar", r.content.decode())
+
+        Category.objects.create(name="Mains", sort_order=2)
+        body = ("name,sort_order,is_bar\n"
+                "Mains,3,0\n"              # duplicate → skipped
+                "Starters,1,0\n"
+                "Cocktails,1,1\n"
+                "Bad Row,abc,0\n")          # non-numeric sort_order → error
+        r = gm.post("/api/pos/categories/import/", {"file": self._csv(body)}, format="multipart")
+        self.assertEqual(r.status_code, 200, r.data)
+        self.assertEqual(r.data["created"], 2)
+        self.assertEqual(r.data["skipped_existing"], ["Mains"])
+        self.assertEqual(len(r.data["errors"]), 1)
+        starters = Category.objects.get(name="Starters")
+        self.assertEqual(starters.sort_order, 1)
+        self.assertFalse(starters.is_bar)
+        cocktails = Category.objects.get(name="Cocktails")
+        self.assertTrue(cocktails.is_bar)
+
+    def test_category_import_is_master_gated(self):
+        captain = APIClient()
+        captain.force_authenticate(User.objects.create_user(
+            username="capcatimp", password="Tk9$mZ2pQw!7", role="Captain"))
+        self.assertEqual(captain.get("/api/pos/categories/import/").status_code, 403)
+
+    def test_category_export_round_trips_csv_and_xlsx(self):
+        gm = APIClient()
+        gm.force_authenticate(User.objects.create_user(
+            username="gmcatexp", password="Tk9$mZ2pQw!7", role="General Manager"))
+        Category.objects.create(name="Starters", sort_order=1, is_bar=False)
+
+        r = gm.get("/api/pos/categories/export/?fmt=csv")
+        self.assertEqual(r.status_code, 200)
+        self.assertIn("text/csv", r["Content-Type"])
+        self.assertIn("Starters,1,0", r.content.decode())
+
+        r = gm.get("/api/pos/categories/export/")
+        self.assertEqual(r.status_code, 200)
+        self.assertIn("spreadsheetml", r["Content-Type"])
+        from io import BytesIO
+        from openpyxl import load_workbook
+        ws = load_workbook(BytesIO(r.content)).active
+        rows = list(ws.iter_rows(values_only=True))
+        self.assertEqual(list(rows[0]), ["name", "sort_order", "is_bar"])
+        self.assertEqual(rows[1][0], "Starters")
+
+    def test_category_export_is_master_gated(self):
+        captain = APIClient()
+        captain.force_authenticate(User.objects.create_user(
+            username="capcatexp", password="Tk9$mZ2pQw!7", role="Captain"))
+        self.assertEqual(captain.get("/api/pos/categories/export/").status_code, 403)
+
+
 class DiscountLoyaltyTests(TestCase):
     def setUp(self):
         self.client = APIClient()
