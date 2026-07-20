@@ -1,15 +1,20 @@
 from django.utils import timezone
 from rest_framework import viewsets
 from rest_framework.decorators import action
+from rest_framework.exceptions import ValidationError
 from rest_framework.response import Response
 
+from apps.accounts.constants import ROLE_HOUSEKEEPING
 from apps.accounts.models import log_action
 from apps.accounts.permissions import ModuleViewSetMixin, shared_or_visible
+from apps.masters.views import MasterViewSet
 from apps.rooms.models import Room
 from apps.rooms.serializers import RoomSerializer
 
-from .models import WorkOrder
-from .serializers import WorkOrderSerializer
+from .models import ChecklistItem, HousekeepingTask, LinenItem, WorkOrder
+from .serializers import (
+    ChecklistItemSerializer, HousekeepingTaskSerializer, LinenItemSerializer, WorkOrderSerializer,
+)
 
 # Housekeeping status progression (BRD FR-HSK-001).
 HK_NEXT = {
@@ -69,6 +74,21 @@ class HousekeepingViewSet(ModuleViewSetMixin, viewsets.ViewSet):
         if room.cleaning_requested:  # picking up the room satisfies the request
             room.cleaning_requested = False
             room.cleaning_note = ""
+        # Keep an existing task in sync when a supervisor advances the room
+        # directly instead of through the task's own start/complete actions —
+        # a no-op when no open task exists, so properties that never assign
+        # tasks keep working exactly as before.
+        open_task = (HousekeepingTask.objects.filter(room=room)
+                     .exclude(status=HousekeepingTask.DONE).first())
+        if open_task:
+            if before == Room.VACANT_DIRTY and nxt == Room.CLEANING and open_task.status == HousekeepingTask.ASSIGNED:
+                open_task.status = HousekeepingTask.IN_PROGRESS
+                open_task.started_at = timezone.now()
+                open_task.save(update_fields=["status", "started_at"])
+            elif before == Room.CLEANING and nxt == Room.VACANT_CLEAN:
+                open_task.status = HousekeepingTask.DONE
+                open_task.completed_at = timezone.now()
+                open_task.save(update_fields=["status", "completed_at"])
         room.save(update_fields=["status", "cleaning_requested", "cleaning_note", "updated_at"])
         log_action(request.user, "hk_advance", entity="Room", entity_id=room.id,
                    before={"status": before}, after={"status": nxt})
@@ -130,6 +150,151 @@ class HousekeepingViewSet(ModuleViewSetMixin, viewsets.ViewSet):
         for r in rooms:
             out[r.status] = out.get(r.status, 0) + 1
         return Response(out)
+
+
+class HousekeepingTaskViewSet(ModuleViewSetMixin, viewsets.ModelViewSet):
+    """Per-attendant work session on a room turn: assignment, checklist,
+    timer and linen issued — purely additive on top of the shared board."""
+
+    module = "housekeeping"
+    queryset = HousekeepingTask.objects.select_related("room", "assigned_to").all()
+    serializer_class = HousekeepingTaskSerializer
+
+    def get_queryset(self):
+        qs = shared_or_visible(super().get_queryset(), self.request, field="room__location")
+        if self.request.query_params.get("mine"):
+            qs = qs.filter(assigned_to=self.request.user)
+        status_ = self.request.query_params.get("status")
+        if status_:
+            qs = qs.filter(status=status_)
+        if self.request.query_params.get("open"):
+            qs = qs.exclude(status=HousekeepingTask.DONE)
+        return qs
+
+    def perform_create(self, serializer):
+        room = serializer.validated_data["room"]
+        if HousekeepingTask.objects.filter(room=room).exclude(status=HousekeepingTask.DONE).exists():
+            raise ValidationError(
+                {"detail": f"Room {room.number} already has an open task — reassign or complete it first"})
+        assigned_to = serializer.validated_data.get("assigned_to")
+        if not assigned_to or assigned_to.role != ROLE_HOUSEKEEPING:
+            raise ValidationError({"detail": "Pick an active Housekeeping-role attendant to assign"})
+        checklist = [{"label": c.label, "done": False}
+                     for c in ChecklistItem.objects.filter(active=True).order_by("sort_order", "label")]
+        task = serializer.save(checklist=checklist)
+        log_action(self.request.user, "hk_task_assigned", entity="HousekeepingTask", entity_id=task.id,
+                   after={"room": room.number, "assigned_to": assigned_to.username})
+
+    @action(detail=False, methods=["get"])
+    def attendants(self, request):
+        """Housekeeping-role logins for the assignment picker — same shape
+        as pos.TableViewSet.captains."""
+        from apps.accounts.models import User
+        qs = (User.objects.filter(role=ROLE_HOUSEKEEPING, is_active=True)
+              .order_by("first_name", "username"))
+        return Response([{"id": u.id, "name": u.get_full_name() or u.username} for u in qs])
+
+    @action(detail=True, methods=["post"])
+    def reassign(self, request, pk=None):
+        """Hand the task to a different attendant, or send assigned_to=null
+        to clear it — mirrors pos.TableViewSet.assign_captain."""
+        task = self.get_object()
+        attendant_id = request.data.get("assigned_to")
+        if attendant_id is None:
+            task.assigned_to = None
+        else:
+            from apps.accounts.models import User
+            attendant = User.objects.filter(pk=attendant_id, role=ROLE_HOUSEKEEPING).first()
+            if not attendant:
+                return Response({"detail": "Not a Housekeeping login — pick a valid attendant"}, status=400)
+            task.assigned_to = attendant
+        task.save(update_fields=["assigned_to"])
+        log_action(request.user, "hk_task_reassign", entity="HousekeepingTask", entity_id=task.id,
+                   after={"assigned_to": attendant_id})
+        return Response(HousekeepingTaskSerializer(task).data)
+
+    @action(detail=True, methods=["post"])
+    def toggle_item(self, request, pk=None):
+        task = self.get_object()
+        idx = request.data.get("index")
+        try:
+            idx = int(idx)
+            task.checklist[idx]["done"] = not task.checklist[idx]["done"]
+        except (TypeError, ValueError, IndexError, KeyError):
+            return Response({"detail": "invalid checklist index"}, status=400)
+        task.save(update_fields=["checklist"])
+        return Response(HousekeepingTaskSerializer(task).data)
+
+    @action(detail=True, methods=["post"])
+    def start(self, request, pk=None):
+        task = self.get_object()
+        if task.status != HousekeepingTask.ASSIGNED:
+            return Response({"detail": f"task is already {task.get_status_display().lower()}"}, status=400)
+        task.status = HousekeepingTask.IN_PROGRESS
+        task.started_at = timezone.now()
+        task.save(update_fields=["status", "started_at"])
+        room = task.room
+        if room.status == Room.VACANT_DIRTY:
+            room.status = Room.CLEANING
+            room.save(update_fields=["status", "updated_at"])
+        log_action(request.user, "hk_task_start", entity="HousekeepingTask", entity_id=task.id,
+                   after={"room": room.number})
+        return Response(HousekeepingTaskSerializer(task).data)
+
+    @action(detail=True, methods=["post"])
+    def complete(self, request, pk=None):
+        task = self.get_object()
+        if task.status == HousekeepingTask.DONE:
+            return Response({"detail": "task is already done"}, status=400)
+        task.status = HousekeepingTask.DONE
+        task.completed_at = timezone.now()
+        task.linen_issued = request.data.get("linen_issued") or {}
+        task.note = str(request.data.get("note", ""))[:300]
+        task.save(update_fields=["status", "completed_at", "linen_issued", "note"])
+        room = task.room
+        if room.status == Room.CLEANING:
+            room.status = Room.VACANT_CLEAN
+            room.cleaning_requested = False
+            room.cleaning_note = ""
+            room.save(update_fields=["status", "cleaning_requested", "cleaning_note", "updated_at"])
+        log_action(request.user, "hk_task_complete", entity="HousekeepingTask", entity_id=task.id,
+                   after={"room": room.number, "linen_issued": task.linen_issued})
+        return Response(HousekeepingTaskSerializer(task).data)
+
+
+class ChecklistItemViewSet(MasterViewSet):
+    queryset = ChecklistItem.objects.all()
+    serializer_class = ChecklistItemSerializer
+
+    def in_use_count(self, obj):
+        # Snapshotted onto each task at creation time — no live reference,
+        # so a checklist item is always safe to edit or remove.
+        return 0
+
+    def perform_create(self, serializer):
+        obj = serializer.save()
+        log_action(self.request.user, "master_created", entity=type(obj).__name__,
+                   entity_id=obj.id, after={"name": obj.label})
+
+    def perform_update(self, serializer):
+        before = {"name": serializer.instance.label, "active": serializer.instance.active}
+        obj = serializer.save()
+        log_action(self.request.user, "master_updated", entity=type(obj).__name__,
+                   entity_id=obj.id, before=before, after={"name": obj.label, "active": obj.active})
+
+    def destroy(self, request, *args, **kwargs):
+        obj = self.get_object()
+        log_action(request.user, "master_deleted", entity=type(obj).__name__,
+                   entity_id=obj.id, before={"name": obj.label})
+        return super(MasterViewSet, self).destroy(request, *args, **kwargs)
+
+
+class LinenItemViewSet(MasterViewSet):
+    queryset = LinenItem.objects.all()
+    serializer_class = LinenItemSerializer
+
+    def in_use_count(self, obj):
+        return 0
 
 
 class WorkOrderViewSet(ModuleViewSetMixin, viewsets.ModelViewSet):
