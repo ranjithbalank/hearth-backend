@@ -485,6 +485,7 @@ class KdsViewSet(ModuleViewSetMixin, viewsets.ViewSet):
             # the restaurant's own tables/takeaways, not just "Takeaway" either way.
             out.append({
                 "id": k.id, "type": "order", "kot_no": k.number, "kitchen_status": k.status,
+                "station": k.station,
                 # Room-service tickets label the destination room, not "Delivery".
                 "table": (o.table.name if o.table
                           else f"Bar: {o.bar_table.name}" if o.bar_table
@@ -656,6 +657,8 @@ class MenuItemViewSet(AnyModuleViewSetMixin, viewsets.ModelViewSet):
             rows = parse_upload(request)
         except ValueError as e:
             return Response({"detail": str(e)}, status=400)
+        from apps.masters.models import KitchenStation
+        stations = {s.name.lower(): s for s in KitchenStation.objects.filter(active=True)}
         created, skipped, errors = [], [], []
         for lineno, row in rows:
             name = row.get("name", "")
@@ -671,16 +674,16 @@ class MenuItemViewSet(AnyModuleViewSetMixin, viewsets.ModelViewSet):
                 diet = (row.get("diet") or "veg").lower()
                 if diet not in (MenuItem.VEG, MenuItem.NONVEG, MenuItem.EGG):
                     raise ValueError("diet must be veg / nonveg / egg")
-                station = (row.get("station") or "kitchen").lower()
-                if station not in ("kitchen", "bar"):
-                    raise ValueError("station must be kitchen or bar")
+                station_obj = stations.get((row.get("station") or "kitchen").strip().lower())
+                if not station_obj:
+                    raise ValueError(f"station must be one of: {', '.join(sorted(s.name for s in stations.values()))}")
                 cat, _ = Category.objects.get_or_create(
                     name=row.get("category") or "General",
-                    defaults={"is_bar": station == "bar"})
+                    defaults={"is_bar": station_obj.is_bar})
                 MenuItem.objects.create(
                     name=name, category=cat, price=price,
                     gst_rate=Decimal(row.get("gst_rate") or "5"),
-                    diet=diet, station=station, bar_menu=station == "bar",
+                    diet=diet, station=station_obj.name, bar_menu=station_obj.is_bar,
                     short_code=row.get("short_code", ""),
                     created_by=request.user.username,
                 )
@@ -1485,28 +1488,60 @@ class OrderViewSet(AnyModuleViewSetMixin, viewsets.ModelViewSet):
 
     @action(detail=True, methods=["post"])
     def fire_kot(self, request, pk=None):
-        """Fire a KOT for un-fired lines only (incremental KOT, FR-POS-004)."""
+        """Fire a KOT for un-fired lines only (incremental KOT, FR-POS-004).
+
+        A single fire can produce more than one ticket: newly-fired lines are
+        grouped by their menu item's kitchen station (Settings > Masters),
+        and each station gets its own ticket — a Kitchen-Display station's
+        ticket shows on the KDS as before; a Print-only station's ticket is
+        created already "served" (no on-screen lifecycle to track) and the
+        response tells the frontend to print it immediately instead.
+        """
         order = self.get_object()
         err = _closed_error(order) or _billed_error(order)
         if err:
             return err
-        pending = order.lines.filter(kot_fired=False)
-        if not pending.exists():
+        pending = list(order.lines.filter(kot_fired=False).select_related("menu_item"))
+        if not pending:
             return Response({"detail": "nothing new to fire"}, status=400)
         # Cross-module seam: deduct recipe ingredients for the newly fired lines
         # before flipping kot_fired (so the deduction sees only this round).
         from apps.recipes.services import deduct_for_newly_fired
-        deduct_for_newly_fired(order, list(pending))
+        deduct_for_newly_fired(order, pending)
+
+        from apps.masters.models import KitchenStation
+        station_modes = dict(KitchenStation.objects.values_list("name", "mode"))
+        groups = {}
+        for line in pending:
+            groups.setdefault(line.menu_item.station, []).append(line)
+
         # Each fire is its own KOT round: the kitchen gets a fresh ticket with
         # only the new items — earlier (possibly served) rounds are untouched.
-        seq = order.kots.count() + 1
-        kot = Kot.objects.create(order=order, number=f"KOT-{order.id:05d}/{seq}")
-        pending.update(kot_fired=True, kot=kot)
-        order.kot_no = kot.number  # latest round shown on the order
+        # A fire spanning multiple stations splits into one ticket per
+        # station, disambiguated with a letter suffix; a single-station fire
+        # keeps the plain "/N" number this always had.
+        round_no = order.kots.count() + 1
+        suffix = "ABCDEFGHIJ"
+        multi = len(groups) > 1
+        tickets = []
+        for i, (station_name, lines) in enumerate(groups.items()):
+            mode = station_modes.get(station_name, KitchenStation.KDS)
+            number = f"KOT-{order.id:05d}/{round_no}{suffix[i] if multi else ''}"
+            kot = Kot.objects.create(
+                order=order, number=number, station=station_name,
+                status=Kot.SERVED if mode == KitchenStation.PRINT else Kot.COOKING,
+            )
+            OrderLine.objects.filter(id__in=[l.id for l in lines]).update(kot_fired=True, kot=kot)
+            tickets.append({
+                "kot_no": number, "station": station_name, "mode": mode,
+                "lines": [{"name": l.display_name, "qty": l.qty, "note": l.note} for l in lines],
+            })
+
+        order.kot_no = tickets[-1]["kot_no"]  # latest ticket shown on the order
         order.status = Order.KOT_FIRED
-        order.kitchen_status = "cooking"  # appears on the KDS
         self._assign_token(order)  # pickup token for takeaway/delivery
-        order.save(update_fields=["kot_no", "status", "kitchen_status", "token_no"])
+        order.save(update_fields=["kot_no", "status", "token_no"])
+        _recompute_kitchen_status(order)  # worst state across every round, incl. the ones just created
         if order.table:
             order.table.status = Table.RUNNING
             order.table.save(update_fields=["status"])
@@ -1514,8 +1549,8 @@ class OrderViewSet(AnyModuleViewSetMixin, viewsets.ModelViewSet):
             order.bar_table.status = BarTable.RUNNING
             order.bar_table.save(update_fields=["status"])
         log_action(request.user, "kot_fire", entity="Order", entity_id=order.id,
-                   after={"kot": kot.number, "round": seq})
-        return Response(OrderSerializer(order).data)
+                   after={"tickets": [t["kot_no"] for t in tickets], "round": round_no})
+        return Response({**OrderSerializer(order).data, "tickets": tickets})
 
     @action(detail=True, methods=["post"])
     def bill(self, request, pk=None):

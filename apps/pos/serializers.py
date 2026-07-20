@@ -97,6 +97,13 @@ class MenuItemSerializer(serializers.ModelSerializer):
     addon_groups = AddOnGroupSerializer(many=True, read_only=True)
     channel_prices = serializers.SerializerMethodField()
 
+    def validate_station(self, value):
+        from apps.masters.models import KitchenStation
+        if not KitchenStation.objects.filter(name=value, active=True).exists():
+            raise serializers.ValidationError(
+                f"'{value}' isn't an active kitchen station — add it in Settings > Masters first.")
+        return value
+
     class Meta:
         model = MenuItem
         fields = [

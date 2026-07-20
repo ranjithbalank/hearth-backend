@@ -4,7 +4,7 @@ from rest_framework.test import APIClient
 from apps.accounts.models import User
 from apps.hr.models import Employee
 
-from .models import Department, Designation, PaymentMethod
+from .models import Department, Designation, KitchenStation, PaymentMethod
 
 
 def client_as(role, username):
@@ -22,6 +22,12 @@ class MastersSeedTests(TestCase):
         self.assertTrue(cash.builtin and cash.counts_as_cash and not cash.captain_allowed)
         upi = PaymentMethod.objects.get(name="UPI")
         self.assertTrue(upi.builtin and upi.captain_allowed and not upi.counts_as_cash)
+        kitchen = KitchenStation.objects.get(name="kitchen")
+        self.assertEqual(kitchen.mode, "kds")
+        self.assertFalse(kitchen.is_bar)
+        bar = KitchenStation.objects.get(name="bar")
+        self.assertEqual(bar.mode, "kds")
+        self.assertTrue(bar.is_bar)
 
 
 class MastersPermissionTests(TestCase):
@@ -119,3 +125,44 @@ class EmployeeMasterTests(TestCase):
         self.assertEqual(r.status_code, 200)
         e.refresh_from_db()
         self.assertEqual(e.status, "Inactive")
+
+
+class KitchenStationLifecycleTests(TestCase):
+    def setUp(self):
+        self.admin = client_as("Admin", "adm4")
+
+    def test_bar_station_cannot_be_renamed_or_deleted(self):
+        bar = KitchenStation.objects.get(name="bar")
+        r = self.admin.patch(f"/api/masters/kitchen-stations/{bar.id}/",
+                             {"name": "Drinks"}, format="json")
+        self.assertEqual(r.status_code, 400)
+        r = self.admin.delete(f"/api/masters/kitchen-stations/{bar.id}/")
+        self.assertEqual(r.status_code, 400)
+        self.assertIn("bar station", r.data["detail"])
+        # Mode can still be changed on the bar row, just not name/deletion.
+        r = self.admin.patch(f"/api/masters/kitchen-stations/{bar.id}/",
+                             {"mode": "print"}, format="json")
+        self.assertEqual(r.status_code, 200)
+
+    def test_new_station_in_use_deactivates_instead_of_deleting(self):
+        from apps.pos.models import Category, MenuItem
+        r = self.admin.post("/api/masters/kitchen-stations/",
+                            {"name": "Grill", "mode": "kds"}, format="json")
+        self.assertEqual(r.status_code, 201, r.data)
+        grill = KitchenStation.objects.get(name="Grill")
+        cat = Category.objects.create(name="Mains")
+        MenuItem.objects.create(name="Grilled Chicken", category=cat, price=350, station="Grill")
+        r = self.admin.delete(f"/api/masters/kitchen-stations/{grill.id}/")
+        self.assertEqual(r.status_code, 400)
+        self.assertIn("mark it inactive", r.data["detail"])
+        r = self.admin.patch(f"/api/masters/kitchen-stations/{grill.id}/",
+                             {"active": False}, format="json")
+        self.assertEqual(r.status_code, 200)
+
+    def test_new_station_is_not_bar_by_default_and_flag_is_read_only(self):
+        r = self.admin.post("/api/masters/kitchen-stations/",
+                            {"name": "Chinese", "mode": "print", "is_bar": True}, format="json")
+        self.assertEqual(r.status_code, 201, r.data)
+        chinese = KitchenStation.objects.get(name="Chinese")
+        self.assertFalse(chinese.is_bar)  # read-only field, the post body is silently ignored
+        self.assertEqual(chinese.mode, "print")

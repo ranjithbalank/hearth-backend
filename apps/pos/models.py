@@ -150,8 +150,11 @@ class MenuItem(models.Model):
 
     def save(self, *args, **kwargs):
         # A bar-station item (a beverage) is always in the bar's own menu —
-        # only kitchen items need an explicit opt-in to appear there.
-        if self.station == "bar":
+        # only kitchen items need an explicit opt-in to appear there. Which
+        # station counts as "the bar" comes from the Kitchen Station master
+        # (Settings > Masters), not a hardcoded name.
+        from apps.masters.models import KitchenStation
+        if KitchenStation.objects.filter(name=self.station, is_bar=True).exists():
             self.bar_menu = True
         super().save(*args, **kwargs)
 
@@ -465,6 +468,11 @@ class Kot(models.Model):
     order = models.ForeignKey(Order, on_delete=models.CASCADE, related_name="kots")
     number = models.CharField(max_length=24)
     status = models.CharField(max_length=12, default=COOKING)  # cooking | ready | served
+    # Which Kitchen Station this specific ticket belongs to (a single fire can
+    # now split into one Kot per station represented among the newly-fired
+    # lines). Blank on any ticket created before this — those older rounds
+    # mixed stations together and have no single station to attribute.
+    station = models.CharField(max_length=60, blank=True, default="")
     created_at = models.DateTimeField(auto_now_add=True)
     # Kitchen performance: when the round was bumped ready / served.
     ready_at = models.DateTimeField(null=True, blank=True)

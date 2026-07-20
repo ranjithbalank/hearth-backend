@@ -590,6 +590,56 @@ class KotBillFlowTests(TestCase):
         o.refresh_from_db()
         self.assertEqual(o.kitchen_status, "cooking")  # round 2 still cooking
 
+    def test_fire_splits_one_round_into_a_ticket_per_station(self):
+        """A fire spanning Kitchen + a Print-only Tandoor station produces two
+        tickets: the Kitchen one cooks live, the Tandoor one is already
+        served and invisible to the KDS/ready board."""
+        from apps.masters.models import KitchenStation
+        KitchenStation.objects.create(name="Tandoor", mode=KitchenStation.PRINT)
+        tandoori = MenuItem.objects.create(name="Tandoori Roti", category=self.cat,
+                                           price=Decimal("40"), station="Tandoor")
+        o = Order.objects.create(mode=Order.DINEIN, table=self.table)
+        OrderLine.objects.create(order=o, menu_item=self.item, qty=1, unit_price=Decimal("100"))
+        OrderLine.objects.create(order=o, menu_item=tandoori, qty=2, unit_price=Decimal("40"))
+        r = self.client.post(reverse("order-fire-kot", args=[o.id]), format="json")
+        self.assertEqual(r.status_code, 200)
+        tickets = {t["station"]: t for t in r.data["tickets"]}
+        self.assertEqual(set(tickets), {"kitchen", "Tandoor"})
+        self.assertEqual(tickets["kitchen"]["mode"], "kds")
+        self.assertEqual(tickets["Tandoor"]["mode"], "print")
+        # Disambiguated numbers since this one fire spans two stations.
+        self.assertTrue(tickets["kitchen"]["kot_no"].endswith("A"))
+        self.assertTrue(tickets["Tandoor"]["kot_no"].endswith("B"))
+        kitchen_kot = o.kots.get(station="kitchen")
+        tandoor_kot = o.kots.get(station="Tandoor")
+        self.assertEqual(kitchen_kot.status, "cooking")
+        self.assertEqual(tandoor_kot.status, "served")  # print-only: no on-screen lifecycle
+        # The print-only ticket never shows on the KDS board or the floor's ready strip.
+        board = self.client.get(reverse("kds-list"))
+        self.assertIn(kitchen_kot.number, [t["kot_no"] for t in board.data])
+        self.assertNotIn(tandoor_kot.number, [t["kot_no"] for t in board.data])
+        # A single-station fire keeps the plain, unsuffixed ticket number.
+        o2 = self._order(fired=False)
+        r2 = self.client.post(reverse("order-fire-kot", args=[o2.id]), format="json")
+        self.assertEqual(len(r2.data["tickets"]), 1)
+        self.assertFalse(r2.data["tickets"][0]["kot_no"][-1].isalpha())
+
+    def test_unknown_station_rejected_by_serializer_and_csv_import(self):
+        r = self.client.patch(f"/api/pos/menu-items/{self.item.id}/",
+                              {"station": "Made Up Station"}, format="json")
+        self.assertEqual(r.status_code, 400)
+        self.assertIn("station", r.data)
+        from io import BytesIO
+        body = ("name,category,price,gst_rate,diet,station,short_code\n"
+                "Mystery Dish,Mains,200,5,veg,madeup,MD\n")
+        f = BytesIO(body.encode())
+        f.name = "menu.csv"
+        r = self.client.post("/api/pos/menu-items/import/", {"file": f}, format="multipart")
+        self.assertEqual(r.status_code, 200, r.data)
+        self.assertEqual(r.data["created"], 0)
+        self.assertEqual(len(r.data["errors"]), 1)
+        self.assertIn("station must be one of", r.data["errors"][0]["reason"])
+
     def test_partial_ready_off_by_default_blocks_item_bump(self):
         """A ticket's items bump ready together unless the property has
         opted in to partial-ready (Settings > Kitchen Display)."""

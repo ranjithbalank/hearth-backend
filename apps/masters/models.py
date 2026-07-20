@@ -33,6 +33,37 @@ class Designation(models.Model):
         return self.name
 
 
+class KitchenStation(models.Model):
+    """Kitchen department master (Settings > Masters) — Grill, Chinese, Indian,
+    Tandoor, Bar, etc. Each menu item is mapped to one station; firing a KOT
+    splits the order's new lines into one ticket per station represented.
+
+    A station's `mode` decides what firing produces: `kds` puts the ticket on
+    the live Kitchen Display same as today; `print` is for owners who don't
+    run a screen at all for that section — the ticket auto-prints once and
+    never appears on any live board (it's created already "served").
+
+    The bar/drinks station is just another row here (`is_bar=True`), replacing
+    the old hardcoded `MenuItem.station == "bar"` check — that flag is what
+    still auto-adds an item to Bar POS's own menu (`MenuItem.bar_menu`).
+    """
+
+    KDS = "kds"
+    PRINT = "print"
+    MODE_CHOICES = [(KDS, "Kitchen Display"), (PRINT, "Print only")]
+
+    name = models.CharField(max_length=60, unique=True)
+    mode = models.CharField(max_length=6, choices=MODE_CHOICES, default=KDS)
+    is_bar = models.BooleanField(default=False, help_text="drives MenuItem.bar_menu auto-assignment")
+    active = models.BooleanField(default=True)
+
+    class Meta:
+        ordering = ["-is_bar", "name"]
+
+    def __str__(self):
+        return self.name
+
+
 class PaymentMethod(models.Model):
     """Settlement tender master. The three builtins (Cash / UPI / Gateway)
     carry hardwired behavior — Gateway routes through the card provider,

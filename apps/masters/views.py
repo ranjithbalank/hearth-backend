@@ -12,10 +12,11 @@ from rest_framework.response import Response
 from apps.accounts.models import log_action
 from apps.accounts.permissions import ModulePermission
 
-from .models import Department, Designation, PaymentMethod
+from .models import Department, Designation, KitchenStation, PaymentMethod
 from .serializers import (
     DepartmentSerializer,
     DesignationSerializer,
+    KitchenStationSerializer,
     PaymentMethodSerializer,
 )
 
@@ -79,6 +80,23 @@ class DesignationViewSet(MasterViewSet):
     def in_use_count(self, obj):
         from apps.hr.models import Employee
         return Employee.objects.filter(role=obj.name).count()
+
+
+class KitchenStationViewSet(MasterViewSet):
+    queryset = KitchenStation.objects.all()
+    serializer_class = KitchenStationSerializer
+
+    def in_use_count(self, obj):
+        from apps.pos.models import MenuItem
+        return MenuItem.objects.filter(station=obj.name).count()
+
+    def destroy(self, request, *args, **kwargs):
+        obj = self.get_object()
+        if obj.is_bar:
+            return Response(
+                {"detail": f"'{obj.name}' is the bar station — deactivate it instead."},
+                status=400)
+        return super().destroy(request, *args, **kwargs)
 
 
 class PaymentMethodViewSet(MasterViewSet):
