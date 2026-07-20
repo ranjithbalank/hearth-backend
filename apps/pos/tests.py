@@ -245,6 +245,32 @@ class DiscountLoyaltyTests(TestCase):
                              {"status": "dispatched"}, format="json")
         self.assertEqual(r.data["online_status"], "dispatched")
 
+    def test_reject_online_order_before_accepting(self):
+        """A routine reject (item out of stock) needs only a reason — no
+        manager override — but only while still un-accepted."""
+        self.client.force_authenticate(self.mgr)
+        o = Order.objects.create(mode=Order.DELIVERY, source_platform="zomato",
+                                 external_ref="Z2", online_status="received",
+                                 status=Order.KOT_FIRED, kitchen_status="cooking")
+        kot = o.kots.create(number="AGG-Z2")
+        r = self.client.post(reverse("order-reject", args=[o.id]), format="json")
+        self.assertEqual(r.status_code, 400)  # reason required
+        r = self.client.post(reverse("order-reject", args=[o.id]),
+                             {"reason": "out of stock"}, format="json")
+        self.assertEqual(r.status_code, 200)
+        self.assertEqual(r.data["online_status"], "rejected")
+        kot.refresh_from_db()
+        self.assertEqual(kot.status, "served")  # pulled off the KDS board
+        # Rejected orders drop off the live online board.
+        board = self.client.get(reverse("order-online"))
+        self.assertNotIn(o.id, [row["id"] for row in board.data])
+        # Already-accepted orders can't be rejected — void instead.
+        o2 = Order.objects.create(mode=Order.DELIVERY, source_platform="zomato",
+                                  external_ref="Z3", online_status="accepted")
+        r = self.client.post(reverse("order-reject", args=[o2.id]),
+                             {"reason": "too late"}, format="json")
+        self.assertEqual(r.status_code, 400)
+
     def test_qr_order_public(self):
         from .models import Table
         from rest_framework.test import APIClient

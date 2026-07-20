@@ -1153,11 +1153,43 @@ class OrderViewSet(AnyModuleViewSetMixin, viewsets.ModelViewSet):
         order.save(update_fields=["online_status", "status", "kitchen_status", "bill_no"])
         return Response(OrderSerializer(order).data)
 
+    @action(detail=True, methods=["post"])
+    def reject(self, request, pk=None):
+        """Reject an aggregator order before accepting it — genuinely can't
+        fulfil (item out of stock, kitchen closing) (FR-ONL-003).
+
+        Only available while still "received": once the counter has accepted
+        it, use void (manager override) instead — accepting is the point of
+        no return back to the platform. No manager override here since
+        rejecting an online order for a routine reason (86'd item) is normal
+        counter business, not an exception.
+        """
+        order = self.get_object()
+        if order.online_status != "received":
+            return Response(
+                {"detail": "already accepted — void it instead if it truly can't be fulfilled"},
+                status=400)
+        reason = (request.data.get("reason") or "").strip()
+        if not reason:
+            return Response({"detail": "a reason is required to reject an order"}, status=400)
+        from django.utils import timezone
+        order.online_status = "rejected"
+        order.status = Order.SETTLED  # closed, same convention as void
+        order.kitchen_status = "served"
+        order.discount_reason = f"REJECTED by {request.user.username} — {reason}"
+        order.save(update_fields=["online_status", "status", "kitchen_status", "discount_reason"])
+        # Pull the ticket off the kitchen board — the food was auto-fired on
+        # arrival, but nothing further should be cooked for a rejected order.
+        order.kots.exclude(status=Kot.SERVED).update(status=Kot.SERVED, served_at=timezone.now())
+        log_action(request.user, "online_order_reject", entity="Order", entity_id=order.id,
+                   after={"platform": order.source_platform, "reason": reason})
+        return Response(OrderSerializer(order).data)
+
     @action(detail=False, methods=["get"])
     def online(self, request):
         """Live online/aggregator order board (FR-ONL panels)."""
         qs = (Order.objects.exclude(source_platform="")
-              .exclude(online_status="dispatched")
+              .exclude(online_status__in=["dispatched", "rejected"])
               .prefetch_related("lines__menu_item").order_by("created_at"))
         return Response(OrderSerializer(qs, many=True).data)
 
