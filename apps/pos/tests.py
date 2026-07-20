@@ -412,6 +412,59 @@ class DiscountLoyaltyTests(TestCase):
         self.client.post(reverse("order-settle", args=[o.id]), {"tender": "Cash"}, format="json")
         cust.refresh_from_db()
         self.assertEqual(cust.loyalty_points, 8)
+        self.assertEqual(cust.lifetime_points, 8)
+        from apps.crm.models import LoyaltyLedger
+        entry = LoyaltyLedger.objects.get(customer=cust, kind=LoyaltyLedger.EARN)
+        self.assertEqual(entry.points, 8)
+        self.assertEqual(entry.balance_after, 8)
+
+    def test_loyalty_earn_uses_tier_multiplier(self):
+        from apps.crm.models import LoyaltyTier
+        LoyaltyTier.objects.create(name="Gold", min_lifetime_points=100, earn_multiplier="2.00")
+        cust = Customer.objects.create(name="Golden", mobile="9000000111",
+                                       loyalty_points=0, lifetime_points=150)
+        self.client.force_authenticate(self.mgr)
+        o = self._order()  # 840 total -> 8 base points, x2 tier multiplier -> 16
+        o.customer = cust
+        o.save()
+        self.client.post(reverse("order-settle", args=[o.id]), {"tender": "Cash"}, format="json")
+        cust.refresh_from_db()
+        self.assertEqual(cust.loyalty_points, 16)
+        self.assertEqual(cust.lifetime_points, 166)
+
+    def test_redeem_loyalty_reward_deducts_points_cost_not_rupee_discount(self):
+        """A ₹50-off reward that costs 500 points must deduct 500 points at
+        settle, not 50 — the rupee discount and the point cost are distinct."""
+        from apps.crm.models import LoyaltyReward
+        reward = LoyaltyReward.objects.create(name="₹50 off", points_cost=500, kind="fixed", value="50")
+        cust = Customer.objects.create(name="Reward User", mobile="9000000222", loyalty_points=500)
+        self.client.force_authenticate(self.mgr)
+        o = self._order()
+        o.customer = cust
+        o.save()
+        r = self.client.post(reverse("order-redeem-loyalty", args=[o.id]),
+                             {"reward_id": reward.id}, format="json")
+        self.assertEqual(r.status_code, 200, r.data)
+        self.assertEqual(r.data["loyalty_redeemed"], "50.00" if isinstance(r.data["loyalty_redeemed"], str) else 50)
+        self.client.post(reverse("order-settle", args=[o.id]), {"tender": "Cash"}, format="json")
+        cust.refresh_from_db()
+        reward.refresh_from_db()
+        # 500 - 500 (points_cost, not the ₹50 rupee discount) + 7 earned on
+        # the discounted ₹790 total (840 - 50) at the base 1.0x multiplier.
+        self.assertEqual(cust.loyalty_points, 7)
+        self.assertEqual(reward.redeemed_count, 1)
+
+    def test_redeem_loyalty_reward_requires_enough_points(self):
+        from apps.crm.models import LoyaltyReward
+        reward = LoyaltyReward.objects.create(name="₹50 off", points_cost=500, kind="fixed", value="50")
+        cust = Customer.objects.create(name="Short", mobile="9000000333", loyalty_points=100)
+        self.client.force_authenticate(self.mgr)
+        o = self._order()
+        o.customer = cust
+        o.save()
+        r = self.client.post(reverse("order-redeem-loyalty", args=[o.id]),
+                             {"reward_id": reward.id}, format="json")
+        self.assertEqual(r.status_code, 400)
 
 
 class KotBillFlowTests(TestCase):

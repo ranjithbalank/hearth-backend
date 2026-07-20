@@ -140,6 +140,7 @@ class OrderSerializer(serializers.ModelSerializer):
     customer_name = serializers.CharField(source="customer.name", read_only=True, default=None)
     customer_mobile = serializers.CharField(source="customer.mobile", read_only=True, default=None)
     customer_points = serializers.IntegerField(source="customer.loyalty_points", read_only=True, default=None)
+    loyalty_reward_name = serializers.CharField(source="loyalty_reward.name", read_only=True, default=None)
 
     class Meta:
         model = Order
@@ -148,8 +149,8 @@ class OrderSerializer(serializers.ModelSerializer):
             "customer", "customer_name", "customer_mobile", "customer_points", "covers", "captain",
             "status", "status_label", "folio", "kot_no", "bill_no", "lines", "totals", "created_at",
             "discount_kind", "discount_value", "discount_reason", "coupon_code",
-            "loyalty_redeemed", "source_platform", "external_ref", "online_status", "prepaid",
-            "brand", "token_no", "client_uuid", "location",
+            "loyalty_redeemed", "loyalty_reward_name", "source_platform", "external_ref",
+            "online_status", "prepaid", "brand", "token_no", "client_uuid", "location",
         ]
         read_only_fields = ["location"]  # set server-side from the till's active branch
 

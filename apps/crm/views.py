@@ -6,9 +6,31 @@ from rest_framework.response import Response
 
 from apps.accounts.models import log_action
 from apps.accounts.permissions import AnyModuleViewSetMixin
+from apps.masters.views import MasterViewSet
 
-from .models import Customer
-from .serializers import CustomerSerializer
+from .models import Customer, LoyaltyLedger, LoyaltyReward, LoyaltyTier
+from .serializers import (
+    CustomerSerializer, LoyaltyLedgerSerializer, LoyaltyRewardSerializer, LoyaltyTierSerializer,
+)
+
+
+class LoyaltyTierViewSet(MasterViewSet):
+    queryset = LoyaltyTier.objects.all()
+    serializer_class = LoyaltyTierSerializer
+
+    def in_use_count(self, obj):
+        # Tiers are computed on read (Customer.current_tier), never stored —
+        # nothing references a tier row by id, so it's always safe to remove.
+        return 0
+
+
+class LoyaltyRewardViewSet(MasterViewSet):
+    queryset = LoyaltyReward.objects.all()
+    serializer_class = LoyaltyRewardSerializer
+
+    def in_use_count(self, obj):
+        from apps.pos.models import Order
+        return Order.objects.filter(loyalty_reward=obj).count()
 
 
 class CustomerViewSet(AnyModuleViewSetMixin, viewsets.ModelViewSet):
@@ -137,6 +159,8 @@ class CustomerViewSet(AnyModuleViewSetMixin, viewsets.ModelViewSet):
                 "fnb_spend": str(fnb_spend),
                 "last_visit": last_visit,
             },
+            "loyalty_ledger": LoyaltyLedgerSerializer(
+                cust.loyalty_ledger.all()[:30], many=True).data,
             "reservations": [{
                 "id": r.id, "checkin_date": r.checkin_date, "checkout_date": r.checkout_date,
                 "nights": r.nights, "room": r.room.number if r.room_id else None,
@@ -175,6 +199,7 @@ class CustomerViewSet(AnyModuleViewSetMixin, viewsets.ModelViewSet):
             "orders": orders,
             "reservations": reservations,
             "city_ledger": city_ledger,
+            "loyalty_ledger": LoyaltyLedgerSerializer(cust.loyalty_ledger.all(), many=True).data,
         })
 
     @action(detail=True, methods=["post"])
@@ -196,6 +221,8 @@ class CustomerViewSet(AnyModuleViewSetMixin, viewsets.ModelViewSet):
         cust.address = ""
         cust.locality = ""
         cust.gstin = ""
+        cust.date_of_birth = None
+        cust.anniversary_date = None
         cust.marketing_consent = False
         cust.tags = []
         cust.save()

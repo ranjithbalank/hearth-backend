@@ -1543,19 +1543,36 @@ class OrderViewSet(AnyModuleViewSetMixin, viewsets.ModelViewSet):
 
     @action(detail=True, methods=["post"])
     def redeem_loyalty(self, request, pk=None):
-        """Redeem a customer's loyalty points against the bill (1 pt = ₹1, FR-PRO-004)."""
+        """Redeem a customer's loyalty points against the bill — either a
+        Rewards Catalogue item (`reward_id`) or a raw point amount at
+        1 pt = ₹1 (`points`, FR-PRO-004). The point balance itself is only
+        deducted at settle, in `_finalize_promotions`."""
         order = self.get_object()
         err = _closed_error(order) or _billed_error(order)
         if err:
             return err
         if not order.customer:
             return Response({"detail": "attach a customer first"}, status=400)
+        reward_id = request.data.get("reward_id")
+        if reward_id:
+            from apps.crm.models import LoyaltyReward
+            reward = LoyaltyReward.objects.filter(pk=reward_id, active=True).first()
+            if not reward:
+                return Response({"detail": "unknown or inactive reward"}, status=400)
+            if order.customer.loyalty_points < reward.points_cost:
+                return Response({"detail": "not enough points for this reward"}, status=400)
+            sub = order._subtotal()
+            order.loyalty_redeemed = int(min(reward.reduction(sub), sub))
+            order.loyalty_reward = reward
+            order.save(update_fields=["loyalty_redeemed", "loyalty_reward"])
+            return Response(OrderSerializer(order).data)
         points = int(request.data.get("points", 0))
         cap = min(points, order.customer.loyalty_points, int(order._subtotal()))
         if cap <= 0:
             return Response({"detail": "no redeemable points"}, status=400)
         order.loyalty_redeemed = cap
-        order.save(update_fields=["loyalty_redeemed"])
+        order.loyalty_reward = None
+        order.save(update_fields=["loyalty_redeemed", "loyalty_reward"])
         return Response(OrderSerializer(order).data)
 
     @action(detail=True, methods=["post"])
@@ -1667,15 +1684,39 @@ class OrderViewSet(AnyModuleViewSetMixin, viewsets.ModelViewSet):
         return Response(OrderSerializer(order).data)
 
     def _finalize_promotions(self, order, total):
-        """Commit coupon usage + loyalty redemption/accrual on close (FR-PRO-002/004)."""
+        """Commit coupon usage + loyalty redemption/accrual on close (FR-PRO-004).
+
+        Earn rate is 1 pt / ₹100 spent, boosted by the customer's current
+        tier multiplier (Base = 1.0x if no tiers are configured). A reward-
+        catalogue redemption deducts its own points_cost from the balance —
+        which can differ from the rupee discount already baked into `total`
+        via order.loyalty_redeemed — a raw-points redemption deducts exactly
+        what was redeemed. Every earn/redeem is written to LoyaltyLedger."""
         if order.coupon:
             Coupon.objects.filter(pk=order.coupon_id).update(used_count=models.F("used_count") + 1)
         cust = order.customer
         if cust:
+            from apps.crm.models import LoyaltyLedger, LoyaltyReward
             if order.loyalty_redeemed:
-                cust.loyalty_points = max(0, cust.loyalty_points - order.loyalty_redeemed)
-            cust.loyalty_points += int(total // Decimal("100"))  # 1 pt per ₹100 spent
-            cust.save(update_fields=["loyalty_points"])
+                spend = order.loyalty_reward.points_cost if order.loyalty_reward_id else order.loyalty_redeemed
+                cust.loyalty_points = max(0, cust.loyalty_points - spend)
+                LoyaltyLedger.objects.create(
+                    customer=cust, kind=LoyaltyLedger.REDEEM, points=-spend,
+                    balance_after=cust.loyalty_points,
+                    note=order.loyalty_reward.name if order.loyalty_reward_id else f"Order {order.id}")
+                if order.loyalty_reward_id:
+                    LoyaltyReward.objects.filter(pk=order.loyalty_reward_id).update(
+                        redeemed_count=models.F("redeemed_count") + 1)
+            tier = cust.current_tier()
+            multiplier = tier.earn_multiplier if tier else Decimal("1.00")
+            earned = int((total // Decimal("100")) * multiplier)
+            if earned:
+                cust.loyalty_points += earned
+                cust.lifetime_points += earned
+                LoyaltyLedger.objects.create(
+                    customer=cust, kind=LoyaltyLedger.EARN, points=earned,
+                    balance_after=cust.loyalty_points, note=f"Order {order.id}")
+            cust.save(update_fields=["loyalty_points", "lifetime_points"])
 
     @action(detail=True, methods=["post"])
     def settle(self, request, pk=None):

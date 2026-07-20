@@ -332,7 +332,14 @@ class Order(models.Model):
     coupon = models.ForeignKey(
         "pos.Coupon", on_delete=models.SET_NULL, null=True, blank=True, related_name="orders"
     )
-    loyalty_redeemed = models.PositiveIntegerField(default=0, help_text="points redeemed")
+    loyalty_redeemed = models.PositiveIntegerField(default=0, help_text="rupee-equivalent discount applied")
+    # Which rewards-catalogue item this redemption used, if any — its
+    # points_cost is what actually gets deducted from the balance at settle
+    # (loyalty_redeemed above is the rupee discount, which can differ from
+    # the reward's point cost). Null when the raw-points path was used.
+    loyalty_reward = models.ForeignKey(
+        "crm.LoyaltyReward", on_delete=models.SET_NULL, null=True, blank=True, related_name="+"
+    )
     # Offline resilience (BRD FR-POS-010 / NFR-002): client-generated id for dedupe.
     client_uuid = models.CharField(max_length=64, blank=True, default="", db_index=True)
     offline_origin = models.BooleanField(default=False)
