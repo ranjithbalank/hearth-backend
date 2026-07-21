@@ -951,4 +951,3 @@ class InvitePublicView(APIView):
         log_action(user, "invite_completed", entity="User", entity_id=user.id,
                    after={"role": inv.role, "employee": inv.employee_id})
         return Response({"username": username}, status=201)
-        return Response(_leave_dict(r))

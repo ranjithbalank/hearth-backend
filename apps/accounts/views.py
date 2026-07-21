@@ -1,3 +1,4 @@
+from django.utils import timezone
 from rest_framework import status, viewsets
 from rest_framework.decorators import action
 from rest_framework.permissions import AllowAny, IsAuthenticated
@@ -6,7 +7,7 @@ from rest_framework.views import APIView
 from rest_framework_simplejwt.views import TokenObtainPairView
 
 from .constants import ALL_MODULES, ROLE_ALLOW, edition_entitlements
-from .models import Branch, Entitlement, Property, User, UserBranchAccess, log_action
+from .models import Branch, Entitlement, PasswordReset, Property, User, UserBranchAccess, log_action
 from .permissions import ModulePermission, ModuleViewSetMixin
 from .serializers import (
     BranchSerializer,
@@ -110,9 +111,17 @@ class SetupView(APIView):
 
 
 class EntitlementView(APIView):
-    """Reconfigure entitlements from Settings (MD/GM only enforced client+server)."""
+    """Reconfigure entitlements from Settings. Was IsAuthenticated only —
+    the docstring claimed server-side enforcement but the permission class
+    never actually checked role/module, so any logged-in user (Housekeeping,
+    a cashier, a captain) could flip HMS/restaurant/banquets/RMS for the
+    whole property (go-live QA finding CX-RBAC-02: PATCH /auth/entitlements/).
+    Now gated the same way as /auth/property/: settings-capable roles only."""
 
-    permission_classes = [IsAuthenticated]
+    module = "settings"
+
+    def get_permissions(self):
+        return [IsAuthenticated(), ModulePermission()]
 
     def patch(self, request):
         prop = get_property()
@@ -138,6 +147,67 @@ class EntitlementView(APIView):
         log_action(request.user, "entitlement_update", entity="Entitlement",
                    entity_id=ent.id, before=before, after=ent.as_dict())
         return Response(PropertySerializer(get_property()).data)
+
+
+class PasswordResetRequestView(APIView):
+    """Self-service "forgot password?" — step 1. Never reveals whether the
+    username exists (username enumeration): always the same generic 200,
+    whether or not a matching account (with an email on file) was found.
+    Token-credentialed like Invite/Feedback/QR-order, no login, throttled."""
+
+    permission_classes = [AllowAny]
+    throttle_scope = "sensitive"
+
+    GENERIC_MESSAGE = "If that account exists, we've sent a reset link to its email."
+
+    def post(self, request):
+        from apps.integrations.services import notify
+
+        username = (request.data.get("username") or "").strip()
+        user = User.objects.filter(username=username).first() if username else None
+        if user and user.email:
+            reset = PasswordReset.issue(user)
+            link = f"/reset-password?t={reset.token}"
+            notify("email", user.email,
+                   f"Reset your Hearth password: {link} (expires in 30 minutes)")
+            log_action(user, "password_reset_requested", entity="User", entity_id=user.id)
+        return Response({"detail": self.GENERIC_MESSAGE})
+
+
+class PasswordResetConfirmView(APIView):
+    """Self-service "forgot password?" — step 2. GET previews link validity
+    (no PII in the response — not even the username); POST sets the new
+    password and consumes the token."""
+
+    permission_classes = [AllowAny]
+    throttle_scope = "sensitive"
+
+    def get(self, request):
+        reset = PasswordReset.objects.filter(token=request.query_params.get("t", "")).first()
+        if not reset or not reset.is_valid():
+            return Response({"detail": "This reset link is invalid or has expired"}, status=404)
+        return Response({"valid": True})
+
+    def post(self, request):
+        reset = PasswordReset.objects.select_related("user").filter(
+            token=request.data.get("t", "")).first()
+        if not reset or not reset.is_valid():
+            return Response({"detail": "This reset link is invalid or has expired"}, status=404)
+        password = request.data.get("password") or ""
+        from django.contrib.auth.password_validation import validate_password
+        from django.core.exceptions import ValidationError as DjangoValidationError
+        try:
+            validate_password(password, user=reset.user)
+        except DjangoValidationError as e:
+            return Response({"detail": " ".join(e.messages)}, status=400)
+
+        user = reset.user
+        user.set_password(password)
+        user.save(update_fields=["password"])
+        reset.used_at = timezone.now()
+        reset.save(update_fields=["used_at"])
+        log_action(user, "password_reset_completed", entity="User", entity_id=user.id)
+        return Response({"detail": "Password updated"})
 
 
 class UserViewSet(ModuleViewSetMixin, viewsets.ModelViewSet):

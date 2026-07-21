@@ -1,5 +1,7 @@
 from django.test import TestCase
+from rest_framework.test import APIClient
 
+from .models import PasswordReset, User
 from .constants import (
     ROLE_CASHIER,
     ROLE_FRONT_OFFICE,
@@ -68,3 +70,52 @@ class EntitlementTests(TestCase):
     def test_shared_module_needs_no_entitlement(self):
         ent = edition_entitlements("restaurant")
         self.assertTrue(entitlement_allows(ent, "reports"))
+
+
+class PasswordResetTests(TestCase):
+    def setUp(self):
+        self.client = APIClient()
+        self.user = User.objects.create_user(
+            username="qa_reset_user", password="Original123!", email="qa_reset_user@hearth.example",
+            role=ROLE_FRONT_OFFICE,
+        )
+
+    def test_request_does_not_reveal_whether_username_exists(self):
+        r1 = self.client.post("/api/auth/password-reset/request/", {"username": "qa_reset_user"}, format="json")
+        r2 = self.client.post("/api/auth/password-reset/request/", {"username": "no-such-user"}, format="json")
+        self.assertEqual(r1.status_code, 200)
+        self.assertEqual(r2.status_code, 200)
+        self.assertEqual(r1.data, r2.data)
+        self.assertEqual(PasswordReset.objects.filter(user=self.user).count(), 1)
+        self.assertEqual(PasswordReset.objects.count(), 1)  # nothing created for the fake username
+
+    def test_token_is_single_use(self):
+        self.client.post("/api/auth/password-reset/request/", {"username": "qa_reset_user"}, format="json")
+        reset = PasswordReset.objects.get(user=self.user)
+        r = self.client.post("/api/auth/password-reset/confirm/",
+                              {"t": reset.token, "password": "BrandNewPass456!"}, format="json")
+        self.assertEqual(r.status_code, 200)
+        self.user.refresh_from_db()
+        self.assertTrue(self.user.check_password("BrandNewPass456!"))
+
+        r2 = self.client.get(f"/api/auth/password-reset/confirm/?t={reset.token}")
+        self.assertEqual(r2.status_code, 404)
+        r3 = self.client.post("/api/auth/password-reset/confirm/",
+                               {"t": reset.token, "password": "AnotherPass789!"}, format="json")
+        self.assertEqual(r3.status_code, 404)
+
+    def test_expired_token_rejected(self):
+        from datetime import timedelta
+
+        from django.utils import timezone
+        reset = PasswordReset.objects.create(
+            user=self.user, token="expiredtoken1234", expires_at=timezone.now() - timedelta(minutes=1),
+        )
+        r = self.client.get(f"/api/auth/password-reset/confirm/?t={reset.token}")
+        self.assertEqual(r.status_code, 404)
+
+    def test_weak_password_rejected(self):
+        self.client.post("/api/auth/password-reset/request/", {"username": "qa_reset_user"}, format="json")
+        reset = PasswordReset.objects.get(user=self.user)
+        r = self.client.post("/api/auth/password-reset/confirm/", {"t": reset.token, "password": "123"}, format="json")
+        self.assertEqual(r.status_code, 400)

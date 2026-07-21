@@ -1,5 +1,8 @@
+from datetime import timedelta
+
 from django.contrib.auth.models import AbstractUser
 from django.db import models
+from django.utils import timezone
 
 from .constants import ROLE_CHOICES, ROLE_FRONT_OFFICE
 
@@ -253,6 +256,32 @@ class AuditLog(models.Model):
 
     def delete(self, *args, **kwargs):
         raise PermissionError("Audit log entries cannot be deleted.")
+
+
+class PasswordReset(models.Model):
+    """One-time self-service reset link, mirroring apps.hr.models.Invite.
+    Short-lived (30 min, vs. Invite's 7 days) since this recovers a live
+    account rather than onboarding a new one."""
+
+    user = models.ForeignKey("accounts.User", on_delete=models.CASCADE, related_name="password_resets")
+    token = models.CharField(max_length=64, unique=True, db_index=True)
+    expires_at = models.DateTimeField()
+    used_at = models.DateTimeField(null=True, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    @classmethod
+    def issue(cls, user, ttl_minutes=30):
+        import uuid
+        # Only one live link per user at a time — same "regenerating retires
+        # the old one" rule as Invite.
+        cls.objects.filter(user=user, used_at__isnull=True).delete()
+        return cls.objects.create(
+            user=user, token=uuid.uuid4().hex,
+            expires_at=timezone.now() + timedelta(minutes=ttl_minutes),
+        )
+
+    def is_valid(self):
+        return self.used_at is None and timezone.now() < self.expires_at
 
 
 def log_action(user, action, entity="", entity_id="", before=None, after=None, note=""):

@@ -61,20 +61,20 @@ n_pass = sum(1 for r in RESULTS if r["status"] == "PASS")
 
 rows = [
     ("Final result", f"{n_pass} / {n_total} PASS"),
-    ("New product bugs found", "0 — no regressions since the 15 Jul run"),
-    ("Run history (this session)",
-     "Run 1: 68 pass -> Run 2: 87 -> Run 3: 88 -> Final: 100 "
-     "(all gaps were QA-harness drift against schema/endpoint changes made since 15 Jul "
-     "- onboarding tour, invite-link onboarding, kitchen stations, loyalty tiers, etc. "
-     "- not application bugs; see Method)"),
-    ("Regression safety", "Backend test suite (66 tests, apps.hr + apps.accounts) green; full re-run of all 100 cases green"),
+    ("New product bugs found", "0 — no regressions since the 15 Jul run (this is a second, later re-run "
+     "in the same full-app verification pass; the 1000-case suite run alongside it did find and fix one "
+     "real bug — see below)"),
+    ("Regression safety", "Full backend test suite (335 tests, every app) green; full re-run of all 100 "
+     "cases green; the deeper 1000-case suite also green (1421/1421) after its one fix"),
     ("Method",
      "Role-based API drives of real flows (front office, cashier, captain, chef, store, managers) against "
-     "the live dev server — each case asserts expected vs actual. Every failure across 3 iterations was "
-     "triaged and turned out to be the QA script itself using a stale endpoint/field/status-code assumption "
-     "(e.g. room-type id vs code, bar_table vs table, un-fired KOT before settle) or accumulated test-data "
-     "exhaustion from repeated runs — not a real defect. See docs/QA_1000_Complex_Cases.xlsx for the deeper "
-     "1000-case pass and its 1 real fixed bug (CX-BUG-01)."),
+     "the live dev server — each case asserts expected vs actual. Every failure across earlier iterations "
+     "was triaged and turned out to be the QA script itself using a stale endpoint/field/status-code "
+     "assumption (e.g. room-type id vs code, bar_table vs table, un-fired KOT before settle) or accumulated "
+     "test-data exhaustion from repeated runs — not a real defect. See docs/QA_1000_Complex_Cases.xlsx for "
+     "the deeper 1000-case pass — 2 real bugs found and fixed across both suites' history: CX-BUG-01 "
+     "(PATCH /auth/property/ open to any logged-in user) and CX-RBAC-02 (PATCH /auth/entitlements/ open to "
+     "any logged-in user, found in today's 1000-case re-run)."),
     ("Environment note", "Dev database; QA objects created with QA-prefixed + timestamped names to avoid colliding across repeated runs"),
 ]
 r = 5
