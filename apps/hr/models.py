@@ -1,5 +1,8 @@
+from datetime import timedelta
+
 from django.conf import settings
 from django.db import models
+from django.utils import timezone
 
 
 class Employee(models.Model):
@@ -49,6 +52,39 @@ class Employee(models.Model):
 
     def __str__(self):
         return f"{self.name} — {self.role}"
+
+
+class Invite(models.Model):
+    """One-time self-onboarding link for an Employee roster row that doesn't
+    have a login yet. HR picks the RBAC role and generates the link (copy
+    only — no live email/SMS provider is wired up); the new hire opens it and
+    sets their own username + password, which creates their User and links
+    it back to this Employee. The alternative path — HR/Admin typing in the
+    whole account, password included — still exists in Settings > Users."""
+
+    employee = models.ForeignKey(Employee, on_delete=models.CASCADE, related_name="invites")
+    role = models.CharField(max_length=40)
+    token = models.CharField(max_length=64, unique=True, db_index=True)
+    expires_at = models.DateTimeField()
+    used_at = models.DateTimeField(null=True, blank=True)
+    created_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL, null=True, on_delete=models.SET_NULL, related_name="+",
+    )
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    @classmethod
+    def issue(cls, employee, role, created_by, ttl_days=7):
+        import uuid
+        # Only one live link per employee at a time — regenerating retires
+        # whatever was sent before, so nobody's ever unsure which link counts.
+        cls.objects.filter(employee=employee, used_at__isnull=True).delete()
+        return cls.objects.create(
+            employee=employee, role=role, created_by=created_by,
+            token=uuid.uuid4().hex, expires_at=timezone.now() + timedelta(days=ttl_days),
+        )
+
+    def is_valid(self):
+        return self.used_at is None and timezone.now() < self.expires_at
 
 
 class Attendance(models.Model):

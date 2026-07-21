@@ -6,20 +6,25 @@ from django.db import transaction
 from django.utils import timezone
 from rest_framework import viewsets
 from rest_framework.decorators import action
+from rest_framework.permissions import AllowAny
 from rest_framework.response import Response
+from rest_framework.views import APIView
 
-from apps.accounts.models import log_action
+from apps.accounts.constants import ROLE_CHOICES
+from apps.accounts.models import User, UserBranchAccess, log_action
 from apps.accounts.permissions import (
     AnyModuleViewSetMixin,
     ModuleViewSetMixin,
     resolve_active_branch,
     shared_or_visible,
 )
+from apps.accounts.rbac import PROTECTED
 
 from .models import (
     AdvanceRecovery,
     Attendance,
     Employee,
+    Invite,
     LeaveRequest,
     LeaveType,
     PayrollRun,
@@ -112,6 +117,31 @@ class HrViewSet(AnyModuleViewSetMixin, viewsets.ViewSet):
         log_action(request.user, "employee_status", entity="Employee", entity_id=e.id,
                    before={"status": before}, after={"status": status_})
         return Response(_employee_dict(e))
+
+    @action(detail=True, methods=["post"])
+    def invite(self, request, pk=None):
+        """Generate a self-onboarding link for this employee: {role}.
+        Copy-only — no live email/SMS provider is wired up, so HR shares the
+        link however they normally would (WhatsApp, in person, etc.)."""
+        e = Employee.objects.filter(pk=pk).first()
+        if not e:
+            return Response({"detail": "not found"}, status=404)
+        if e.user_id:
+            return Response({"detail": f"{e.name} already has a login ({e.user.username})"}, status=400)
+        role = (request.data.get("role") or "").strip()
+        valid_roles = {r for r, _ in ROLE_CHOICES}
+        if role not in valid_roles:
+            return Response({"detail": "Choose a valid role"}, status=400)
+        if role in PROTECTED:
+            return Response(
+                {"detail": "Super Admin / Managing Director / General Manager accounts "
+                            "can't be self-onboarded — set these up directly in Settings."},
+                status=400,
+            )
+        inv = Invite.issue(employee=e, role=role, created_by=request.user)
+        log_action(request.user, "invite_created", entity="Employee", entity_id=e.id,
+                   after={"role": role})
+        return Response({"token": inv.token, "expires_at": inv.expires_at}, status=201)
 
     @action(detail=False, methods=["get"])
     def attendance(self, request):
@@ -865,4 +895,60 @@ class LeaveViewSet(ModuleViewSetMixin, viewsets.ViewSet):
             r.decided_at = timezone.now()
             r.save(update_fields=["status", "decided_by", "decided_at"])
         log_action(request.user, "leave_cancelled", entity="LeaveRequest", entity_id=r.id)
+        return Response(_leave_dict(r))
+
+
+class InvitePublicView(APIView):
+    """Self-onboarding: the new hire opens HR's link, sees who/what role
+    they're being invited as, and sets their own username + password.
+    Token-credentialed like Feedback/QR-order, no login, throttled."""
+
+    permission_classes = [AllowAny]
+    throttle_scope = "sensitive"
+
+    def get(self, request):
+        inv = Invite.objects.select_related("employee").filter(
+            token=request.query_params.get("t", "")).first()
+        if not inv or not inv.is_valid():
+            return Response({"detail": "This invite link is invalid or has expired"}, status=404)
+        return Response({
+            "employee_name": inv.employee.name,
+            "role": inv.role,
+            "branch_name": inv.employee.branch.name if inv.employee.branch_id else None,
+        })
+
+    def post(self, request):
+        inv = Invite.objects.select_related("employee").filter(
+            token=request.data.get("t", "")).first()
+        if not inv or not inv.is_valid():
+            return Response({"detail": "This invite link is invalid or has expired"}, status=404)
+        username = (request.data.get("username") or "").strip()
+        password = request.data.get("password") or ""
+        if not username:
+            return Response({"detail": "Choose a username"}, status=400)
+        if User.objects.filter(username=username).exists():
+            return Response({"detail": "That username is already taken"}, status=400)
+        from django.contrib.auth.password_validation import validate_password
+        from django.core.exceptions import ValidationError as DjangoValidationError
+        try:
+            validate_password(password)
+        except DjangoValidationError as e:
+            return Response({"detail": " ".join(e.messages)}, status=400)
+
+        first_name, _, last_name = inv.employee.name.partition(" ")
+        with transaction.atomic():
+            user = User(username=username, first_name=first_name, last_name=last_name,
+                        role=inv.role, is_active=True)
+            user.set_password(password)
+            user.save()
+            if inv.employee.branch_id:
+                UserBranchAccess.objects.create(
+                    user=user, branch=inv.employee.branch, role=inv.role)
+            inv.employee.user = user
+            inv.employee.save(update_fields=["user"])
+            inv.used_at = timezone.now()
+            inv.save(update_fields=["used_at"])
+        log_action(user, "invite_completed", entity="User", entity_id=user.id,
+                   after={"role": inv.role, "employee": inv.employee_id})
+        return Response({"username": username}, status=201)
         return Response(_leave_dict(r))
