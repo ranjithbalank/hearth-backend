@@ -178,6 +178,20 @@ class DiscountLoyaltyTests(TestCase):
                                  unit_price=Decimal("400"), kot_fired=fired)
         return o
 
+    def test_bill_pdf_renders_with_optional_rate_column(self):
+        """Settings > Bill Template: the optional Rate column doesn't break
+        the POS bill PDF, on top of the default (no extra columns) case."""
+        from apps.accounts.views import get_property
+        self.client.force_authenticate(self.mgr)
+        o = self._order()
+        r = self.client.get(reverse("order-bill-pdf", args=[o.id]))
+        self.assertEqual(r.status_code, 200)
+        prop = get_property()
+        prop.pos_bill_columns = ["rate"]
+        prop.save()
+        r = self.client.get(reverse("order-bill-pdf", args=[o.id]))
+        self.assertEqual(r.status_code, 200)
+
     def test_discount_within_cap_ok(self):
         self.client.force_authenticate(self.cashier)
         o = self._order()

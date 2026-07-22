@@ -27,17 +27,32 @@ class Property(models.Model):
     address = models.CharField(max_length=300, blank=True)
     phone = models.CharField(max_length=30, blank=True)
     logo = models.TextField(blank=True, help_text="hotel logo as a data URL (white-label)")
-    # Company letterhead blocks printed on invoices/bills. Simple markup
-    # (<b>, <i>) is allowed — edited in Settings > Letterhead.
+    # Letterhead blocks printed on the guest invoice. Simple markup (<b>, <i>)
+    # is allowed — edited in Settings > Bill Template — Hotel. Kept separate
+    # from the POS bill's own header/footer below (pos_doc_header/footer) so
+    # each document type has its own template, the way its line-item columns
+    # do (invoice_columns vs pos_bill_columns).
     doc_header = models.TextField(blank=True, default="",
                                   help_text="extra letterhead lines (tagline, CIN, FSSAI…)")
     doc_footer = models.TextField(blank=True, default="",
                                   help_text="terms & conditions / bank details footer")
-    # Text alignment for the header/footer letterhead blocks on printed
-    # documents — left / center / right (Settings > Letterhead).
     ALIGN_CHOICES = [("left", "Left"), ("center", "Center"), ("right", "Right")]
     doc_header_align = models.CharField(max_length=6, choices=ALIGN_CHOICES, default="left")
     doc_footer_align = models.CharField(max_length=6, choices=ALIGN_CHOICES, default="center")
+    # Same idea, for the POS/restaurant bill (Settings > Bill Template — POS).
+    pos_doc_header = models.TextField(blank=True, default="",
+                                      help_text="extra header lines on the POS bill (e.g. FSSAI Lic. no.)")
+    pos_doc_footer = models.TextField(blank=True, default="",
+                                      help_text="POS bill footer (e.g. return policy, thank-you line)")
+    pos_doc_header_align = models.CharField(max_length=6, choices=ALIGN_CHOICES, default="center")
+    pos_doc_footer_align = models.CharField(max_length=6, choices=ALIGN_CHOICES, default="center")
+    # Optional extra columns on printed bills, beyond the fixed/statutory
+    # ones (Settings > Bill Template). Additive only — the GST tax invoice's
+    # Description/Taxable/CGST/SGST/Amount columns are statutory (FR-TAX-003)
+    # and stay fixed; these just add columns the underlying data already has.
+    # invoice_columns ⊆ ["type", "gst_rate"], pos_bill_columns ⊆ ["rate"].
+    invoice_columns = models.JSONField(default=list, blank=True)
+    pos_bill_columns = models.JSONField(default=list, blank=True)
     # Configurable prefixes for each document type's sequential number
     # (PREFIX-YYYYMM-NNNNN — see apps/accounts/numbering.py).
     invoice_prefix = models.CharField(max_length=12, default="HRT")

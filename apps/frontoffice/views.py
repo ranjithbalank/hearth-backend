@@ -144,7 +144,8 @@ class FolioViewSet(ModuleViewSetMixin, viewsets.ModelViewSet):
                                 logo=prop.logo, doc_header=prop.doc_header,
                                 doc_footer=prop.doc_footer,
                                 doc_header_align=prop.doc_header_align,
-                                doc_footer_align=prop.doc_footer_align)
+                                doc_footer_align=prop.doc_footer_align,
+                                columns=prop.invoice_columns)
         resp = HttpResponse(pdf.read(), content_type="application/pdf")
         name = folio.invoice_no or f"folio-{folio.id}"
         resp["Content-Disposition"] = f'attachment; filename="{name}.pdf"'

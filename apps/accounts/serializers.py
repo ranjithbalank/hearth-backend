@@ -119,6 +119,8 @@ class PropertySerializer(serializers.ModelSerializer):
             "id", "name", "edition", "setup_done", "business_date",
             "gstin", "address", "phone", "logo", "doc_header", "doc_footer",
             "doc_header_align", "doc_footer_align",
+            "pos_doc_header", "pos_doc_footer", "pos_doc_header_align", "pos_doc_footer_align",
+            "invoice_columns", "pos_bill_columns",
             "currency", "entitlement", "gst_billing_mode",
             "zomato_commission_pct", "swiggy_commission_pct",
             "invoice_prefix", "bill_prefix", "po_prefix", "grn_prefix", "beo_prefix",

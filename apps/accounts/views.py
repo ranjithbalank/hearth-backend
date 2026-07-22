@@ -72,6 +72,8 @@ class PropertyView(APIView):
         prop = get_property()
         for f in ["name", "gstin", "address", "phone", "logo", "currency",
                   "doc_header", "doc_footer", "doc_header_align", "doc_footer_align",
+                  "pos_doc_header", "pos_doc_footer", "pos_doc_header_align", "pos_doc_footer_align",
+                  "invoice_columns", "pos_bill_columns",
                   "zomato_commission_pct", "swiggy_commission_pct",
                   "invoice_prefix", "bill_prefix", "po_prefix", "grn_prefix", "beo_prefix"]:
             if f in request.data:

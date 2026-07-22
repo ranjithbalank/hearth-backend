@@ -457,3 +457,26 @@ class BillingModeTests(TestCase):
                          {"mode": "without_gst"}, format="json")
         r = self.client.get(reverse("folio-invoice-pdf", args=[self.folio.id]))
         self.assertEqual(r.status_code, 200)  # bill of supply
+
+    def test_invoice_pdf_renders_with_optional_columns(self):
+        """Settings > Bill Template: extra Type/GST% columns don't break rendering,
+        in either GST mode, alone or together."""
+        from decimal import Decimal
+
+        from django.urls import reverse
+
+        from apps.accounts.views import get_property
+        from . import services
+        services.post_charge(self.folio, kind=FolioLine.KIND_FNB,
+                             description="Dinner", amount=Decimal("500"), gst_rate=Decimal("5"))
+        prop = get_property()
+        for cols in (["type"], ["gst_rate"], ["type", "gst_rate"]):
+            prop.invoice_columns = cols
+            prop.save()
+            r = self.client.get(reverse("folio-invoice-pdf", args=[self.folio.id]))
+            self.assertEqual(r.status_code, 200)
+        # Bill of supply only honors "type" (gst_rate is GST-mode only).
+        self.client.post(reverse("folio-billing-mode", args=[self.folio.id]),
+                         {"mode": "without_gst"}, format="json")
+        r = self.client.get(reverse("folio-invoice-pdf", args=[self.folio.id]))
+        self.assertEqual(r.status_code, 200)

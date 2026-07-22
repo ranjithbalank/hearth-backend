@@ -48,9 +48,13 @@ _ALIGN = {"left": 0, "center": 1, "right": 2}
 
 def build_invoice_pdf(folio, property_name, gstin, address="", with_gst=True,
                       logo="", doc_header="", doc_footer="",
-                      doc_header_align="left", doc_footer_align="center"):
+                      doc_header_align="left", doc_footer_align="center",
+                      columns=()):
     """with_gst=True → GST tax invoice; False → bill of supply (no tax columns).
-    logo/doc_header/doc_footer/alignment come from Settings → Letterhead."""
+    logo/doc_header/doc_footer/alignment come from Settings → Letterhead.
+    columns: optional extra line-item columns from Settings → Bill Template
+    (⊆ "type", "gst_rate") — additive only; the statutory GST columns below
+    are never hidden (BRD FR-TAX-003)."""
     buf = io.BytesIO()
     doc = SimpleDocTemplate(buf, pagesize=A4, topMargin=18 * mm, bottomMargin=18 * mm,
                             leftMargin=16 * mm, rightMargin=16 * mm, title=f"Invoice {folio.invoice_no or folio.id}")
@@ -91,20 +95,55 @@ def build_invoice_pdf(folio, property_name, gstin, address="", with_gst=True,
     else:
         story += [Paragraph(f"<b>Bill to:</b> {folio.guest_name}{room}", normal), Spacer(1, 8)]
 
-    # Line items — the bill of supply carries no tax columns.
+    # Line items — the bill of supply carries no tax columns. "type"/"gst_rate"
+    # are optional extra columns (Settings → Bill Template); the statutory
+    # columns (Description/Taxable/CGST/SGST/Amount) are always present.
+    show_type = "type" in columns
+    show_rate = with_gst and "gst_rate" in columns
     cgst = sgst = Decimal("0")
     if with_gst:
-        rows = [["Description", "Taxable", "CGST", "SGST", "Amount"]]
+        head = ["Description"]
+        if show_type:
+            head.append("Type")
+        if show_rate:
+            head.append("GST %")
+        head += ["Taxable", "CGST", "SGST", "Amount"]
+        rows = [head]
         for l in folio.lines.all():
-            rows.append([l.description, _money(l.taxable), _money(l.cgst), _money(l.sgst), _money(l.total)])
+            row = [l.description]
+            if show_type:
+                row.append(l.get_kind_display())
+            if show_rate:
+                row.append(f"{l.gst_rate}%")
+            row += [_money(l.taxable), _money(l.cgst), _money(l.sgst), _money(l.total)]
+            rows.append(row)
             cgst += l.cgst
             sgst += l.sgst
-        col_widths = [74 * mm, 26 * mm, 24 * mm, 24 * mm, 30 * mm]
+        # Widths in header order: Description, [Type], [GST %], Taxable, CGST, SGST, Amount.
+        desc_width = 74 * mm
+        if show_type:
+            desc_width -= 16 * mm
+        if show_rate:
+            desc_width -= 16 * mm
+        col_widths = [desc_width]
+        if show_type:
+            col_widths.append(16 * mm)
+        if show_rate:
+            col_widths.append(16 * mm)
+        col_widths += [26 * mm, 24 * mm, 24 * mm, 30 * mm]
     else:
-        rows = [["Description", "Amount"]]
+        head = ["Description"]
+        if show_type:
+            head.append("Type")
+        head.append("Amount")
+        rows = [head]
         for l in folio.lines.all():
-            rows.append([l.description, _money(l.total)])
-        col_widths = [138 * mm, 40 * mm]
+            row = [l.description]
+            if show_type:
+                row.append(l.get_kind_display())
+            row.append(_money(l.total))
+            rows.append(row)
+        col_widths = [98 * mm, 40 * mm, 40 * mm] if show_type else [138 * mm, 40 * mm]
     tbl = Table(rows, colWidths=col_widths)
     tbl.setStyle(TableStyle([
         ("BACKGROUND", (0, 0), (-1, 0), CREAM),

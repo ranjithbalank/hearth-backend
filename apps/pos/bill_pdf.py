@@ -24,7 +24,15 @@ def _m(v):
     return "INR " + f"{Decimal(str(v)):,.2f}"
 
 
-def build_bill_pdf(order, property_name, doc_footer="", doc_footer_align="center"):
+_ALIGN = {"left": 0, "center": 1, "right": 2}
+
+
+def build_bill_pdf(order, property_name, doc_header="", doc_header_align="center",
+                   doc_footer="", doc_footer_align="center", columns=()):
+    """doc_header/doc_footer/alignment come from Settings → Bill Template — POS
+    (its own template, separate from the guest invoice's).
+    columns: optional extra line-item columns (⊆ "rate") — additive only,
+    next to the existing Item/Qty/Amt columns."""
     buf = io.BytesIO()
     # A slim receipt page.
     doc = SimpleDocTemplate(buf, pagesize=(80 * mm, 200 * mm), topMargin=8 * mm,
@@ -40,12 +48,26 @@ def build_bill_pdf(order, property_name, doc_footer="", doc_footer_align="center
         Paragraph(property_name, brand),
         Paragraph(where, small),
         Paragraph(f"{order.bill_no or order.kot_no or ('#' + str(order.id))}", small),
-        Spacer(1, 4), HRFlowable(width="100%", thickness=1, color=PINE), Spacer(1, 4),
     ]
-    rows = [["Item", "Qty", "Amt"]]
+    header_lines = [ln.strip() for ln in (doc_header or "").splitlines() if ln.strip()]
+    if header_lines:
+        h_style = ParagraphStyle("bh", parent=small, alignment=_ALIGN.get(doc_header_align, 1))
+        story.append(Paragraph("<br/>".join(header_lines), h_style))
+    story += [Spacer(1, 4), HRFlowable(width="100%", thickness=1, color=PINE), Spacer(1, 4)]
+    show_rate = "rate" in columns
+    head = ["Item", "Qty"]
+    if show_rate:
+        head.append("Rate")
+    head.append("Amt")
+    rows = [head]
     for l in order.lines.all():
-        rows.append([l.display_name, str(l.qty), _m(l.unit_price * l.qty)])
-    tbl = Table(rows, colWidths=[38 * mm, 12 * mm, 18 * mm])
+        row = [l.display_name, str(l.qty)]
+        if show_rate:
+            row.append(_m(l.unit_price))
+        row.append(_m(l.unit_price * l.qty))
+        rows.append(row)
+    col_widths = [30 * mm, 10 * mm, 14 * mm, 14 * mm] if show_rate else [38 * mm, 12 * mm, 18 * mm]
+    tbl = Table(rows, colWidths=col_widths)
     tbl.setStyle(TableStyle([
         ("BACKGROUND", (0, 0), (-1, 0), CREAM), ("TEXTCOLOR", (0, 0), (-1, 0), MUTED),
         ("FONTSIZE", (0, 0), (-1, -1), 7.5), ("ALIGN", (1, 0), (-1, -1), "RIGHT"),
@@ -75,10 +97,9 @@ def build_bill_pdf(order, property_name, doc_footer="", doc_footer_align="center
         base = getattr(settings, "FRONTEND_BASE_URL", "http://localhost:5173")
         story.append(Paragraph(f"Rate your experience: {base}/feedback?t={fb.token}", small))
         story.append(Spacer(1, 4))
-    # Letterhead footer (Settings → Letterhead), e.g. FSSAI no. / thank-you line.
+    # POS bill footer (Settings → Bill Template — POS), e.g. FSSAI no. / thank-you line.
     if doc_footer:
-        _align = {"left": 0, "center": 1, "right": 2}.get(doc_footer_align, 1)
-        foot_style = ParagraphStyle("bf", parent=small, alignment=_align)
+        foot_style = ParagraphStyle("bf", parent=small, alignment=_ALIGN.get(doc_footer_align, 1))
         for ln in doc_footer.splitlines()[:3]:
             if ln.strip():
                 story.append(Paragraph(ln.strip(), foot_style))
