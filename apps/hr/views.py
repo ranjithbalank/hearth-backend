@@ -37,9 +37,11 @@ from .payroll import compute_payslip
 def _validate_employee_row(data):
     """Shared by HrViewSet.create (one row typed in) and import_employees
     (one row from a spreadsheet): validates a raw {name, department, role,
-    phone?, wage_type?, monthly_salary?, daily_rate?, branch?} dict and
-    returns (kwargs for Employee.objects.create, None) on success, or
-    (None, "error message") on failure — never raises."""
+    phone?, country_code?, wage_type?, monthly_salary?, daily_rate?,
+    weekly_rate?, branch?} dict and returns (kwargs for Employee.objects.create,
+    None) on success, or (None, "error message") on failure — never raises."""
+    import re
+
     from apps.accounts.validators import validate_digits, validate_person_name
     from apps.masters.models import Department, Designation
     from rest_framework.serializers import ValidationError as DRFValidationError
@@ -54,6 +56,9 @@ def _validate_employee_row(data):
         validate_digits(data.get("phone", ""), field="Phone", max_len=15)
     except DRFValidationError as e:
         return None, e.detail[0] if isinstance(e.detail, list) else str(e.detail)
+    country_code = (data.get("country_code") or "+91").strip()
+    if not re.fullmatch(r"\+\d{1,4}", country_code):
+        return None, "country code must look like +91"
     # Department and designation must be active rows in the masters
     # (Settings > Masters) — same pattern as Ingredient.unit vs UoM.
     if not Department.objects.filter(name=department, active=True).exists():
@@ -61,18 +66,19 @@ def _validate_employee_row(data):
     if not Designation.objects.filter(name=role, active=True).exists():
         return None, f"'{role}' is not an active designation"
     wage_type = data.get("wage_type") or Employee.MONTHLY
-    if wage_type not in (Employee.MONTHLY, Employee.DAILY):
-        return None, "wage_type must be monthly or daily"
+    if wage_type not in (Employee.MONTHLY, Employee.DAILY, Employee.WEEKLY):
+        return None, "wage_type must be monthly, daily or weekly"
     try:
         monthly_salary = Decimal(str(data.get("monthly_salary") or 0))
         daily_rate = Decimal(str(data.get("daily_rate") or 0))
+        weekly_rate = Decimal(str(data.get("weekly_rate") or 0))
     except InvalidOperation:
-        return None, "monthly_salary/daily_rate must be numbers"
+        return None, "monthly_salary/daily_rate/weekly_rate must be numbers"
     return {
         "name": name, "department": department, "role": role,
-        "phone": data.get("phone", ""), "wage_type": wage_type,
-        "monthly_salary": monthly_salary, "daily_rate": daily_rate,
-        "statutory": bool(data.get("statutory", wage_type == Employee.MONTHLY)),
+        "phone": data.get("phone", ""), "country_code": country_code, "wage_type": wage_type,
+        "monthly_salary": monthly_salary, "daily_rate": daily_rate, "weekly_rate": weekly_rate,
+        "statutory": bool(data.get("statutory", wage_type != Employee.DAILY)),
         "has_allowances": bool(data.get("has_allowances", True)),
     }, None
 
@@ -80,9 +86,9 @@ def _validate_employee_row(data):
 def _employee_dict(e):
     return {
         "id": e.id, "name": e.name, "department": e.department, "role": e.role,
-        "phone": e.phone, "shifts": e.shifts, "status": e.status,
+        "country_code": e.country_code, "phone": e.phone, "shifts": e.shifts, "status": e.status,
         "wage_type": e.wage_type, "monthly_salary": str(e.monthly_salary),
-        "daily_rate": str(e.daily_rate), "statutory": e.statutory,
+        "daily_rate": str(e.daily_rate), "weekly_rate": str(e.weekly_rate), "statutory": e.statutory,
         "has_allowances": e.has_allowances,
         "branch": e.branch_id, "branch_name": e.branch.name if e.branch_id else None,
         "user": e.user_id,
@@ -94,6 +100,17 @@ class HrViewSet(AnyModuleViewSetMixin, viewsets.ViewSet):
     # Employees master screen, which Admin reaches via "employees" without
     # holding the full "hr" module.
     modules = ["hr", "employees"]
+
+    def get_permissions(self):
+        # payslip_pdf/my_payslips are reachable by an ordinary employee
+        # viewing their OWN payslip — they hold neither "hr" nor "employees",
+        # so the blanket module gate would block them. Drop to plain
+        # authentication here; the actual visibility check (payroll manager,
+        # or the record is your own) lives inside each method.
+        if self.action in ("payslip_pdf", "my_payslips"):
+            from rest_framework.permissions import IsAuthenticated
+            return [IsAuthenticated()]
+        return super().get_permissions()
 
     def list(self, request):
         # Payroll/attendance covers everyone on the roster whether or not
@@ -130,14 +147,14 @@ class HrViewSet(AnyModuleViewSetMixin, viewsets.ViewSet):
         from apps.accounts.models import Branch
         from apps.masters.models import Department, Designation
 
-        columns = ["name", "department", "role", "phone", "wage_type",
-                   "monthly_salary", "daily_rate", "branch"]
+        columns = ["name", "department", "role", "country_code", "phone", "wage_type",
+                   "monthly_salary", "daily_rate", "weekly_rate", "branch"]
         if request.method == "GET":
             dept = Department.objects.filter(active=True).values_list("name", flat=True).first() or "Kitchen"
             desig = Designation.objects.filter(active=True).values_list("name", flat=True).first() or "Cook"
             return template_response("employees-template.csv", columns, [
-                ["Anita Sharma", dept, desig, "9000000001", "monthly", "18000", "", ""],
-                ["Ravi Kumar", dept, desig, "9000000002", "daily", "", "700", ""],
+                ["Anita Sharma", dept, desig, "+91", "9000000001", "monthly", "18000", "", "", ""],
+                ["Ravi Kumar", dept, desig, "+91", "9000000002", "daily", "", "700", "", ""],
             ])
 
         try:
@@ -219,24 +236,30 @@ class HrViewSet(AnyModuleViewSetMixin, viewsets.ViewSet):
 
     @action(detail=False, methods=["get"])
     def attendance(self, request):
-        """Attendance marks for a date (default today) — the muster roll."""
+        """Attendance marks for a date (default today) — the muster roll.
+        Same branch scoping as list() (security review 2026-07, finding B7)."""
         from django.utils import timezone
         day = request.query_params.get("date") or str(timezone.localdate())
-        marks = {str(a.employee_id): a.status for a in Attendance.objects.filter(date=day)}
+        visible_ids = set(shared_or_visible(
+            Employee.objects.all(), request, field="branch").values_list("id", flat=True))
+        marks = {str(a.employee_id): a.status for a in Attendance.objects.filter(date=day)
+                 if a.employee_id in visible_ids}
         return Response({"date": day, "marks": marks})
 
     @action(detail=False, methods=["post"])
     def mark_attendance(self, request):
-        """Bulk mark: {date, marks: {employee_id: present|half|leave|absent}}."""
+        """Bulk mark: {date, marks: {employee_id: present|half|leave|absent}}.
+        Same branch scoping as list() (security review 2026-07, finding B7)."""
         from django.utils import timezone
         day = request.data.get("date") or str(timezone.localdate())
         marks = request.data.get("marks", {})
         valid = {Attendance.PRESENT, Attendance.HALF, Attendance.LEAVE, Attendance.ABSENT}
+        visible = shared_or_visible(Employee.objects.all(), request, field="branch")
         saved = 0
         for emp_id, status_ in marks.items():
             if status_ not in valid:
                 continue
-            if not Employee.objects.filter(pk=emp_id).exists():
+            if not visible.filter(pk=emp_id).exists():
                 continue
             Attendance.objects.update_or_create(
                 employee_id=emp_id, date=day,
@@ -260,7 +283,13 @@ class HrViewSet(AnyModuleViewSetMixin, viewsets.ViewSet):
                 if field in ("name", "department", "role") and not value:
                     return Response({"detail": f"{field} cannot be empty"}, status=400)
                 setattr(e, field, value)
-        for money_field in ("monthly_salary", "daily_rate"):
+        if "country_code" in request.data:
+            import re
+            cc = (request.data.get("country_code") or "+91").strip()
+            if not re.fullmatch(r"\+\d{1,4}", cc):
+                return Response({"detail": "country code must look like +91"}, status=400)
+            e.country_code = cc
+        for money_field in ("monthly_salary", "daily_rate", "weekly_rate"):
             if money_field in request.data:
                 try:
                     amount = Decimal(str(request.data.get(money_field) or 0))
@@ -270,8 +299,8 @@ class HrViewSet(AnyModuleViewSetMixin, viewsets.ViewSet):
                     return Response({"detail": f"{money_field} cannot be negative"}, status=400)
                 setattr(e, money_field, amount)
         if "wage_type" in request.data:
-            if request.data["wage_type"] not in (Employee.MONTHLY, Employee.DAILY):
-                return Response({"detail": "wage_type must be monthly or daily"}, status=400)
+            if request.data["wage_type"] not in (Employee.MONTHLY, Employee.DAILY, Employee.WEEKLY):
+                return Response({"detail": "wage_type must be monthly, daily or weekly"}, status=400)
             e.wage_type = request.data["wage_type"]
         if "statutory" in request.data:
             e.statutory = bool(request.data["statutory"])
@@ -295,6 +324,16 @@ class HrViewSet(AnyModuleViewSetMixin, viewsets.ViewSet):
     partial_update = update
 
     # --- Payroll (FR-HRM): attendance-driven, snapshotted per month ---
+
+    @staticmethod
+    def _contracted_rate(e):
+        """The one contracted figure that matches this employee's pay
+        cadence — monthly gross, per-day rate, or per-week rate."""
+        if e.wage_type == Employee.DAILY:
+            return e.daily_rate
+        if e.wage_type == Employee.WEEKLY:
+            return e.weekly_rate
+        return e.monthly_salary
 
     @staticmethod
     def _month_bounds(month):
@@ -359,16 +398,27 @@ class HrViewSet(AnyModuleViewSetMixin, viewsets.ViewSet):
         """The month's payroll sheet. Once a run exists its snapshot is
         served verbatim (that IS the payroll); before that, a live preview
         from attendance: gross split into basic/HRA/allowances, prorated by
-        payable days, PF/ESI/PT deducted — see payroll.compute_payslip."""
+        payable days, PF/ESI/PT deducted — see payroll.compute_payslip.
+
+        Branch-scoped for viewing (security review 2026-07, finding B7) —
+        a branch-scoped HR/Finance/CEO login only sees that branch's rows.
+        This is display-only: the underlying PayrollRun/Payslip rows are
+        never branch-specific (see run_payroll, which deliberately stays
+        unscoped — a payroll month is one company-wide run, not one per
+        branch, so creating it can't be limited to whoever happened to
+        click "Run Payroll")."""
         from django.utils import timezone
         month = request.query_params.get("month") or timezone.localdate().strftime("%Y-%m")
         first, last, days_in_month = self._month_bounds(month)
         run = PayrollRun.objects.filter(month=month).first()
+        visible_ids = set(shared_or_visible(
+            Employee.objects.all(), request, field="branch").values_list("id", flat=True))
         if run:
-            rows = [self._slip_dict(s) for s in run.slips.select_related("employee")]
+            rows = [self._slip_dict(s) for s in run.slips.select_related("employee")
+                    if s.employee_id in visible_ids]
         else:
             rows = []
-            for e in Employee.objects.filter(status="Active"):
+            for e in Employee.objects.filter(status="Active", id__in=visible_ids):
                 payable_days, days_marked = self._payable_days(e, first, last)
                 money = compute_payslip(e, payable_days, days_in_month)
                 recovery = sum(p for _, p in self._plan_recovery(e, money["net"]))
@@ -377,8 +427,7 @@ class HrViewSet(AnyModuleViewSetMixin, viewsets.ViewSet):
                     "payslip": None, "id": e.id, "name": e.name,
                     "department": e.department, "role": e.role,
                     "wage_type": e.wage_type, "statutory": e.statutory,
-                    "monthly_salary": str(e.daily_rate if e.wage_type == Employee.DAILY
-                                          else e.monthly_salary),
+                    "monthly_salary": str(self._contracted_rate(e)),
                     "days_marked": days_marked, "payable_days": str(payable_days),
                     **{k: str(v) for k, v in money.items() if k != "net"},
                     "adjustment": "0", "adjustment_note": "",
@@ -392,9 +441,12 @@ class HrViewSet(AnyModuleViewSetMixin, viewsets.ViewSet):
 
     @action(detail=False, methods=["get"])
     def payslip_pdf(self, request):
-        """Printable payslip: ?payslip=<id> → application/pdf."""
+        """Printable payslip: ?payslip=<id> → application/pdf. A payroll
+        manager (or CEO, read-only) may fetch anyone's; an ordinary employee
+        may only fetch their own — see PAYSLIP_VIEWER_ROLES."""
         from django.http import HttpResponse
 
+        from apps.accounts.constants import PAYSLIP_VIEWER_ROLES
         from apps.accounts.models import Property
 
         from .payslip_pdf import build_payslip_pdf
@@ -402,6 +454,14 @@ class HrViewSet(AnyModuleViewSetMixin, viewsets.ViewSet):
             pk=request.query_params.get("payslip")).first()
         if not s:
             return Response({"detail": "not found"}, status=404)
+        role = getattr(request.user, "role", "")
+        is_own = s.employee.user_id is not None and s.employee.user_id == request.user.id
+        if role not in PAYSLIP_VIEWER_ROLES and not is_own:
+            return Response({"detail": "you can only view your own payslip"}, status=403)
+        if not is_own:
+            visible = shared_or_visible(Employee.objects.all(), request, field="branch")
+            if not visible.filter(pk=s.employee_id).exists():
+                return Response({"detail": "not found"}, status=404)
         prop = Property.objects.first()
         pdf = build_payslip_pdf(s, prop.name if prop else "Hearth")
         resp = HttpResponse(pdf.read(), content_type="application/pdf")
@@ -410,18 +470,36 @@ class HrViewSet(AnyModuleViewSetMixin, viewsets.ViewSet):
         return resp
 
     @action(detail=False, methods=["get"])
+    def my_payslips(self, request):
+        """An employee's own payslip history — no hr/employees module
+        needed, mirrors LeaveViewSet's own-record pattern (_own_employee).
+        Only finalized/paid runs show — a draft's numbers can still change."""
+        emp = getattr(request.user, "employee_record", None)
+        if not emp:
+            return Response({"detail": "no staff record is linked to your login — ask HR to link one"})
+        slips = Payslip.objects.select_related("run").filter(
+            employee=emp, run__status__in=[PayrollRun.FINALIZED, PayrollRun.PAID],
+        ).order_by("-run__month")
+        return Response([{
+            "payslip": s.pk, "month": s.run.month, "status": s.run.status,
+            "gross_earned": str(s.gross_earned), "net": str(s.net),
+        } for s in slips])
+
+    @action(detail=False, methods=["get"])
     def overview(self, request):
         """Today at a glance for the HR landing: headcount, muster summary,
-        who's on approved leave, and the monthly wage bill estimate."""
+        who's on approved leave, and the monthly wage bill estimate.
+        Same branch scoping as list() (security review 2026-07, finding B7)."""
         from django.utils import timezone
         today = timezone.localdate()
-        active = Employee.objects.filter(status="Active")
+        active = shared_or_visible(Employee.objects.filter(status="Active"), request, field="branch")
         marks = {a.employee_id: a.status for a in Attendance.objects.filter(date=today)}
         counts = {"present": 0, "half": 0, "leave": 0, "absent": 0, "unmarked": 0}
         for e in active:
             counts[marks.get(e.id, "unmarked")] = counts.get(marks.get(e.id, "unmarked"), 0) + 1
         on_leave = LeaveRequest.objects.filter(
             status=LeaveRequest.APPROVED, start_date__lte=today, end_date__gte=today,
+            employee_id__in=active.values_list("id", flat=True),
         ).select_related("employee", "leave_type")
         salaried = active.filter(wage_type=Employee.MONTHLY)
         casuals = active.filter(wage_type=Employee.DAILY)
@@ -441,7 +519,15 @@ class HrViewSet(AnyModuleViewSetMixin, viewsets.ViewSet):
     def run_payroll(self, request):
         """Create the month's draft run: {month}. Snapshots every active
         employee's attendance into payslips — attendance edits after this
-        point don't move the numbers (delete the draft and rerun instead)."""
+        point don't move the numbers (delete the draft and rerun instead).
+
+        Deliberately NOT branch-scoped: PayrollRun.month is unique company-
+        wide (one run per month, not one per branch), so creating it can't
+        be limited to whoever happened to click "Run Payroll" — that would
+        silently omit other branches' employees from the month with no way
+        to add them once the run exists. payroll() (the read side) IS
+        branch-scoped for display; the underlying run always covers
+        everyone."""
         from apps.accounts.constants import PAYROLL_MANAGER_ROLES
         if getattr(request.user, "role", "") not in PAYROLL_MANAGER_ROLES:
             return Response({"detail": "only HR or Finance can run payroll"}, status=403)
@@ -463,8 +549,7 @@ class HrViewSet(AnyModuleViewSetMixin, viewsets.ViewSet):
                     run=run, employee=e, days_in_month=days_in_month,
                     payable_days=payable_days, wage_type=e.wage_type,
                     statutory=e.statutory,
-                    gross_salary=(e.daily_rate if e.wage_type == Employee.DAILY
-                                  else e.monthly_salary) or 0,
+                    gross_salary=self._contracted_rate(e) or 0,
                     **{**money, "net": money["net"] - recovery},
                     advance_recovery=recovery)
                 for adv, amount in lines:
@@ -476,7 +561,9 @@ class HrViewSet(AnyModuleViewSetMixin, viewsets.ViewSet):
     @action(detail=False, methods=["post"])
     def adjust_payslip(self, request):
         """Manual bonus (+) or recovery (−) on one draft slip:
-        {payslip, amount, note} — net is recomputed, the note explains why."""
+        {payslip, amount, note} — net is recomputed, the note explains why.
+        Not branch-scoped: acting on one already-identified payslip id is a
+        payroll-manager action, not a listing — same reasoning as run_payroll."""
         from apps.accounts.constants import PAYROLL_MANAGER_ROLES
         if getattr(request.user, "role", "") not in PAYROLL_MANAGER_ROLES:
             return Response({"detail": "only HR or Finance can adjust payroll"}, status=403)
@@ -504,7 +591,9 @@ class HrViewSet(AnyModuleViewSetMixin, viewsets.ViewSet):
     def advance_payroll(self, request):
         """Move the month forward: {month} — draft → finalized (numbers lock)
         → paid (payout recorded). A draft can instead be deleted with
-        {month, action: "discard"} to rerun after attendance corrections."""
+        {month, action: "discard"} to rerun after attendance corrections.
+        Not branch-scoped: a PayrollRun is one company-wide monthly object —
+        same reasoning as run_payroll."""
         from apps.accounts.constants import PAYROLL_MANAGER_ROLES
         if getattr(request.user, "role", "") not in PAYROLL_MANAGER_ROLES:
             return Response({"detail": "only HR or Finance can run payroll"}, status=403)

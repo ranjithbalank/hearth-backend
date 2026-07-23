@@ -1,6 +1,6 @@
 """Payroll maths (FR-HRM payroll): salary split + Indian statutory deductions.
 
-Two kinds of pay terms (Employee.wage_type):
+Three kinds of pay terms (Employee.wage_type):
 
 - monthly — `monthly_salary` is the contracted GROSS, prorated by payable
   days from attendance (present/paid-leave = 1, half = 0.5, absent/unmarked
@@ -10,6 +10,12 @@ Two kinds of pay terms (Employee.wage_type):
   which raises the PF base until the cap.
 - daily — casual labour: earned = `daily_rate` × payable days, no split
   (it's all basic).
+- weekly — `weekly_rate` × (payable days / 7): same allowance split and
+  statutory treatment as monthly (it's salaried pay on a different cadence,
+  not casual labour). There's no single "contracted monthly gross" for a
+  weekly rate, so the ESI eligibility ceiling uses an approximate
+  monthly-equivalent (weekly rate × 52 weeks ÷ 12 months) — same simplified,
+  single-slab spirit as the rest of this module.
 
 Statutory deductions apply only to staff on the rolls (Employee.statutory
 — daily-wage casuals are typically outside them):
@@ -48,6 +54,17 @@ def compute_payslip(employee, payable_days, days_in_month):
         gross_earned = (Decimal(employee.daily_rate or 0) * payable_days).quantize(TWO)
         basic, hra, other = gross_earned, Decimal("0.00"), Decimal("0.00")
         esi_eligible = gross_earned <= ESI_GROSS_CEILING
+    elif employee.wage_type == "weekly":
+        weekly_rate = Decimal(employee.weekly_rate or 0)
+        gross_earned = (weekly_rate * payable_days / Decimal("7")).quantize(TWO)
+        if getattr(employee, "has_allowances", True):
+            basic = (gross_earned * BASIC_PCT).quantize(TWO)
+            hra = (gross_earned * HRA_PCT).quantize(TWO)
+            other = gross_earned - basic - hra
+        else:
+            basic, hra, other = gross_earned, Decimal("0.00"), Decimal("0.00")
+        contracted_monthly_equivalent = weekly_rate * Decimal("52") / Decimal("12")
+        esi_eligible = contracted_monthly_equivalent <= ESI_GROSS_CEILING
     else:
         gross_salary = Decimal(employee.monthly_salary or 0)
         factor = payable_days / Decimal(days_in_month)

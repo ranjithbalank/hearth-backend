@@ -17,6 +17,11 @@ class Employee(models.Model):
     name = models.CharField(max_length=160)
     department = models.CharField(max_length=80)
     role = models.CharField(max_length=80)
+    # Stored apart from the digits-only `phone` (see validate_digits) so
+    # neither field's validation has to special-case the other. "+91"
+    # (India) default matches every other India-specific assumption already
+    # baked into this app's statutory payroll (see payroll.py).
+    country_code = models.CharField(max_length=5, default="+91")
     phone = models.CharField(max_length=20, blank=True)
     branch = models.ForeignKey(
         "accounts.Branch", null=True, blank=True, on_delete=models.SET_NULL,
@@ -30,13 +35,16 @@ class Employee(models.Model):
     shifts = models.JSONField(default=list, blank=True)
     status = models.CharField(max_length=20, default="Active")
     # Pay terms: salaried staff carry a monthly gross; casual labour
-    # (kitchen helpers, cleaners) a per-day rate paid by attendance.
+    # (kitchen helpers, cleaners) a per-day rate paid by attendance; some
+    # staff (e.g. contract/gig workers) are paid a flat weekly rate instead.
     MONTHLY = "monthly"
     DAILY = "daily"
-    WAGE_CHOICES = [(MONTHLY, "Monthly salary"), (DAILY, "Daily wage")]
+    WEEKLY = "weekly"
+    WAGE_CHOICES = [(MONTHLY, "Monthly salary"), (DAILY, "Daily wage"), (WEEKLY, "Weekly wage")]
     wage_type = models.CharField(max_length=10, choices=WAGE_CHOICES, default=MONTHLY)
     monthly_salary = models.DecimalField(max_digits=12, decimal_places=2, default=0)
     daily_rate = models.DecimalField(max_digits=10, decimal_places=2, default=0)
+    weekly_rate = models.DecimalField(max_digits=10, decimal_places=2, default=0)
     # Salaried structure: True = the standard basic/HRA/allowances split,
     # False = the whole gross is basic (no allowance components). Note the
     # PF effect: basic is the PF base, so an all-basic structure deducts
@@ -262,8 +270,8 @@ class Payslip(models.Model):
     payable_days = models.DecimalField(max_digits=4, decimal_places=1)
     wage_type = models.CharField(max_length=10, default=Employee.MONTHLY)
     statutory = models.BooleanField(default=True)
-    # Contracted terms at run time: the monthly gross, or the per-day rate
-    # for daily-wage staff (wage_type says which).
+    # Contracted terms at run time: the monthly gross, the per-day rate, or
+    # the weekly rate — wage_type says which.
     gross_salary = models.DecimalField(max_digits=12, decimal_places=2)
     basic = models.DecimalField(max_digits=12, decimal_places=2)          # earned ↓
     hra = models.DecimalField(max_digits=12, decimal_places=2)

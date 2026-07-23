@@ -354,6 +354,14 @@ LEAVE_TYPE_MANAGER_ROLES = {ROLE_SUPER_ADMIN, ROLE_MD, ROLE_GM, ROLE_ADMIN, ROLE
 # for oversight but stays read-only here.
 PAYROLL_MANAGER_ROLES = {ROLE_SUPER_ADMIN, ROLE_MD, ROLE_GM, ROLE_HR, ROLE_FINANCE}
 
+# Read-only payslip visibility — payroll managers plus CEO's existing
+# read-only oversight. Deliberately narrower than the "hr"/"employees" module
+# gate: Admin holds "employees" only for provisioning (invite/roster edits)
+# and must not see salary/PF/ESI detail (security review 2026-07 — payslip_pdf
+# had no gate beyond the blanket module check, letting Admin fetch any
+# employee's payslip by id).
+PAYSLIP_VIEWER_ROLES = PAYROLL_MANAGER_ROLES | {ROLE_CEO}
+
 
 def leave_approvers_for(department: str) -> set:
     """Who may approve a leave request from this department's staff."""
