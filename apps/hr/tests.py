@@ -207,3 +207,12 @@ class OverviewTests(TestCase):
                                 status="Active", wage_type="daily", daily_rate=Decimal("700"))
         r = self.client.get(reverse("hr-overview"))
         self.assertEqual(Decimal(r.data["monthly_wage_bill"]), Decimal("20000") + Decimal("700") * 26)
+
+    def test_overview_wage_bill_includes_weekly_staff(self):
+        # A weekly-rated employee must count in both the headcount breakdown
+        # and the wage bill total — previously silently dropped from both.
+        Employee.objects.create(name="Weekly", department="Kitchen", role="Cook",
+                                status="Active", wage_type="weekly", weekly_rate=Decimal("3000"))
+        r = self.client.get(reverse("hr-overview"))
+        self.assertEqual(r.data["weekly"], 1)
+        self.assertEqual(Decimal(r.data["monthly_wage_bill"]), Decimal("3000") * 52 / 12)

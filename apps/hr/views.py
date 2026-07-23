@@ -503,12 +503,17 @@ class HrViewSet(AnyModuleViewSetMixin, viewsets.ViewSet):
         ).select_related("employee", "leave_type")
         salaried = active.filter(wage_type=Employee.MONTHLY)
         casuals = active.filter(wage_type=Employee.DAILY)
-        # Casual cost estimated at 26 working days a month.
+        weeklies = active.filter(wage_type=Employee.WEEKLY)
+        # Casual cost estimated at 26 working days a month; weekly at 52/12
+        # weeks a month — same approximations used everywhere else this
+        # session (payroll.py's ESI ceiling check, the roster's ~₹/mo hint).
         wage_bill = (sum((e.monthly_salary or Decimal("0")) for e in salaried)
-                     + sum((e.daily_rate or Decimal("0")) * 26 for e in casuals))
+                     + sum((e.daily_rate or Decimal("0")) * 26 for e in casuals)
+                     + sum((e.weekly_rate or Decimal("0")) * 52 / 12 for e in weeklies))
         return Response({
             "date": str(today),
-            "headcount": active.count(), "salaried": salaried.count(), "casual": casuals.count(),
+            "headcount": active.count(), "salaried": salaried.count(),
+            "casual": casuals.count(), "weekly": weeklies.count(),
             "today": counts,
             "on_leave": [{"employee": r.employee.name, "type": r.leave_type.name,
                           "until": str(r.end_date)} for r in on_leave],
