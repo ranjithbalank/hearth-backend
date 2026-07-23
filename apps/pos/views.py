@@ -234,6 +234,60 @@ class BarTableViewSet(BranchScopedMixin, BranchUniqueFriendlyMixin, ModuleViewSe
     serializer_class = BarTableSerializer
     duplicate_message = "A bar table with this name already exists there."
 
+    @action(detail=False, methods=["get", "post"], url_path="import")
+    def import_bar_tables(self, request):
+        """Bulk bar-table onboarding — mirror of TableViewSet.import_tables,
+        minus 'floor' (BarTable has none). Gated to 'barpos': the bar has no
+        manager-only 'tablemaster'-style split module, and Bar Captain/Cashier
+        already have full single-row CRUD here, so bulk isn't more restrictive."""
+        from apps.accounts.constants import role_can_access
+        from apps.accounts.csv_import import parse_upload, template_response
+        from apps.accounts.models import Branch
+        if not role_can_access(getattr(request.user, "role", ""), "barpos"):
+            return Response({"detail": "bar table import needs Bar POS access"}, status=403)
+        columns = ["name", "section", "seats", "branch"]
+        if request.method == "GET":
+            return template_response("bar-tables-template.csv", columns, [
+                ["B1", "Bar", "4", ""],
+                ["B2", "Bar", "4", ""],
+                ["L1", "Lounge", "6", ""],
+            ])
+        try:
+            rows = parse_upload(request)
+        except ValueError as e:
+            return Response({"detail": str(e)}, status=400)
+
+        default_branch_id = resolve_active_branch(request)
+        created, skipped, errors = [], [], []
+        for lineno, row in rows:
+            name = row.get("name", "")
+            if not name:
+                continue
+            branch_id = default_branch_id
+            branch_name = row.get("branch")
+            if branch_name:
+                branch = Branch.objects.filter(name=branch_name).first()
+                if not branch:
+                    errors.append({"row": lineno, "name": name,
+                                   "reason": f"'{branch_name}' is not a known branch"})
+                    continue
+                branch_id = branch.id
+            if BarTable.objects.filter(name__iexact=name, location_id=branch_id).exists():
+                skipped.append(name)
+                continue
+            try:
+                BarTable.objects.create(
+                    name=name, section=row.get("section") or "Bar",
+                    seats=int(row.get("seats") or 4),
+                    location_id=branch_id,
+                )
+                created.append(name)
+            except (TypeError, ValueError) as e:
+                errors.append({"row": lineno, "name": name, "reason": str(e)[:120]})
+        log_action(request.user, "bar_table_import", entity="BarTable",
+                   after={"created": len(created), "errors": len(errors)})
+        return Response({"created": len(created), "skipped_existing": skipped, "errors": errors})
+
 
 class CounterOnlyMixin:
     """Cash controls (till, reconciliation) belong to counter roles — captains
@@ -752,14 +806,17 @@ class MenuItemViewSet(AnyModuleViewSetMixin, viewsets.ModelViewSet):
     @action(detail=False, methods=["get", "post"], url_path="import")
     def import_menu(self, request):
         """Bulk menu onboarding: GET the CSV template, POST it back filled.
-        Master-level only (menumaster) — the floor roles that share this
-        viewset can sell dishes, not mass-create them."""
+        Master-level only (menumaster or barpos) — the floor roles that
+        share this viewset can sell dishes, not mass-create them, except
+        Bar Captain/Cashier who already add bar items one at a time under
+        'barpos' and shouldn't be blocked from bulk-onboarding those same
+        items just because they lack the restaurant-side menumaster grant."""
         from decimal import Decimal, InvalidOperation
         from apps.accounts.constants import role_can_access
         from apps.accounts.csv_import import parse_upload, template_response
-        if not role_can_access(getattr(request.user, "role", ""), "menumaster"):
-            return Response({"detail": "menu import needs the Menu Master screen (manager/admin)"},
-                            status=403)
+        role = getattr(request.user, "role", "")
+        if not (role_can_access(role, "menumaster") or role_can_access(role, "barpos")):
+            return Response({"detail": "menu import needs the Menu Master or Bar POS screen"}, status=403)
         columns = ["name", "category", "price", "gst_rate", "diet", "station", "short_code"]
         if request.method == "GET":
             return template_response("menu-template.csv", columns, [
@@ -812,12 +869,13 @@ class MenuItemViewSet(AnyModuleViewSetMixin, viewsets.ModelViewSet):
     @action(detail=False, methods=["get"], url_path="export")
     def export_menu(self, request):
         """Mirror of import_menu's column set, for round-tripping the sheet
-        (edit in Excel, re-upload). Master-level only, same gate as import."""
+        (edit in Excel, re-upload). Same gate as import — a bar role that can
+        import must be able to export the same sheet back out."""
         from apps.accounts.constants import role_can_access
         from apps.accounts.csv_import import export_response
-        if not role_can_access(getattr(request.user, "role", ""), "menumaster"):
-            return Response({"detail": "menu export needs the Menu Master screen (manager/admin)"},
-                            status=403)
+        role = getattr(request.user, "role", "")
+        if not (role_can_access(role, "menumaster") or role_can_access(role, "barpos")):
+            return Response({"detail": "menu export needs the Menu Master or Bar POS screen"}, status=403)
         fmt = request.query_params.get("fmt", "xlsx")
         header = ["name", "category", "price", "gst_rate", "diet", "station", "short_code"]
         rows = [

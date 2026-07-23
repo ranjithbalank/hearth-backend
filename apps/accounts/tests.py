@@ -1,8 +1,9 @@
 from django.test import TestCase
 from rest_framework.test import APIClient
 
-from .models import PasswordReset, User
+from .models import Branch, PasswordReset, User
 from .constants import (
+    ROLE_ADMIN,
     ROLE_CASHIER,
     ROLE_FRONT_OFFICE,
     ROLE_HOTEL_MGR,
@@ -70,6 +71,50 @@ class EntitlementTests(TestCase):
     def test_shared_module_needs_no_entitlement(self):
         ent = edition_entitlements("restaurant")
         self.assertTrue(entitlement_allows(ent, "reports"))
+
+
+class BranchImportTests(TestCase):
+    """Bulk branch onboarding via CSV — template, per-row report, master-gated,
+    and edition-derived entitlement flags (mirrors the manual Add-branch form)."""
+
+    def _csv(self, body):
+        from io import BytesIO
+        f = BytesIO(body.encode())
+        f.name = "branches.csv"
+        return f
+
+    def test_branch_import_creates_branches_and_reports_rows(self):
+        admin = APIClient()
+        admin.force_authenticate(User.objects.create_user(
+            username="adminbrimp", password="Tk9$mZ2pQw!7", role=ROLE_ADMIN))
+        r = admin.get("/api/auth/branches/import/")
+        self.assertEqual(r.status_code, 200)
+        self.assertIn("name,code,city,state,gstin,edition,invoice_prefix", r.content.decode())
+
+        from .views import get_property
+        Branch.objects.create(property=get_property(), name="Existing", code="EXT")
+        body = ("name,code,city,state,gstin,edition,invoice_prefix\n"
+                "Existing Branch,EXT,Chennai,Tamil Nadu,,both,EXT-\n"     # duplicate code → skipped
+                "Downtown,DTN,Chennai,Tamil Nadu,,restaurant,DTN-\n"
+                "Bad Branch,,,,,both,\n")                                 # missing code → error
+        r = admin.post("/api/auth/branches/import/", {"file": self._csv(body)}, format="multipart")
+        self.assertEqual(r.status_code, 200, r.data)
+        self.assertEqual(r.data["created"], 1)
+        self.assertEqual(r.data["skipped_existing"], ["Existing Branch"])
+        self.assertEqual(len(r.data["errors"]), 1)
+
+        dtn = Branch.objects.get(code="DTN")
+        self.assertEqual(dtn.edition, "restaurant")
+        self.assertFalse(dtn.hms)
+        self.assertTrue(dtn.restaurant)
+        self.assertFalse(dtn.banquets)
+        self.assertFalse(dtn.rms)
+
+    def test_branch_import_is_master_gated(self):
+        fo = APIClient()
+        fo.force_authenticate(User.objects.create_user(
+            username="fobrimp", password="Tk9$mZ2pQw!7", role=ROLE_FRONT_OFFICE))
+        self.assertEqual(fo.get("/api/auth/branches/import/").status_code, 403)
 
 
 class PasswordResetTests(TestCase):

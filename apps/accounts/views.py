@@ -243,6 +243,64 @@ class BranchViewSet(ModuleViewSetMixin, viewsets.ModelViewSet):
                           "move or remove those before deleting the branch.",
             })
 
+    @action(detail=False, methods=["get", "post"], url_path="import")
+    def import_branches(self, request):
+        """Bulk branch onboarding: GET the CSV template, POST it filled.
+        `edition` drives the four entitlement flags exactly like the manual
+        Add-branch form does client-side — the model itself just defaults
+        every flag to True, so this replicates that derivation explicitly."""
+        from django.db import IntegrityError
+
+        from apps.accounts.constants import role_can_access
+        from apps.accounts.csv_import import parse_upload, template_response
+        if not role_can_access(getattr(request.user, "role", ""), "branchmaster"):
+            return Response({"detail": "branch import needs the Branch Master screen (admin)"},
+                            status=403)
+        columns = ["name", "code", "city", "state", "gstin", "edition", "invoice_prefix"]
+        if request.method == "GET":
+            return template_response("branches-template.csv", columns, [
+                ["Hearth Grand — Downtown", "DTN", "Chennai", "Tamil Nadu", "", "both", "DTN-"],
+                ["Hearth Bistro — Airport", "APT", "Chennai", "Tamil Nadu", "", "restaurant", "APT-"],
+            ])
+        try:
+            rows = parse_upload(request)
+        except ValueError as e:
+            return Response({"detail": str(e)}, status=400)
+
+        prop = get_property()
+        created, skipped, errors = [], [], []
+        for lineno, row in rows:
+            name = row.get("name", "")
+            code = row.get("code", "").upper()
+            if not name and not code:
+                continue
+            if not name or not code:
+                errors.append({"row": lineno, "name": name or code, "reason": "name and code are both required"})
+                continue
+            if Branch.objects.filter(code__iexact=code).exists():
+                skipped.append(name)
+                continue
+            edition = (row.get("edition") or "both").lower()
+            if edition not in ("hotel", "restaurant", "both"):
+                errors.append({"row": lineno, "name": name, "reason": "edition must be hotel / restaurant / both"})
+                continue
+            try:
+                Branch.objects.create(
+                    property=prop, name=name, code=code,
+                    city=row.get("city", ""), state=row.get("state", ""),
+                    gstin=row.get("gstin", "").upper()[:20],
+                    edition=edition,
+                    hms=edition != "restaurant", restaurant=edition != "hotel",
+                    banquets=edition != "restaurant", rms=edition != "restaurant",
+                    invoice_prefix=row.get("invoice_prefix", "").upper()[:10],
+                )
+                created.append(name)
+            except (TypeError, ValueError, IntegrityError) as e:
+                errors.append({"row": lineno, "name": name, "reason": str(e)[:120]})
+        log_action(request.user, "branch_import", entity="Branch",
+                   after={"created": len(created), "errors": len(errors)})
+        return Response({"created": len(created), "skipped_existing": skipped, "errors": errors})
+
 
 class UserBranchAccessViewSet(ModuleViewSetMixin, viewsets.ModelViewSet):
     """Staff assignment: which branch a person operates in, and as what role

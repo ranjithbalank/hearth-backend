@@ -203,3 +203,39 @@ class InventoryApiTests(TestCase):
         self.assertEqual(row["purchased"], Decimal("10"))
         self.assertEqual(row["consumed"], Decimal("4"))
         self.assertEqual(row["consumption_cost"], Decimal("240"))
+
+
+class MaterialImportTests(TestCase):
+    """Bulk raw-material onboarding via CSV — template, per-row report.
+    (No explicit master-gate here, unlike Employees/Tables/Branches: any
+    "inventory" role can already single-add a material via create(), so
+    bulk import isn't more restrictive — matches the existing docstring on
+    import_materials.)"""
+
+    def setUp(self):
+        self.client = APIClient()
+        self.client.force_authenticate(User.objects.create_user(
+            username="invimp", password="Tk9$mZ2pQw!7", role="General Manager"))
+
+    def _csv(self, body):
+        from io import BytesIO
+        f = BytesIO(body.encode())
+        f.name = "materials.csv"
+        return f
+
+    def test_material_import_creates_rows_and_reports_errors(self):
+        r = self.client.get("/api/inventory/import/")
+        self.assertEqual(r.status_code, 200)
+        self.assertIn("name,category,unit,opening_stock", r.content.decode())
+
+        Ingredient.objects.create(name="Milk", unit="l")
+        body = ("name,category,unit,opening_stock,min_stock_level,reorder_level,purchase_rate,storage_location,expiry_date\n"
+                "Milk,Dairy,l,10,5,10,60,Cold room,\n"      # duplicate name → skipped
+                "Basmati Rice,Other,kg,25,5,10,90,Dry store,\n"
+                ",,,,,,,,\n")                                 # blank line → ignored
+        r = self.client.post("/api/inventory/import/", {"file": self._csv(body)}, format="multipart")
+        self.assertEqual(r.status_code, 200, r.data)
+        self.assertEqual(r.data["created"], 1)
+        self.assertEqual(r.data["skipped_existing"], ["Milk"])
+        self.assertEqual(r.data["errors"], [])
+        self.assertTrue(Ingredient.objects.filter(name="Basmati Rice", unit="kg").exists())

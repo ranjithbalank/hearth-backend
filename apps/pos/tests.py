@@ -8,7 +8,7 @@ from apps.accounts.models import User
 from apps.crm.models import Customer
 
 from .models import (
-    AddOn, AddOnGroup, Category, ChannelPrice, Coupon, MenuItem, Order, OrderLine, Table, Variant,
+    AddOn, AddOnGroup, BarTable, Category, ChannelPrice, Coupon, MenuItem, Order, OrderLine, Table, Variant,
 )
 
 
@@ -55,6 +55,22 @@ class MenuImportTests(TestCase):
             username="capimp", password="Tk9$mZ2pQw!7", role="Captain"))
         self.assertEqual(captain.get("/api/pos/menu-items/import/").status_code, 403)
 
+    def test_bar_captain_can_import_bar_items(self):
+        # Bar Captain only ever carries "barpos", never "menumaster" — the
+        # gate must accept either, since this role already adds bar items
+        # one at a time through the same viewset.
+        barcap = APIClient()
+        barcap.force_authenticate(User.objects.create_user(
+            username="barcapmenuimp", password="Tk9$mZ2pQw!7", role="Bar Captain"))
+        body = ("name,category,price,gst_rate,diet,station,short_code\n"
+                "Mojito,Cocktails,250,5,veg,bar,MJ\n")
+        r = barcap.post("/api/pos/menu-items/import/", {"file": self._csv(body)}, format="multipart")
+        self.assertEqual(r.status_code, 200, r.data)
+        self.assertEqual(r.data["created"], 1)
+        mojito = MenuItem.objects.get(name="Mojito")
+        self.assertTrue(mojito.bar_menu)
+        self.assertEqual(barcap.get("/api/pos/menu-items/export/").status_code, 200)
+
 
 class TableImportTests(TestCase):
     """Bulk table onboarding via CSV — template, per-row report, master-gated."""
@@ -90,6 +106,44 @@ class TableImportTests(TestCase):
         captain.force_authenticate(User.objects.create_user(
             username="captblimp", password="Tk9$mZ2pQw!7", role="Captain"))
         self.assertEqual(captain.get("/api/pos/tables/import/").status_code, 403)
+
+
+class BarTableImportTests(TestCase):
+    """Bulk bar-table onboarding via CSV — gated to 'barpos', which Bar
+    Captain/Cashier already hold (they can already add bar tables one at a
+    time), so the positive test uses that role rather than a manager."""
+
+    def _csv(self, body):
+        from io import BytesIO
+        f = BytesIO(body.encode())
+        f.name = "bar-tables.csv"
+        return f
+
+    def test_bar_table_import_creates_tables_and_reports_rows(self):
+        captain = APIClient()
+        captain.force_authenticate(User.objects.create_user(
+            username="barcapimp", password="Tk9$mZ2pQw!7", role="Bar Captain"))
+        r = captain.get("/api/bar/tables/import/")
+        self.assertEqual(r.status_code, 200)
+        self.assertIn("name,section,seats,branch", r.content.decode())
+
+        BarTable.objects.create(name="B1", section="Bar", seats=4)
+        body = ("name,section,seats,branch\n"
+                "B1,Bar,4,\n"                 # duplicate (same name, no branch) → skipped
+                "B2,Bar,4,\n"
+                "L1,Lounge,notanumber,\n")    # bad seats → error
+        r = captain.post("/api/bar/tables/import/", {"file": self._csv(body)}, format="multipart")
+        self.assertEqual(r.status_code, 200, r.data)
+        self.assertEqual(r.data["created"], 1)
+        self.assertEqual(r.data["skipped_existing"], ["B1"])
+        self.assertEqual(len(r.data["errors"]), 1)
+        self.assertTrue(BarTable.objects.filter(name="B2", section="Bar", seats=4).exists())
+
+    def test_bar_table_import_is_master_gated(self):
+        fo = APIClient()
+        fo.force_authenticate(User.objects.create_user(
+            username="fobartblimp", password="Tk9$mZ2pQw!7", role="Front Office"))
+        self.assertEqual(fo.get("/api/bar/tables/import/").status_code, 403)
 
 
 class MenuExportTests(TestCase):
