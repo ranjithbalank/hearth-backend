@@ -8,7 +8,7 @@ from apps.accounts.models import User
 from apps.crm.models import Customer
 
 from .models import (
-    AddOn, AddOnGroup, Category, ChannelPrice, Coupon, MenuItem, Order, OrderLine, Variant,
+    AddOn, AddOnGroup, Category, ChannelPrice, Coupon, MenuItem, Order, OrderLine, Table, Variant,
 )
 
 
@@ -54,6 +54,42 @@ class MenuImportTests(TestCase):
         captain.force_authenticate(User.objects.create_user(
             username="capimp", password="Tk9$mZ2pQw!7", role="Captain"))
         self.assertEqual(captain.get("/api/pos/menu-items/import/").status_code, 403)
+
+
+class TableImportTests(TestCase):
+    """Bulk table onboarding via CSV — template, per-row report, master-gated."""
+
+    def _csv(self, body):
+        from io import BytesIO
+        f = BytesIO(body.encode())
+        f.name = "tables.csv"
+        return f
+
+    def test_table_import_creates_tables_and_reports_rows(self):
+        gm = APIClient()
+        gm.force_authenticate(User.objects.create_user(
+            username="gmtblimp", password="Tk9$mZ2pQw!7", role="General Manager"))
+        r = gm.get("/api/pos/tables/import/")
+        self.assertEqual(r.status_code, 200)
+        self.assertIn("name,floor,section,seats,branch", r.content.decode())
+
+        Table.objects.create(name="A1", floor="Ground", section="AC", seats=4)
+        body = ("name,floor,section,seats,branch\n"
+                "A1,Ground,AC,4,\n"          # duplicate (same name, no branch) → skipped
+                "A2,Ground,AC,4,\n"
+                "L1,Lawn,Outdoor,notanumber,\n")   # bad seats → error
+        r = gm.post("/api/pos/tables/import/", {"file": self._csv(body)}, format="multipart")
+        self.assertEqual(r.status_code, 200, r.data)
+        self.assertEqual(r.data["created"], 1)
+        self.assertEqual(r.data["skipped_existing"], ["A1"])
+        self.assertEqual(len(r.data["errors"]), 1)
+        self.assertTrue(Table.objects.filter(name="A2", section="AC", seats=4).exists())
+
+    def test_table_import_is_master_gated(self):
+        captain = APIClient()
+        captain.force_authenticate(User.objects.create_user(
+            username="captblimp", password="Tk9$mZ2pQw!7", role="Captain"))
+        self.assertEqual(captain.get("/api/pos/tables/import/").status_code, 403)
 
 
 class MenuExportTests(TestCase):

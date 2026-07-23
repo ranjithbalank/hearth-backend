@@ -165,6 +165,65 @@ class TableViewSet(BranchScopedMixin, BranchUniqueFriendlyMixin, ModuleViewSetMi
                    after={"assigned_captain": captain_id})
         return Response(TableSerializer(table).data)
 
+    @action(detail=False, methods=["get", "post"], url_path="import")
+    def import_tables(self, request):
+        """Bulk table onboarding: GET the CSV template, POST it filled.
+        Master-level only (tablemaster) — same gate as Room Master's import,
+        the shared floor-plan read lets the whole desk see tables, not mass-
+        create them. `branch` is optional: a single-branch login falls back
+        to its own branch; a multi-branch login must name one or the table
+        is created without a branch (won't show up on the floor, same as a
+        manual Add with no branch picked)."""
+        from apps.accounts.constants import role_can_access
+        from apps.accounts.csv_import import parse_upload, template_response
+        from apps.accounts.models import Branch
+        if not role_can_access(getattr(request.user, "role", ""), "tablemaster"):
+            return Response({"detail": "table import needs the Table Master screen (manager/admin)"},
+                            status=403)
+        columns = ["name", "floor", "section", "seats", "branch"]
+        if request.method == "GET":
+            return template_response("tables-template.csv", columns, [
+                ["A1", "Ground", "AC", "4", ""],
+                ["A2", "Ground", "AC", "4", ""],
+                ["L1", "Lawn", "Outdoor", "6", ""],
+            ])
+        try:
+            rows = parse_upload(request)
+        except ValueError as e:
+            return Response({"detail": str(e)}, status=400)
+
+        default_branch_id = resolve_active_branch(request)
+        created, skipped, errors = [], [], []
+        for lineno, row in rows:
+            name = row.get("name", "")
+            if not name:
+                continue
+            branch_id = default_branch_id
+            branch_name = row.get("branch")
+            if branch_name:
+                branch = Branch.objects.filter(name=branch_name).first()
+                if not branch:
+                    errors.append({"row": lineno, "name": name,
+                                   "reason": f"'{branch_name}' is not a known branch"})
+                    continue
+                branch_id = branch.id
+            if Table.objects.filter(name__iexact=name, location_id=branch_id).exists():
+                skipped.append(name)
+                continue
+            try:
+                Table.objects.create(
+                    name=name, floor=row.get("floor", ""),
+                    section=row.get("section") or "Main",
+                    seats=int(row.get("seats") or 4),
+                    location_id=branch_id,
+                )
+                created.append(name)
+            except (TypeError, ValueError) as e:
+                errors.append({"row": lineno, "name": name, "reason": str(e)[:120]})
+        log_action(request.user, "table_import", entity="Table",
+                   after={"created": len(created), "errors": len(errors)})
+        return Response({"created": len(created), "skipped_existing": skipped, "errors": errors})
+
 
 class BarTableViewSet(BranchScopedMixin, BranchUniqueFriendlyMixin, ModuleViewSetMixin, viewsets.ModelViewSet):
     """The bar's own floor plan — separate master from the restaurant's
