@@ -34,6 +34,49 @@ from .models import (
 from .payroll import compute_payslip
 
 
+def _validate_employee_row(data):
+    """Shared by HrViewSet.create (one row typed in) and import_employees
+    (one row from a spreadsheet): validates a raw {name, department, role,
+    phone?, wage_type?, monthly_salary?, daily_rate?, branch?} dict and
+    returns (kwargs for Employee.objects.create, None) on success, or
+    (None, "error message") on failure — never raises."""
+    from apps.accounts.validators import validate_digits, validate_person_name
+    from apps.masters.models import Department, Designation
+    from rest_framework.serializers import ValidationError as DRFValidationError
+
+    name = (data.get("name") or "").strip()
+    department = (data.get("department") or "").strip()
+    role = (data.get("role") or "").strip()
+    if not name or not department or not role:
+        return None, "name, department and role are required"
+    try:
+        validate_person_name(name)
+        validate_digits(data.get("phone", ""), field="Phone", max_len=15)
+    except DRFValidationError as e:
+        return None, e.detail[0] if isinstance(e.detail, list) else str(e.detail)
+    # Department and designation must be active rows in the masters
+    # (Settings > Masters) — same pattern as Ingredient.unit vs UoM.
+    if not Department.objects.filter(name=department, active=True).exists():
+        return None, f"'{department}' is not an active department"
+    if not Designation.objects.filter(name=role, active=True).exists():
+        return None, f"'{role}' is not an active designation"
+    wage_type = data.get("wage_type") or Employee.MONTHLY
+    if wage_type not in (Employee.MONTHLY, Employee.DAILY):
+        return None, "wage_type must be monthly or daily"
+    try:
+        monthly_salary = Decimal(str(data.get("monthly_salary") or 0))
+        daily_rate = Decimal(str(data.get("daily_rate") or 0))
+    except InvalidOperation:
+        return None, "monthly_salary/daily_rate must be numbers"
+    return {
+        "name": name, "department": department, "role": role,
+        "phone": data.get("phone", ""), "wage_type": wage_type,
+        "monthly_salary": monthly_salary, "daily_rate": daily_rate,
+        "statutory": bool(data.get("statutory", wage_type == Employee.MONTHLY)),
+        "has_allowances": bool(data.get("has_allowances", True)),
+    }, None
+
+
 def _employee_dict(e):
     return {
         "id": e.id, "name": e.name, "department": e.department, "role": e.role,
@@ -63,44 +106,75 @@ class HrViewSet(AnyModuleViewSetMixin, viewsets.ViewSet):
         """Add a staff record: {name, department, role, phone?, monthly_salary?, branch?}.
         `branch` defaults to the caller's own branch when they're only ever
         assigned to one — no picker needed for the common case."""
-        name = (request.data.get("name") or "").strip()
-        department = (request.data.get("department") or "").strip()
-        role = (request.data.get("role") or "").strip()
-        if not name or not department or not role:
-            return Response({"detail": "name, department and role are required"}, status=400)
-        from apps.accounts.validators import validate_digits, validate_person_name
-        from rest_framework.serializers import ValidationError as DRFValidationError
-        try:
-            validate_person_name(name)
-            validate_digits(request.data.get("phone", ""), field="Phone", max_len=15)
-        except DRFValidationError as e:
-            return Response({"detail": e.detail[0] if isinstance(e.detail, list) else str(e.detail)}, status=400)
-        # Department and designation must be active rows in the masters
-        # (Settings > Masters) — same pattern as Ingredient.unit vs UoM.
-        from apps.masters.models import Department, Designation
-        if not Department.objects.filter(name=department, active=True).exists():
-            return Response({"detail": f"'{department}' is not an active department"}, status=400)
-        if not Designation.objects.filter(name=role, active=True).exists():
-            return Response({"detail": f"'{role}' is not an active designation"}, status=400)
+        kwargs, error = _validate_employee_row(request.data)
+        if error:
+            return Response({"detail": error}, status=400)
         branch_id = request.data.get("branch") or resolve_active_branch(request)
-        wage_type = request.data.get("wage_type") or Employee.MONTHLY
-        if wage_type not in (Employee.MONTHLY, Employee.DAILY):
-            return Response({"detail": "wage_type must be monthly or daily"}, status=400)
-        e = Employee.objects.create(
-            name=name, department=department, role=role,
-            phone=request.data.get("phone", ""),
-            wage_type=wage_type,
-            monthly_salary=request.data.get("monthly_salary") or 0,
-            daily_rate=request.data.get("daily_rate") or 0,
-            # Casual daily-wage staff default to off-rolls (no PF/ESI/PT).
-            statutory=bool(request.data.get(
-                "statutory", wage_type == Employee.MONTHLY)),
-            has_allowances=bool(request.data.get("has_allowances", True)),
-            branch_id=branch_id,
-        )
+        e = Employee.objects.create(branch_id=branch_id, **kwargs)
         log_action(request.user, "employee_add", entity="Employee", entity_id=e.id,
-                   after={"name": name, "department": department, "branch": branch_id})
+                   after={"name": kwargs["name"], "department": kwargs["department"], "branch": branch_id})
         return Response(_employee_dict(e), status=201)
+
+    @action(detail=False, methods=["get", "post"], url_path="import")
+    def import_employees(self, request):
+        """Bulk onboarding: upload a CSV/XLSX of staff — same shared plumbing
+        as every other master (apps.accounts.csv_import), same skip-existing
+        + per-row-error shape the Import card on the frontend expects.
+
+        GET returns the fill-in template. POST with a `file` creates every
+        valid row, reusing the exact same checks as create() via
+        _validate_employee_row. Unlike ingredients, department/designation
+        are never auto-created here — they drive payroll/org structure, so
+        an unknown value is a row error, not something to silently invent."""
+        from apps.accounts.csv_import import parse_upload, template_response
+        from apps.accounts.models import Branch
+        from apps.masters.models import Department, Designation
+
+        columns = ["name", "department", "role", "phone", "wage_type",
+                   "monthly_salary", "daily_rate", "branch"]
+        if request.method == "GET":
+            dept = Department.objects.filter(active=True).values_list("name", flat=True).first() or "Kitchen"
+            desig = Designation.objects.filter(active=True).values_list("name", flat=True).first() or "Cook"
+            return template_response("employees-template.csv", columns, [
+                ["Anita Sharma", dept, desig, "9000000001", "monthly", "18000", "", ""],
+                ["Ravi Kumar", dept, desig, "9000000002", "daily", "", "700", ""],
+            ])
+
+        try:
+            rows = parse_upload(request)
+        except ValueError as e:
+            return Response({"detail": str(e)}, status=400)
+
+        created, skipped, errors = [], [], []
+        for lineno, row in rows:
+            name = row.get("name", "")
+            if not name and not row.get("department") and not row.get("role"):
+                continue  # blank line
+            if name and Employee.objects.filter(name__iexact=name).exists():
+                skipped.append(name)
+                continue
+            kwargs, error = _validate_employee_row(row)
+            if error:
+                errors.append({"row": lineno, "name": name, "reason": error})
+                continue
+            branch_id = None
+            branch_name = row.get("branch")
+            if branch_name:
+                branch = Branch.objects.filter(name=branch_name).first()
+                if not branch:
+                    errors.append({"row": lineno, "name": kwargs["name"],
+                                   "reason": f"'{branch_name}' is not a known branch"})
+                    continue
+                branch_id = branch.id
+            else:
+                branch_id = resolve_active_branch(request)
+            e = Employee.objects.create(branch_id=branch_id, **kwargs)
+            log_action(request.user, "employee_add", entity="Employee", entity_id=e.id,
+                       after={"name": kwargs["name"], "department": kwargs["department"], "branch": branch_id})
+            created.append(kwargs["name"])
+        log_action(request.user, "employee_import", entity="Employee",
+                   after={"created": len(created), "errors": len(errors)})
+        return Response({"created": len(created), "skipped_existing": skipped, "errors": errors})
 
     @action(detail=True, methods=["post"])
     def set_status(self, request, pk=None):

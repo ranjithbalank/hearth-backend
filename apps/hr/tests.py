@@ -42,3 +42,51 @@ class AttendancePayrollTests(TestCase):
         # earned basic = 900; no ESI above the 21k gross ceiling; no PT
         # under 21k earned) — see payroll.compute_payslip.
         self.assertEqual(row["payable"], "14100.00")
+
+
+class EmployeeImportTests(TestCase):
+    def setUp(self):
+        from apps.masters.models import Department, Designation
+        self.client = APIClient()
+        self.client.force_authenticate(User.objects.create_user(
+            username="hr2", password="Tk9$mZ2pQw!7", role="HR Manager"))
+        Department.objects.get_or_create(name="Kitchen", defaults={"active": True})
+        Designation.objects.get_or_create(name="Cook", defaults={"active": True})
+
+    def test_template_has_expected_columns(self):
+        r = self.client.get(reverse("hr-import-employees"))
+        self.assertEqual(r.status_code, 200)
+        header = r.content.decode().splitlines()[0]
+        self.assertEqual(
+            header, "name,department,role,phone,wage_type,monthly_salary,daily_rate,branch")
+
+    def test_import_creates_valid_rows_and_reports_errors(self):
+        from django.core.files.uploadedfile import SimpleUploadedFile
+        csv_body = (
+            "name,department,role,phone,wage_type,monthly_salary,daily_rate,branch\r\n"
+            "Anita Sharma,Kitchen,Cook,9000000001,monthly,18000,,\r\n"
+            "Bad Row,NoSuchDept,NoSuchRole,,,,,\r\n"
+            ",,,,,,,\r\n"
+        )
+        f = SimpleUploadedFile("employees.csv", csv_body.encode(), content_type="text/csv")
+        r = self.client.post(reverse("hr-import-employees"), {"file": f}, format="multipart")
+        self.assertEqual(r.status_code, 200)
+        self.assertEqual(r.data["created"], 1)
+        self.assertEqual(r.data["skipped_existing"], [])
+        self.assertEqual(len(r.data["errors"]), 1)
+        self.assertEqual(r.data["errors"][0]["reason"], "'NoSuchDept' is not an active department")
+        self.assertTrue(Employee.objects.filter(name="Anita Sharma").exists())
+
+    def test_import_skips_existing_names(self):
+        from django.core.files.uploadedfile import SimpleUploadedFile
+        Employee.objects.create(name="Anita Sharma", department="Kitchen", role="Cook")
+        csv_body = (
+            "name,department,role,phone,wage_type,monthly_salary,daily_rate,branch\r\n"
+            "Anita Sharma,Kitchen,Cook,9000000001,monthly,18000,,\r\n"
+        )
+        f = SimpleUploadedFile("employees.csv", csv_body.encode(), content_type="text/csv")
+        r = self.client.post(reverse("hr-import-employees"), {"file": f}, format="multipart")
+        self.assertEqual(r.status_code, 200)
+        self.assertEqual(r.data["created"], 0)
+        self.assertEqual(r.data["skipped_existing"], ["Anita Sharma"])
+        self.assertEqual(Employee.objects.filter(name="Anita Sharma").count(), 1)
