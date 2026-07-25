@@ -513,6 +513,53 @@ class AggregatorPayout(models.Model):
         return f"{self.platform} {self.date}: {self.amount}"
 
 
+class AggregatorConnection(models.Model):
+    """One Swiggy/Zomato outlet link — the credential the aggregator webhook
+    (OrderViewSet.aggregator) verifies inbound requests against. Mirrors
+    apps.channel's Channel for OTA rooms, but for food aggregators.
+    branch=None means property-wide (a single-outlet property)."""
+
+    ZOMATO = "zomato"
+    SWIGGY = "swiggy"
+    PLATFORM_CHOICES = [(ZOMATO, "Zomato"), (SWIGGY, "Swiggy")]
+
+    platform = models.CharField(max_length=20, choices=PLATFORM_CHOICES)
+    branch = models.ForeignKey(
+        "accounts.Branch", null=True, blank=True, on_delete=models.CASCADE,
+        related_name="aggregator_connections",
+        help_text="Which branch this outlet's orders belong to — blank for a single-outlet property",
+    )
+    outlet_id = models.CharField(max_length=80, help_text="This outlet's ID on the aggregator's side")
+    # Fernet ciphertext (apps.pos.crypto) — the raw secret is never stored or
+    # returned by the API once set.
+    webhook_secret_encrypted = models.TextField()
+    connected = models.BooleanField(default=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        unique_together = [("platform", "branch")]
+
+    def __str__(self):
+        return f"{self.get_platform_display()} — {self.outlet_id}"
+
+    def set_secret(self, raw: str):
+        from .crypto import encrypt
+        self.webhook_secret_encrypted = encrypt(raw)
+
+    def verify_signature(self, raw_body: bytes, signature: str) -> bool:
+        import hashlib
+        import hmac
+
+        from .crypto import decrypt
+        try:
+            secret = decrypt(self.webhook_secret_encrypted).encode()
+        except Exception:
+            return False
+        expected = hmac.new(secret, raw_body, hashlib.sha256).hexdigest()
+        return hmac.compare_digest(expected, signature or "")
+
+
 class Feedback(models.Model):
     """Guest feedback captured via the QR/link printed on the bill.
 

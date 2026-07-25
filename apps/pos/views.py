@@ -1,6 +1,6 @@
 from decimal import Decimal
 
-from django.db import models, transaction
+from django.db import IntegrityError, models, transaction
 from rest_framework import status, viewsets
 from rest_framework.decorators import action
 from rest_framework.permissions import AllowAny
@@ -25,6 +25,7 @@ from apps.frontoffice.models import Folio, FolioLine, Settlement
 
 from .models import (
     AddOn,
+    AggregatorConnection,
     BarTable,
     Category,
     Coupon,
@@ -928,6 +929,16 @@ class OrderViewSet(AnyModuleViewSetMixin, viewsets.ModelViewSet):
             self.throttle_scope = "sensitive"
         return super().get_throttles()
 
+    def get_permissions(self):
+        # The aggregator webhook is called by Swiggy/Zomato's servers, which
+        # never hold a Hearth staff login — it can't sit behind the blanket
+        # pos/barpos module gate. Trust instead comes from a verified HMAC
+        # signature against a known AggregatorConnection (see aggregator()).
+        if self.action == "aggregator":
+            from rest_framework.permissions import AllowAny
+            return [AllowAny()]
+        return super().get_permissions()
+
     def get_queryset(self):
         from apps.accounts.rbac import can_access
         qs = super().get_queryset()
@@ -1266,9 +1277,28 @@ class OrderViewSet(AnyModuleViewSetMixin, viewsets.ModelViewSet):
 
         Idempotent by (platform, external_id). Prepaid orders are marked paid and
         excluded from counter collection (FR-PAY-006). A KOT fires automatically.
-        In production the webhook signature is verified (SR-030); here it's trusted.
+
+        Trust boundary (SR-030): this is a public endpoint (see get_permissions) —
+        the caller never holds a Hearth login. Instead the request must carry
+        `outlet_id` plus an `X-Hearth-Signature` header: hex HMAC-SHA256 of the
+        raw request body, keyed on that outlet's AggregatorConnection secret
+        (set once in Settings > Integrations). Unknown/disconnected outlet or a
+        signature that doesn't match → 401, nothing is created.
         """
+        from .models import AggregatorConnection
+
+        # Must read the raw body before request.data is ever touched — DRF's
+        # request.data parses (and consumes) the same underlying stream, and
+        # request.body can't be read again afterward.
+        raw_body = request.body
         platform = request.data.get("platform", "zomato")
+        outlet_id = str(request.data.get("outlet_id", "")).strip()
+        conn = AggregatorConnection.objects.filter(
+            platform=platform, outlet_id=outlet_id, connected=True).first()
+        signature = request.headers.get("X-Hearth-Signature", "")
+        if not conn or not conn.verify_signature(raw_body, signature):
+            return Response({"detail": "invalid or unrecognized webhook"}, status=401)
+
         ext = str(request.data.get("external_id", "")).strip()
         if not ext:
             return Response({"detail": "external_id required"}, status=400)
@@ -1283,7 +1313,7 @@ class OrderViewSet(AnyModuleViewSetMixin, viewsets.ModelViewSet):
                 mobile=mobile, defaults={"name": (request.data.get("customer") or {}).get("name", "Online")})
         with transaction.atomic():
             order = Order.objects.create(
-                mode=Order.DELIVERY, customer=cust, source_platform=platform,
+                mode=Order.DELIVERY, location=conn.branch, customer=cust, source_platform=platform,
                 external_ref=ext, online_status="received",
                 prepaid=bool(request.data.get("prepaid", True)),
                 brand=request.data.get("brand", ""),
@@ -1947,6 +1977,75 @@ class OrderViewSet(AnyModuleViewSetMixin, viewsets.ModelViewSet):
         log_action(request.user, "post_to_room", entity="Order", entity_id=order.id,
                    after={"folio": folio.id})
         return Response(OrderSerializer(order).data)
+
+
+def _connection_dict(c):
+    return {
+        "id": c.id, "platform": c.platform, "platform_label": c.get_platform_display(),
+        "branch": c.branch_id, "branch_name": c.branch.name if c.branch_id else None,
+        "outlet_id": c.outlet_id, "connected": c.connected,
+        "configured": bool(c.webhook_secret_encrypted),
+    }
+
+
+class AggregatorConnectionViewSet(ModuleViewSetMixin, viewsets.ViewSet):
+    """Settings > Integrations: link a Swiggy/Zomato outlet so the public
+    aggregator webhook (OrderViewSet.aggregator) can verify it's really them.
+    The webhook secret is write-only — set() encrypts it, it's never read
+    back once saved (see AggregatorConnection.set_secret)."""
+
+    module = "settings"
+
+    def list(self, request):
+        return Response([_connection_dict(c) for c in AggregatorConnection.objects.select_related("branch")])
+
+    def create(self, request):
+        platform = request.data.get("platform")
+        outlet_id = (request.data.get("outlet_id") or "").strip()
+        secret = request.data.get("webhook_secret") or ""
+        if platform not in dict(AggregatorConnection.PLATFORM_CHOICES):
+            return Response({"detail": "platform must be zomato or swiggy"}, status=400)
+        if not outlet_id or not secret:
+            return Response({"detail": "outlet_id and webhook_secret are required"}, status=400)
+        branch_id = request.data.get("branch") or None
+        # unique_together=("platform","branch") doesn't catch two branch=None
+        # rows (SQL NULL is never equal to NULL) — check explicitly for the
+        # property-wide case too.
+        if AggregatorConnection.objects.filter(platform=platform, branch_id=branch_id).exists():
+            return Response({"detail": f"a {platform} connection already exists for that branch"}, status=400)
+        conn = AggregatorConnection(platform=platform, outlet_id=outlet_id, branch_id=branch_id)
+        conn.set_secret(secret)
+        try:
+            conn.save()
+        except IntegrityError:
+            return Response({"detail": f"a {platform} connection already exists for that branch"}, status=400)
+        log_action(request.user, "aggregator_connection_add", entity="AggregatorConnection",
+                   entity_id=conn.id, after={"platform": platform, "outlet_id": outlet_id})
+        return Response(_connection_dict(conn), status=201)
+
+    def partial_update(self, request, pk=None):
+        conn = AggregatorConnection.objects.filter(pk=pk).first()
+        if not conn:
+            return Response({"detail": "not found"}, status=404)
+        if "outlet_id" in request.data:
+            conn.outlet_id = (request.data.get("outlet_id") or "").strip()
+        if "webhook_secret" in request.data and request.data["webhook_secret"]:
+            conn.set_secret(request.data["webhook_secret"])
+        if "branch" in request.data:
+            conn.branch_id = request.data.get("branch") or None
+        conn.save()
+        log_action(request.user, "aggregator_connection_update", entity="AggregatorConnection", entity_id=conn.id)
+        return Response(_connection_dict(conn))
+
+    @action(detail=True, methods=["post"])
+    def disconnect(self, request, pk=None):
+        conn = AggregatorConnection.objects.filter(pk=pk).first()
+        if not conn:
+            return Response({"detail": "not found"}, status=404)
+        conn.connected = False
+        conn.save(update_fields=["connected"])
+        log_action(request.user, "aggregator_connection_disconnect", entity="AggregatorConnection", entity_id=conn.id)
+        return Response(_connection_dict(conn))
 
 
 class FeedbackPublicView(APIView):

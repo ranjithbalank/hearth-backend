@@ -10,7 +10,8 @@ from rest_framework.test import APIClient
 
 from apps.accounts.models import User
 from apps.inventory.models import Ingredient, StockMovement
-from apps.pos.models import Category, MenuItem, Order, Table
+from apps.pos.models import AggregatorConnection, Category, MenuItem, Order, Table
+from apps.pos.tests import signed_aggregator_post
 from apps.procurement.models import PurchaseOrder, PurchaseOrderLine, Supplier
 
 
@@ -352,10 +353,13 @@ class RestaurantE2ETests(TestCase):
         ready, and dispatch is blocked until the kitchen has done so."""
         rice = self._material("Rice", stock="5")
         dish = self._dish("Veg Biryani", "220", [{"ingredient": rice.id, "qty": "0.2"}])
-        r = self.client.post("/api/pos/orders/aggregator/", {
-            "platform": "zomato", "external_id": "Z-9001", "prepaid": True,
+        conn = AggregatorConnection(platform="zomato", outlet_id="OUT-1")
+        conn.set_secret("zomato-outlet-secret")
+        conn.save()
+        r = signed_aggregator_post(self.client, "/api/pos/orders/aggregator/", {
+            "platform": "zomato", "outlet_id": "OUT-1", "external_id": "Z-9001", "prepaid": True,
             "items": [{"menu_item": dish.id, "qty": 1}],
-        }, format="json")
+        }, "zomato-outlet-secret")
         self.assertEqual(r.status_code, 201, r.data)
         oid = r.data["id"]
         # Counter can't mark ready…

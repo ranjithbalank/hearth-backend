@@ -3,6 +3,7 @@ from rest_framework.routers import DefaultRouter
 from django.urls import path
 
 from .views import (
+    AggregatorConnectionViewSet,
     BarTableViewSet,
     CategoryViewSet,
     FeedbackPublicView,
@@ -24,6 +25,7 @@ router.register("bar/tables", BarTableViewSet, basename="bartable")
 router.register("pos/categories", CategoryViewSet, basename="category")
 router.register("pos/menu-items", MenuItemViewSet, basename="menuitem")
 router.register("pos/orders", OrderViewSet, basename="order")
+router.register("pos/aggregator-connections", AggregatorConnectionViewSet, basename="aggregatorconnection")
 router.register("pos/till", TillViewSet, basename="till")
 router.register("pos/reconciliation", ReconViewSet, basename="recon")
 router.register("pos/table-reservations", TableReservationViewSet, basename="tablereservation")

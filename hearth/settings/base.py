@@ -19,6 +19,23 @@ ALLOWED_HOSTS = env.list("ALLOWED_HOSTS", default=["127.0.0.1", "localhost"])
 # Public base URL of the frontend — printed on bills (feedback QR/link, order status).
 FRONTEND_BASE_URL = env("FRONTEND_BASE_URL", default="http://localhost:5173")
 
+# Encrypts aggregator (Swiggy/Zomato) webhook secrets at rest (apps.pos.crypto).
+# Dev derives a stable key from SECRET_KEY (so stored secrets survive a dev
+# server restart); prod MUST set its own AGGREGATOR_SECRET_KEY env var —
+# deriving from SECRET_KEY is a dev convenience, not a production practice.
+def _dev_fernet_key():
+    import base64
+    import hashlib
+    digest = hashlib.sha256(SECRET_KEY.encode()).digest()
+    return base64.urlsafe_b64encode(digest).decode()
+
+
+# `or` (not `default=`) so an explicitly-blank .env entry still falls back —
+# same pattern DATABASE_URL uses above — rather than handing Fernet an
+# invalid empty-string key.
+AGGREGATOR_SECRET_KEY = env("AGGREGATOR_SECRET_KEY", default="") or _dev_fernet_key()
+
+
 INSTALLED_APPS = [
     "django.contrib.admin",
     "django.contrib.auth",

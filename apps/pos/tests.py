@@ -12,6 +12,18 @@ from .models import (
 )
 
 
+def signed_aggregator_post(client, url, payload, secret):
+    """POST with a real X-Hearth-Signature — same HMAC-SHA256-of-raw-body
+    a real Swiggy/Zomato webhook caller would send (see AggregatorConnection
+    .verify_signature)."""
+    import hashlib
+    import hmac
+    import json
+    raw = json.dumps(payload).encode()
+    sig = hmac.new(secret.encode(), raw, hashlib.sha256).hexdigest()
+    return client.post(url, data=raw, content_type="application/json", HTTP_X_HEARTH_SIGNATURE=sig)
+
+
 class MenuImportTests(TestCase):
     """Bulk menu onboarding via CSV — template, per-row report, master-gated."""
 
@@ -417,20 +429,53 @@ class DiscountLoyaltyTests(TestCase):
         self.assertEqual(r.status_code, 200)
 
     def test_aggregator_ingest_idempotent_and_prepaid(self):
-        self.client.force_authenticate(self.mgr)
-        body = {"platform": "swiggy", "external_id": "SWG-77", "prepaid": True,
+        from apps.pos.models import AggregatorConnection
+        conn = AggregatorConnection(platform="swiggy", outlet_id="OUT-1")
+        conn.set_secret("swiggy-outlet-secret")
+        conn.save()
+        body = {"platform": "swiggy", "outlet_id": "OUT-1", "external_id": "SWG-77", "prepaid": True,
                 "customer": {"mobile": "9000011111", "name": "Online Guy"},
                 "items": [{"menu_item": self.item.id, "qty": 2}]}
-        r1 = self.client.post(reverse("order-aggregator"), body, format="json")
-        self.assertEqual(r1.status_code, 201)
+        r1 = signed_aggregator_post(self.client, reverse("order-aggregator"), body, "swiggy-outlet-secret")
+        self.assertEqual(r1.status_code, 201, r1.data)
         self.assertEqual(r1.data["source_platform"], "swiggy")
         self.assertEqual(r1.data["online_status"], "received")
         from apps.frontoffice.models import Settlement
         self.assertTrue(Settlement.objects.filter(reference="swiggy:SWG-77").exists())
         # Replay -> same order, no duplicate.
-        r2 = self.client.post(reverse("order-aggregator"), body, format="json")
+        r2 = signed_aggregator_post(self.client, reverse("order-aggregator"), body, "swiggy-outlet-secret")
         self.assertEqual(r2.data["id"], r1.data["id"])
         self.assertEqual(Order.objects.filter(external_ref="SWG-77").count(), 1)
+
+    def test_aggregator_rejects_missing_or_wrong_signature(self):
+        from apps.pos.models import AggregatorConnection
+        conn = AggregatorConnection(platform="swiggy", outlet_id="OUT-1")
+        conn.set_secret("swiggy-outlet-secret")
+        conn.save()
+        body = {"platform": "swiggy", "outlet_id": "OUT-1", "external_id": "SWG-99", "prepaid": False,
+                "items": []}
+        import json
+        raw = json.dumps(body)
+        r = self.client.post(reverse("order-aggregator"), data=raw, content_type="application/json")
+        self.assertEqual(r.status_code, 401)  # no signature at all
+        r = self.client.post(reverse("order-aggregator"), data=raw, content_type="application/json",
+                             HTTP_X_HEARTH_SIGNATURE="deadbeef")
+        self.assertEqual(r.status_code, 401)  # wrong signature
+        self.assertFalse(Order.objects.filter(external_ref="SWG-99").exists())
+
+    def test_aggregator_rejects_unknown_outlet(self):
+        body = {"platform": "swiggy", "outlet_id": "NO-SUCH-OUTLET", "external_id": "SWG-1", "items": []}
+        r = signed_aggregator_post(self.client, reverse("order-aggregator"), body, "swiggy-outlet-secret")
+        self.assertEqual(r.status_code, 401)
+
+    def test_aggregator_rejects_disconnected_outlet(self):
+        from apps.pos.models import AggregatorConnection
+        conn = AggregatorConnection(platform="swiggy", outlet_id="OUT-1", connected=False)
+        conn.set_secret("swiggy-outlet-secret")
+        conn.save()
+        body = {"platform": "swiggy", "outlet_id": "OUT-1", "external_id": "SWG-1", "items": []}
+        r = signed_aggregator_post(self.client, reverse("order-aggregator"), body, "swiggy-outlet-secret")
+        self.assertEqual(r.status_code, 401)
 
     def test_online_status_flow(self):
         """The counter accepts and dispatches; 'ready' is the kitchen's alone
@@ -569,6 +614,79 @@ class DiscountLoyaltyTests(TestCase):
         r = self.client.post(reverse("order-redeem-loyalty", args=[o.id]),
                              {"reward_id": reward.id}, format="json")
         self.assertEqual(r.status_code, 400)
+
+
+class AggregatorConnectionTests(TestCase):
+    """Settings > Integrations: linking a Swiggy/Zomato outlet. The secret is
+    write-only end to end — never returned by list/create/patch."""
+
+    def setUp(self):
+        self.client = APIClient()
+        self.admin = User.objects.create_user(username="a1", password="Tk9$mZ2pQw!7", role="Admin")
+        self.client.force_authenticate(self.admin)
+
+    def test_create_stores_secret_encrypted_and_never_returns_it(self):
+        r = self.client.post("/api/pos/aggregator-connections/",
+                             {"platform": "zomato", "outlet_id": "OUT-9", "webhook_secret": "sekrit"},
+                             format="json")
+        self.assertEqual(r.status_code, 201, r.data)
+        self.assertNotIn("webhook_secret", r.data)
+        self.assertNotIn("webhook_secret_encrypted", r.data)
+        self.assertTrue(r.data["configured"])
+        from apps.pos.models import AggregatorConnection
+        conn = AggregatorConnection.objects.get(pk=r.data["id"])
+        self.assertNotEqual(conn.webhook_secret_encrypted, "sekrit")  # ciphertext, not plaintext
+
+    def test_create_rejects_bad_platform_or_missing_fields(self):
+        r = self.client.post("/api/pos/aggregator-connections/",
+                             {"platform": "ubereats", "outlet_id": "X", "webhook_secret": "s"}, format="json")
+        self.assertEqual(r.status_code, 400)
+        r = self.client.post("/api/pos/aggregator-connections/",
+                             {"platform": "zomato", "outlet_id": "", "webhook_secret": "s"}, format="json")
+        self.assertEqual(r.status_code, 400)
+
+    def test_create_rejects_duplicate_platform_per_branch(self):
+        self.client.post("/api/pos/aggregator-connections/",
+                         {"platform": "zomato", "outlet_id": "OUT-1", "webhook_secret": "s1"}, format="json")
+        r = self.client.post("/api/pos/aggregator-connections/",
+                             {"platform": "zomato", "outlet_id": "OUT-2", "webhook_secret": "s2"}, format="json")
+        self.assertEqual(r.status_code, 400)
+
+    def test_list_never_includes_secret(self):
+        self.client.post("/api/pos/aggregator-connections/",
+                         {"platform": "swiggy", "outlet_id": "OUT-1", "webhook_secret": "sekrit"}, format="json")
+        r = self.client.get("/api/pos/aggregator-connections/")
+        self.assertEqual(r.status_code, 200)
+        body = str(r.data)
+        self.assertNotIn("sekrit", body)
+
+    def test_rotate_secret_changes_signature_verification(self):
+        import hashlib
+        import hmac
+
+        from apps.pos.models import AggregatorConnection
+
+        def sig(secret):
+            return hmac.new(secret.encode(), b"body", hashlib.sha256).hexdigest()
+
+        r = self.client.post("/api/pos/aggregator-connections/",
+                             {"platform": "swiggy", "outlet_id": "OUT-1", "webhook_secret": "old-secret"},
+                             format="json")
+        conn = AggregatorConnection.objects.get(pk=r.data["id"])
+        self.assertTrue(conn.verify_signature(b"body", sig("old-secret")))
+        self.client.patch(f"/api/pos/aggregator-connections/{conn.id}/",
+                          {"webhook_secret": "new-secret"}, format="json")
+        conn.refresh_from_db()
+        self.assertFalse(conn.verify_signature(b"body", sig("old-secret")))
+        self.assertTrue(conn.verify_signature(b"body", sig("new-secret")))
+
+    def test_disconnect_sets_connected_false(self):
+        r = self.client.post("/api/pos/aggregator-connections/",
+                             {"platform": "swiggy", "outlet_id": "OUT-1", "webhook_secret": "s"}, format="json")
+        conn_id = r.data["id"]
+        r = self.client.post(f"/api/pos/aggregator-connections/{conn_id}/disconnect/")
+        self.assertEqual(r.status_code, 200)
+        self.assertFalse(r.data["connected"])
 
 
 class KotBillFlowTests(TestCase):
@@ -1080,10 +1198,14 @@ class KotBillFlowTests(TestCase):
     def test_reconciliation_report_and_payout_import(self):
         """POS aggregator settlements vs imported payouts → variance flagged."""
         from django.utils import timezone
+        from apps.pos.models import AggregatorConnection
+        conn = AggregatorConnection(platform="swiggy", outlet_id="OUT-1")
+        conn.set_secret("swiggy-outlet-secret")
+        conn.save()
         # A prepaid swiggy order books a "swiggy (prepaid)" settlement (210).
-        self.client.post(reverse("order-aggregator"),
-                         {"platform": "swiggy", "external_id": "SW-1", "prepaid": True,
-                          "items": [{"menu_item": self.item.id, "qty": 2}]}, format="json")
+        signed_aggregator_post(self.client, reverse("order-aggregator"),
+                               {"platform": "swiggy", "outlet_id": "OUT-1", "external_id": "SW-1", "prepaid": True,
+                                "items": [{"menu_item": self.item.id, "qty": 2}]}, "swiggy-outlet-secret")
         # Platform payout report says only 195 was paid out.
         r = self.client.post(reverse("recon-import-payouts"),
                              {"rows": [{"platform": "swiggy", "date": str(timezone.localdate()),
