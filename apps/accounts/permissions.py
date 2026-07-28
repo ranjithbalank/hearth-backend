@@ -86,6 +86,10 @@ class ModulePermission(BasePermission):
         if not entitlement_allows(active_entitlements(), module):
             self.message = f"Module '{module}' is not enabled for this property."
             return False
+        from .features import is_enabled
+        if not is_enabled(module):
+            self.message = f"Feature '{module}' is turned off for this property."
+            return False
         return True
 
 
@@ -112,9 +116,10 @@ class AnyModulePermission(BasePermission):
         user = request.user
         if not (user and user.is_authenticated):
             return False
+        from .features import is_enabled
         ent = active_entitlements()
         for module in modules:
-            if can_access(user.role, module) and entitlement_allows(ent, module):
+            if can_access(user.role, module) and entitlement_allows(ent, module) and is_enabled(module):
                 return True
         self.message = f"Role '{user.role}' cannot access any of {modules}."
         return False

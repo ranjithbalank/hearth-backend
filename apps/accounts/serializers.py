@@ -105,9 +105,21 @@ class UserSerializer(serializers.ModelSerializer):
 
 
 class EntitlementSerializer(serializers.ModelSerializer):
+    # The raw per-feature overrides ({module: bool}) plus the RESOLVED effective
+    # on/off for every feature (entitlement flag ∧ owner toggle ∧ prerequisites).
+    # The frontend gates nav/routes on `features_effective` — one authoritative
+    # map, computed server-side, so the client stops hand-mirroring the rules.
+    features_effective = serializers.SerializerMethodField()
+
     class Meta:
         model = Entitlement
-        fields = ["hms", "restaurant", "banquets", "rms", "bar_mode", "kds_partial_ready"]
+        fields = ["hms", "restaurant", "banquets", "rms", "bar_mode",
+                  "kds_partial_ready", "features", "features_effective"]
+        read_only_fields = ["features"]
+
+    def get_features_effective(self, obj):
+        from .features import resolve
+        return resolve(obj.as_dict(), obj.features or {})
 
 
 class PropertySerializer(serializers.ModelSerializer):

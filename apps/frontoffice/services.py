@@ -257,7 +257,12 @@ def check_out(folio, payments=None, tender=None, user=None):
             folio.invoice_no = _next_invoice_no()
         folio.save(update_fields=["status", "settled_at", "invoice_no"])
     if folio.room:
-        folio.room.status = Room.VACANT_DIRTY
+        # Normally the room releases to Housekeeping as dirty and waits for a
+        # cleaner. If the property runs no separate Housekeeping desk, that
+        # cleaner never comes — the room would sit out of sellable inventory
+        # forever. So release it straight to clean (sellable) instead.
+        from apps.accounts.features import is_enabled
+        folio.room.status = Room.VACANT_DIRTY if is_enabled("housekeeping") else Room.VACANT_CLEAN
         folio.room.save(update_fields=["status", "updated_at"])
     if folio.reservation:
         folio.reservation.status = folio.reservation.CHECKED_OUT

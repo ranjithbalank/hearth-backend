@@ -194,7 +194,10 @@ class ReservationViewSet(ModuleViewSetMixin, viewsets.ModelViewSet):
         dest.status = Room.OCCUPIED
         dest.save(update_fields=["status", "updated_at"])
         if old and old.id != dest.id:
-            old.status = Room.VACANT_DIRTY
+            # With no Housekeeping desk, a "dirty" room never gets cleaned back
+            # to sellable — release the vacated room straight to clean instead.
+            from apps.accounts.features import is_enabled
+            old.status = Room.VACANT_DIRTY if is_enabled("housekeeping") else Room.VACANT_CLEAN
             old.save(update_fields=["status", "updated_at"])
         folio = getattr(resv, "folio", None)
         if folio:

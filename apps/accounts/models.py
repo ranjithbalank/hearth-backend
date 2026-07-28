@@ -98,6 +98,12 @@ class Entitlement(models.Model):
     # finish — the ticket itself auto-advances once every line on it is
     # ready (Settings > Kitchen Display).
     kds_partial_ready = models.BooleanField(default=False)
+    # Per-module on/off overrides WITHIN the licensed edition ({module: bool}).
+    # Empty = every feature the edition allows is on (the old behaviour). The
+    # feature model + dependency engine live in accounts/features.py; this is
+    # just the stored choice. Lets an owner run, say, a hotel with no separate
+    # Housekeeping desk without losing the rest of the hotel side.
+    features = models.JSONField(default=dict, blank=True)
 
     def as_dict(self):
         return {

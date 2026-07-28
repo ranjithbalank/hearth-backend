@@ -95,3 +95,66 @@ class RbacApiTests(TestCase):
                              {"role": "Super Admin", "module": "pos", "allowed": False},
                              format="json")
         self.assertEqual(r.status_code, 400)  # protected role can't be edited
+
+
+class FeatureToggleTests(TestCase):
+    """The per-feature configuration layer: the dependency engine + that a
+    disabled feature is enforced over HTTP (not merely hidden in the UI)."""
+
+    def setUp(self):
+        self.client = APIClient()
+
+    def test_dependency_engine(self):
+        from .features import apply_toggle, dependents, resolve
+        ent = {"hms": True, "restaurant": True, "banquets": True, "rms": True}
+        base = resolve(ent, {})
+        self.assertTrue(base["housekeeping"])
+        # Housekeeping turns off independently — the hotel core stays on.
+        cfg = apply_toggle({}, "housekeeping", False, ent)
+        r = resolve(ent, cfg)
+        self.assertFalse(r["housekeeping"])
+        self.assertTrue(r["livegrid"])
+        self.assertTrue(r["frontdesk"])
+        self.assertEqual(dependents("housekeeping"), set())
+        # Inventory cascades its dependents off.
+        self.assertIn("recipes", dependents("inventory"))
+        r2 = resolve(ent, apply_toggle({}, "inventory", False, ent))
+        self.assertFalse(r2["recipes"])
+        self.assertFalse(r2["procurement"])
+        self.assertTrue(r2["pos"])
+        # Enabling a child pulls its prerequisites on.
+        cfg3 = apply_toggle({"suppliers": False, "procurement": False}, "procurement", True, ent)
+        self.assertTrue(cfg3["suppliers"])
+        self.assertTrue(cfg3["inventory"])
+        # Hotel edition hides restaurant features regardless of toggle.
+        rh = resolve({"hms": True, "restaurant": False, "banquets": True, "rms": True}, {})
+        self.assertFalse(rh["pos"])
+        self.assertTrue(rh["housekeeping"])
+
+    def test_disabled_feature_403s_over_http(self):
+        from .models import Entitlement, Property
+        prop = Property.objects.create(name="T", edition="both", setup_done=True)
+        Entitlement.objects.create(property=prop, features={"housekeeping": False})
+        u = User.objects.create_user(username="gmfeat", password="Tk9$mZ2pQw!7",
+                                     role="General Manager")
+        self.client.force_authenticate(u)
+        # Housekeeping is off -> 403 even for a full-access role.
+        self.assertEqual(self.client.get("/api/housekeeping/").status_code, 403)
+        # The hotel core it depends on is untouched.
+        self.assertEqual(self.client.get("/api/rooms/").status_code, 200)
+
+    def test_feature_toggle_endpoint_cascades(self):
+        from .models import Entitlement, Property
+        prop = Property.objects.create(name="T2", edition="both", setup_done=True)
+        Entitlement.objects.create(property=prop)
+        u = User.objects.create_user(username="adminfeat", password="Tk9$mZ2pQw!7",
+                                     role="Super Admin")
+        self.client.force_authenticate(u)
+        r = self.client.patch("/api/auth/entitlements/",
+                              {"feature": "inventory", "enabled": False}, format="json")
+        self.assertEqual(r.status_code, 200)
+        eff = r.data["entitlement"]["features_effective"]
+        self.assertFalse(eff["inventory"])
+        self.assertFalse(eff["recipes"])       # cascaded
+        self.assertFalse(eff["procurement"])   # cascaded
+        self.assertTrue(eff["pos"])            # untouched

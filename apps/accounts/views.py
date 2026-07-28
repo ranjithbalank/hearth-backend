@@ -84,6 +84,18 @@ class PropertyView(APIView):
         return Response(PropertySerializer(prop).data)
 
 
+class FeatureModelView(APIView):
+    """The static feature model — labels, groups, prerequisites, which are
+    toggleable — for the Settings > Features admin screen. AllowAny GET (it's
+    structural metadata, no property data), same as the property read."""
+
+    permission_classes = [AllowAny]
+
+    def get(self, request):
+        from .features import feature_model
+        return Response({"features": feature_model()})
+
+
 class SetupView(APIView):
     """One-time property setup: choose edition -> write entitlement record."""
 
@@ -128,6 +140,23 @@ class EntitlementView(APIView):
     def patch(self, request):
         prop = get_property()
         ent = prop.entitlement
+        # A per-feature toggle (Settings > Features): {feature, enabled}. Runs
+        # the dependency engine so the choice always leaves a valid combination
+        # — enabling pulls prerequisites on, disabling cascades dependents off.
+        feat = request.data.get("feature")
+        if feat is not None:
+            from .features import FEATURES, apply_toggle
+            spec = FEATURES.get(feat)
+            if spec is None or not spec.get("toggleable", True):
+                return Response({"detail": f"'{feat}' is not a configurable feature"}, status=400)
+            enabled = bool(request.data.get("enabled", True))
+            before = ent.features or {}
+            ent.features = apply_toggle(before, feat, enabled, ent.as_dict())
+            ent.save()
+            log_action(request.user, "feature_toggle", entity="Entitlement",
+                       entity_id=ent.id, before=before, after=ent.features,
+                       note=f"{feat}={'on' if enabled else 'off'}")
+            return Response(PropertySerializer(get_property()).data)
         # Switching to Combined hides Bar POS from the nav entirely — any
         # still-open bar tab would become unreachable (and unsettled) the
         # moment this switch lands, so block it until they're cleared.
