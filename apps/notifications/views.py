@@ -235,7 +235,7 @@ class ApprovalInboxView(APIView):
                     "id": po.id,
                     "title": po.po_no or f"PO #{po.id}",
                     "detail": f"{po.supplier.name} · {n} item{'' if n == 1 else 's'}",
-                    "amount": str(po.total),
+                    "amount": f"{po.total:.2f}",  # PO total carries 5 dp; normalise to money
                 })
             if items:
                 sections.append({"key": "po", "title": "Purchase orders",
