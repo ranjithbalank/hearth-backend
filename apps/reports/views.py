@@ -283,10 +283,11 @@ class ExecutiveView(ModuleAPIView):
             body["rooms"] = rooms
         if view in ("all", "restaurant"):
             body["fnb"] = fnb
+        from apps.accounts.constants import entitlement_allows
+        from apps.accounts.permissions import active_entitlements
+        banq = entitlement_allows(active_entitlements(), "banquets")
+
         if view == "all":
-            from apps.accounts.constants import entitlement_allows
-            from apps.accounts.permissions import active_entitlements
-            banq = entitlement_allows(active_entitlements(), "banquets")
             total_rev = room_rev + fnb_rev
             body["kpis"] = {
                 "revenue": str(total_rev),
@@ -318,12 +319,24 @@ class ExecutiveView(ModuleAPIView):
                 "room_revenue": rooms["room_revenue"],
                 "receivables": receivables["total"],
             }
+            # Same chief-level layers as "all", scoped to the rooms side: a
+            # rooms-only trajectory, forward booked demand, AR and its
+            # concentration, and the acquisition-channel mix (channels and AR
+            # are hotel concepts, so they live here — not on the restaurant tab).
+            body["trend"] = _revenue_trend(include_rooms=True, include_fnb=False, days=30)
+            body["forward"] = _forward_book(banquets=banq)
+            body["receivables_detail"] = receivables
+            body["channels"] = _channel_mix()
+            body["top_receivables"] = _top_receivables()
         else:  # restaurant
             body["kpis"] = {
                 "revenue": fnb["fnb_sales"],
                 "fnb_revenue": fnb["fnb_sales"],
                 "order_count": fnb["order_count"],
             }
+            # F&B-only trajectory; the service-mode mix is derived on the FE from
+            # body["fnb"].by_mode (no channels/AR — those belong to the hotel).
+            body["trend"] = _revenue_trend(include_rooms=False, include_fnb=True, days=30)
         return Response(body)
 
 
