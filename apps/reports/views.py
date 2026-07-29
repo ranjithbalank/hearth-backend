@@ -106,6 +106,32 @@ def _receivables():
     }
 
 
+def _channel_mix():
+    """Share of confirmed bookings by source — the acquisition mix a chief reads
+    for channel dependence (how much rides on OTAs vs direct). Excludes dead
+    (cancelled / no-show) reservations."""
+    from apps.reservations.models import Reservation
+    dead = (Reservation.CANCELLED, Reservation.NO_SHOW)
+    by = {}
+    for r in Reservation.objects.all():
+        if r.status in dead:
+            continue
+        k = r.get_source_display()
+        by[k] = by.get(k, 0) + 1
+    return [{"label": k, "value": v}
+            for k, v in sorted(by.items(), key=lambda kv: -kv[1])]
+
+
+def _top_receivables(limit=5):
+    """Largest balances owed to us — turns the AR total into concentration/risk
+    (one agency can be half the ledger)."""
+    from apps.crm.models import Customer
+    rows = [{"name": c.name, "amount": str(c.outstanding), "type": c.get_customer_type_display()}
+            for c in Customer.objects.all() if c.outstanding and c.outstanding > 0]
+    rows.sort(key=lambda r: -float(r["amount"]))
+    return rows[:limit]
+
+
 def _forward_book(banquets=False):
     """On-the-books demand — what a chief wants to see looking forward, not just
     what already closed: confirmed arrivals in the next 7 days, guests in-house
@@ -283,6 +309,8 @@ class ExecutiveView(ModuleAPIView):
                                            include_banquets=False, days=30)
             body["forward"] = _forward_book(banquets=banq)
             body["receivables_detail"] = receivables
+            body["channels"] = _channel_mix()
+            body["top_receivables"] = _top_receivables()
         elif view == "hotel":
             body["kpis"] = {
                 "revenue": rooms["room_revenue"],
