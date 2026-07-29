@@ -106,6 +106,32 @@ def _receivables():
     }
 
 
+def _forward_book(banquets=False):
+    """On-the-books demand — what a chief wants to see looking forward, not just
+    what already closed: confirmed arrivals in the next 7 days, guests in-house
+    now, and (when banquets are licensed) confirmed events still ahead with their
+    contracted value."""
+    from datetime import timedelta
+    from apps.reservations.models import Reservation
+    today = _business_date()
+    horizon = today + timedelta(days=7)
+    dead = (Reservation.CANCELLED, Reservation.NO_SHOW)
+    res = list(Reservation.objects.all())
+    out = {
+        "arrivals_7d": sum(1 for r in res
+                           if today <= r.checkin_date <= horizon and r.status not in dead),
+        "in_house": sum(1 for r in res if r.status == Reservation.IN_HOUSE),
+    }
+    if banquets:
+        from apps.banquets.models import Event
+        upcoming = [e for e in Event.objects.filter(
+            status__in=[Event.CONFIRMED, Event.COMPLETED]) if e.event_date >= today]
+        out["banquets_upcoming"] = len(upcoming)
+        out["banquets_value"] = str(sum((e.bill_subtotal for e in upcoming),
+                                        start=Decimal("0")))
+    return out
+
+
 def _revenue_trend(include_rooms=True, include_fnb=True, include_banquets=False,
                    days=14, f=None, t=None):
     """Per-day revenue for the dashboard's trend chart: rooms from night-audit
@@ -232,6 +258,9 @@ class ExecutiveView(ModuleAPIView):
         if view in ("all", "restaurant"):
             body["fnb"] = fnb
         if view == "all":
+            from apps.accounts.constants import entitlement_allows
+            from apps.accounts.permissions import active_entitlements
+            banq = entitlement_allows(active_entitlements(), "banquets")
             total_rev = room_rev + fnb_rev
             body["kpis"] = {
                 "revenue": str(total_rev),
@@ -244,6 +273,16 @@ class ExecutiveView(ModuleAPIView):
                 {"label": "Rooms", "value": str(room_rev)},
                 {"label": "F&B", "value": str(fnb_rev)},
             ]
+            # Chief-level context the snapshot KPIs can't carry on their own.
+            # The trajectory is realized operating revenue (rooms + F&B) so it
+            # stays coherent with Total revenue and the mix above; banquets are
+            # contracts, surfaced as forward booked demand rather than folded
+            # into the operating trend (one event would spike it). The FE derives
+            # week-on-week growth from this series.
+            body["trend"] = _revenue_trend(include_rooms=True, include_fnb=True,
+                                           include_banquets=False, days=30)
+            body["forward"] = _forward_book(banquets=banq)
+            body["receivables_detail"] = receivables
         elif view == "hotel":
             body["kpis"] = {
                 "revenue": rooms["room_revenue"],
