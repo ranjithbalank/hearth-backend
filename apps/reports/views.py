@@ -106,6 +106,46 @@ def _receivables():
     }
 
 
+def _occupancy_forecast(days=14):
+    """Forward occupancy & room-revenue projection from reservations on the
+    books — the pickup curve a revenue manager reads to price the coming
+    fortnight. A night counts a booking if it spans that night
+    (checkin <= night < checkout) and the booking is still live (not cancelled
+    / no-show). Revenue is the sum of nightly rates for the rooms on the books."""
+    from datetime import timedelta
+    from apps.reservations.models import Reservation
+    biz = _business_date()
+    total = Room.objects.count() or 1
+    dead = (Reservation.CANCELLED, Reservation.NO_SHOW)
+    nights = [biz + timedelta(days=i) for i in range(days)]
+    lo, hi = nights[0], nights[-1]
+    occ = {d: 0 for d in nights}
+    rev = {d: Decimal("0") for d in nights}
+    arr = {d: 0 for d in nights}
+    dep = {d: 0 for d in nights}
+    for r in Reservation.objects.all():
+        if r.status in dead:
+            continue
+        if lo <= r.checkin_date <= hi:
+            arr[r.checkin_date] += 1
+        if lo <= r.checkout_date <= hi:
+            dep[r.checkout_date] += 1
+        d = r.checkin_date if r.checkin_date > lo else lo
+        while d < r.checkout_date and d <= hi:
+            occ[d] += 1
+            rev[d] += r.rate or Decimal("0")
+            d += timedelta(days=1)
+    return {
+        "days": [d.strftime("%d %b") for d in nights],
+        "occ_pct": [round(occ[d] / total * 100, 1) for d in nights],
+        "on_books": [occ[d] for d in nights],
+        "revenue": [float(rev[d]) for d in nights],
+        "arrivals": [arr[d] for d in nights],
+        "departures": [dep[d] for d in nights],
+        "rooms_total": total,
+    }
+
+
 def _channel_mix():
     """Share of confirmed bookings by source — the acquisition mix a chief reads
     for channel dependence (how much rides on OTAs vs direct). Excludes dead
@@ -312,6 +352,7 @@ class ExecutiveView(ModuleAPIView):
             body["receivables_detail"] = receivables
             body["channels"] = _channel_mix()
             body["top_receivables"] = _top_receivables()
+            body["forecast"] = _occupancy_forecast()
         elif view == "hotel":
             body["kpis"] = {
                 "revenue": rooms["room_revenue"],
@@ -328,6 +369,7 @@ class ExecutiveView(ModuleAPIView):
             body["receivables_detail"] = receivables
             body["channels"] = _channel_mix()
             body["top_receivables"] = _top_receivables()
+            body["forecast"] = _occupancy_forecast()
         else:  # restaurant
             body["kpis"] = {
                 "revenue": fnb["fnb_sales"],
