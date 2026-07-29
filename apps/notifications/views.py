@@ -218,15 +218,25 @@ class ApprovalInboxView(APIView):
         username = request.user.username
         sections = []
 
+        def _qty(d):
+            """Trim a Decimal's trailing zeros for display: 1.000 → '1', 1.500 → '1.5'."""
+            s = f"{d:f}"
+            return s.rstrip("0").rstrip(".") if "." in s else s
+
         if role in PO_APPROVER_ROLES:
             from apps.procurement.models import PurchaseOrder
-            items = [{
-                "id": po.id,
-                "title": f"{po.po_no or f'PO #{po.id}'} — {po.supplier.name}",
-                "detail": f"{po.lines.count()} line(s) · ₹{po.total}",
-            } for po in (PurchaseOrder.objects.filter(status=PurchaseOrder.PENDING)
-                         .select_related("supplier").prefetch_related("lines"))
-                if po.requested_by != username]
+            items = []
+            for po in (PurchaseOrder.objects.filter(status=PurchaseOrder.PENDING)
+                       .select_related("supplier").prefetch_related("lines")):
+                if po.requested_by == username:
+                    continue
+                n = po.lines.count()
+                items.append({
+                    "id": po.id,
+                    "title": po.po_no or f"PO #{po.id}",
+                    "detail": f"{po.supplier.name} · {n} item{'' if n == 1 else 's'}",
+                    "amount": str(po.total),
+                })
             if items:
                 sections.append({"key": "po", "title": "Purchase orders",
                                  "route": "/procurement", "items": items})
@@ -237,10 +247,10 @@ class ApprovalInboxView(APIView):
             .filter(status__in=[MaterialRequest.REQUESTED, MaterialRequest.APPROVED]))
 
         def indent_item(r):
-            lines = ", ".join(f"{l.qty} {l.ingredient.unit} {l.ingredient.name}"
+            lines = ", ".join(f"{_qty(l.qty)} {l.ingredient.unit} {l.ingredient.name}"
                               for l in r.lines.all()[:4])
             return {"id": r.id, "title": f"Indent #{r.id} — {r.department}",
-                    "detail": f"{lines} · by {r.requested_by or '—'}"}
+                    "detail": lines, "meta": f"by {r.requested_by or '—'}"}
 
         to_approve = [indent_item(r) for r in indents
                       if r.status == MaterialRequest.REQUESTED
@@ -260,7 +270,8 @@ class ApprovalInboxView(APIView):
             from apps.pos.models import MenuItem
             items = [{
                 "id": m.id, "title": m.name,
-                "detail": f"₹{m.price} · {m.category.name if m.category_id else '—'}",
+                "detail": m.category.name if m.category_id else "Uncategorised",
+                "amount": str(m.price),
             } for m in (MenuItem.objects.filter(approval_status=MenuItem.PENDING)
                         .select_related("category"))]
             if items:
@@ -284,7 +295,7 @@ class ApprovalInboxView(APIView):
                 "id": r.id,
                 "title": f"{r.employee.name} — {r.leave_type.name}",
                 "detail": (f"{r.start_date.strftime('%d %b')} → {r.end_date.strftime('%d %b')}"
-                           f" · {r.days} day(s) · {stage}"),
+                           f" · {_qty(r.days)} day{'' if r.days == 1 else 's'} · {stage}"),
             })
         if items:
             sections.append({"key": "leave", "title": "Leave requests",
