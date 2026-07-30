@@ -1884,29 +1884,66 @@ class OrderViewSet(AnyModuleViewSetMixin, viewsets.ModelViewSet):
             return Response({"detail": "Un-fired items on the order — fire the KOT before settling"},
                             status=400)
         t = order.totals()
-        tender = request.data.get("tender", "Cash")
         # Tender must be an active row in the payment-methods master
-        # (Settings > Masters) — a disabled or unknown tender can't take money.
+        # (Settings > Masters), and the role must be allowed to accept it —
+        # captains settle digital tenders tableside, drawer cash belongs at the
+        # counter (BRD 5.10). Shared by the single-tender and split paths.
         from apps.masters.models import PaymentMethod
-        if not PaymentMethod.objects.filter(name=tender, active=True).exists():
-            return Response({"detail": f"'{tender}' is not an active payment method"}, status=400)
-        # Role↔tender mapping: e.g. captains settle digital tenders tableside,
-        # but drawer-cash tenders belong at the cashier counter (BRD 5.10) —
-        # per-tender behavior comes from the master's captain_allowed flag.
         from apps.accounts.constants import role_can_tender
-        if not role_can_tender(getattr(request.user, "role", ""), tender):
-            return Response(
-                {"detail": f"Your role can't accept {tender} — collect it at the cashier counter"},
-                status=403,
-            )
+        role = getattr(request.user, "role", "")
+
+        def _tender_error(td):
+            if not PaymentMethod.objects.filter(name=td, active=True).exists():
+                return Response({"detail": f"'{td}' is not an active payment method"}, status=400)
+            if not role_can_tender(role, td):
+                return Response(
+                    {"detail": f"Your role can't accept {td} — collect it at the cashier counter"},
+                    status=403)
+            return None
+
         reference = request.data.get("reference", f"POS order {order.id}")
-        if tender == "Gateway":
-            from apps.integrations import services as integ
-            result = integ.charge_card(t["total"], request.data.get("token", ""), reference)
-            if result.get("status") != "approved":
-                return Response({"detail": result.get("reason", "payment declined")}, status=402)
-            reference = result["ref"]
-        Settlement.objects.create(tender=tender, amount=t["total"], reference=reference)
+        splits = request.data.get("splits")
+        if splits:
+            # Split the check into N shares that must sum to the exact total —
+            # each share can settle to its own tender (one guest cash, another
+            # card). Card gateway needs its own token per charge, so it stays on
+            # the single-tender path.
+            parsed, running = [], Decimal("0")
+            for sp in splits:
+                td = (sp.get("tender") or "Cash")
+                if td == "Gateway":
+                    return Response({"detail": "Card gateway can't be used inside a split — settle that share on its own"}, status=400)
+                err = _tender_error(td)
+                if err:
+                    return err
+                try:
+                    amt = Decimal(str(sp.get("amount")))
+                except (ArithmeticError, TypeError, ValueError):
+                    return Response({"detail": "invalid split amount"}, status=400)
+                if amt <= 0:
+                    return Response({"detail": "each split must be a positive amount"}, status=400)
+                parsed.append((td, amt))
+                running += amt
+            if len(parsed) < 2:
+                return Response({"detail": "a split needs at least two shares"}, status=400)
+            if running != t["total"]:
+                return Response({"detail": f"splits must sum to {t['total']} (got {running})"}, status=400)
+            for td, amt in parsed:
+                Settlement.objects.create(tender=td, amount=amt,
+                                          reference=f"{reference} (split {len(parsed)}-way)")
+            tender = f"Split {len(parsed)}-way"
+        else:
+            tender = request.data.get("tender", "Cash")
+            err = _tender_error(tender)
+            if err:
+                return err
+            if tender == "Gateway":
+                from apps.integrations import services as integ
+                result = integ.charge_card(t["total"], request.data.get("token", ""), reference)
+                if result.get("status") != "approved":
+                    return Response({"detail": result.get("reason", "payment declined")}, status=402)
+                reference = result["ref"]
+            Settlement.objects.create(tender=tender, amount=t["total"], reference=reference)
         self._finalize_promotions(order, t["total"])
         self._ensure_feedback(order)
         order.status = Order.SETTLED
