@@ -53,35 +53,57 @@ PASSWORD = "hearth123"
 class Command(BaseCommand):
     help = "Load demo data for Hearth (idempotent)."
 
+    def add_arguments(self, parser):
+        parser.add_argument(
+            "--boilerplate", action="store_true",
+            help="Seed only the functional base — the property shell, role logins and "
+                 "reference masters — with NO demo rooms, menu, guests, bookings or "
+                 "bills. A clean template a new customer starts from (lands in Setup). "
+                 "Omit the flag for the full showcase demo dataset.",
+        )
+
     @transaction.atomic
     def handle(self, *args, **options):
-        self.stdout.write("Seeding Hearth demo data…")
-        prop = self._property()
+        base_only = options["boilerplate"]
+        self.stdout.write("Seeding Hearth "
+                          + ("boilerplate (base only — no demo data)…" if base_only else "demo data…"))
+        # A new customer starts from Setup; the demo is a ready-to-show property.
+        prop = self._property(setup_done=not base_only)
         self._users()
-        room_types = self._room_types()
-        self._rooms(room_types)
-        self._reservations(room_types)
-        self._restaurant()
-        self._customers()
-        self._distribution(room_types)
-        self._supply_chain()
-        self._banquets()
-        self._hr()
+        # Everything below is demo content (catalog + guests) and demo
+        # transactions (bookings, bills, night audits) — skipped for the
+        # boilerplate so the owner builds their own from a blank slate.
+        if not base_only:
+            room_types = self._room_types()
+            self._rooms(room_types)
+            self._reservations(room_types)
+            self._restaurant()
+            self._customers()
+            self._distribution(room_types)
+            self._supply_chain()
+            self._banquets()
+            self._hr()
         self._masters()
-        self._activity()
+        if not base_only:
+            self._activity()
         self._branch_access()
-        self.stdout.write(self.style.SUCCESS(
-            f"Done. Property '{prop.name}' [{prop.edition}]. "
-            f"Logins: md / gm / frontoffice / cashier / housekeeping / hr (pwd: {PASSWORD})"
-        ))
+        if base_only:
+            self.stdout.write(self.style.SUCCESS(
+                f"Boilerplate ready — '{prop.name}', no demo data. The owner completes "
+                f"Setup, then adds rooms & menu. Logins: md / gm / … (pwd: {PASSWORD}). "
+                f"Run 'seed_demo' without --boilerplate for the full showcase demo."))
+        else:
+            self.stdout.write(self.style.SUCCESS(
+                f"Done. Property '{prop.name}' [{prop.edition}]. "
+                f"Logins: md / gm / frontoffice / cashier / housekeeping / hr (pwd: {PASSWORD})"))
 
-    def _property(self):
+    def _property(self, setup_done=True):
         prop, _ = Property.objects.get_or_create(
             id=1, defaults={"name": "Hearth Grand", "gstin": "29ABCDE1234F1Z5"}
         )
         prop.name = "Hearth Grand"
         prop.edition = "both"
-        prop.setup_done = True
+        prop.setup_done = setup_done
         if not prop.business_date:
             prop.business_date = date.today()
         prop.save()
