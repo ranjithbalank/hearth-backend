@@ -1,0 +1,9 @@
+name,sort_order,is_bar
+Starters,1,false
+Soups,2,false
+Mains,3,false
+Breads,4,false
+Rice & Biryani,5,false
+Desserts,6,false
+Beverages,7,false
+Cocktails,8,true

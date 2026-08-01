@@ -1,0 +1,6 @@
+name,department,role,country_code,phone,wage_type,monthly_salary,daily_rate,weekly_rate,branch
+Anita Sharma,Kitchen,Cook,+91,9000000001,monthly,22000,,,
+Ravi Kumar,Kitchen,Chef,+91,9000000002,daily,,700,,
+Priya Nair,Front Office,Receptionist,+91,9000000003,monthly,25000,,,
+Suresh Menon,Housekeeping,Housekeeping Attendant,+91,9000000004,daily,,650,,
+Deepa Rao,Bar,Bartender,+91,9000000005,weekly,,,4500,

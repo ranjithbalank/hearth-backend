@@ -1,0 +1,9 @@
+name,category,unit,opening_stock,min_stock_level,reorder_level,purchase_rate,storage_location,expiry_date
+Basmati Rice,Grains,kg,50,10,20,90,Dry Store,
+Wheat Flour,Grains,kg,35,8,15,45,Dry Store,
+Chicken,Meat,kg,30,5,15,220,Cold Room,2026-08-10
+Paneer,Dairy,kg,15,3,8,320,Cold Room,2026-08-05
+Milk,Dairy,l,40,10,20,60,Cold Room,2026-08-03
+Tomato,Vegetables,kg,25,5,12,40,Dry Store,
+Onion,Vegetables,kg,40,10,20,35,Dry Store,
+Cooking Oil,Oils,l,30,5,10,140,Dry Store,

@@ -1,0 +1,11 @@
+name,category,price,gst_rate,diet,station,short_code
+Paneer Tikka,Starters,320,5,veg,kitchen,PT
+Chicken 65,Starters,340,5,nonveg,kitchen,C65
+Masala Omelette,Starters,140,5,egg,kitchen,MO
+Tomato Soup,Soups,180,5,veg,kitchen,TS
+Chicken Biryani,Rice & Biryani,380,5,nonveg,kitchen,CB
+Veg Biryani,Rice & Biryani,320,5,veg,kitchen,VB
+Butter Naan,Breads,60,5,veg,kitchen,BN
+Paneer Butter Masala,Mains,340,5,veg,kitchen,PBM
+Gulab Jamun,Desserts,120,5,veg,kitchen,GJ
+Fresh Lime Soda,Beverages,90,5,veg,kitchen,FLS

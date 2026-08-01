@@ -1,0 +1,9 @@
+number,room_type_code,room_type_name,base_rate,floor
+101,STD,Standard,4500,1
+102,STD,Standard,4500,1
+103,STD,Standard,4500,1
+201,DLX,Deluxe,6500,2
+202,DLX,Deluxe,6500,2
+301,STE,Suite,9500,3
+302,STE,Suite,9500,3
+401,PRES,Presidential Suite,18000,4

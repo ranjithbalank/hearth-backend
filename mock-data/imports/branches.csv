@@ -1,0 +1,4 @@
+name,code,city,state,gstin,edition,invoice_prefix
+Hearth Grand - Airport,APT,Bengaluru,Karnataka,29ABCDE1234F1Z5,both,APT-INV
+Hearth Grand - MG Road,MGR,Bengaluru,Karnataka,29ABCDE1234F1Z6,both,MGR-INV
+Hearth Bistro - Indiranagar,IND,Bengaluru,Karnataka,29ABCDE1234F1Z7,restaurant,IND-INV
