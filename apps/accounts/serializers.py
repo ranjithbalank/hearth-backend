@@ -127,15 +127,23 @@ class PropertySerializer(serializers.ModelSerializer):
     # First-run flag for the (AllowAny) property read: true when no owner account
     # exists yet, so the client shows the create-Super-Admin onboarding step.
     needs_admin = serializers.SerializerMethodField()
+    # True only on a demo install (the full seed_demo personas exist), so the
+    # Login screen shows the "tap to sign in" chips there but not on a real
+    # property where those accounts don't exist.
+    demo_logins = serializers.SerializerMethodField()
 
     def get_needs_admin(self, obj):
         from .models import User
         return not User.objects.filter(is_superuser=True).exists()
 
+    def get_demo_logins(self, obj):
+        from .models import User
+        return User.objects.filter(username__in=["gm", "superadmin", "cashier"]).exists()
+
     class Meta:
         model = Property
         fields = [
-            "id", "name", "edition", "setup_done", "needs_admin", "business_date",
+            "id", "name", "edition", "setup_done", "needs_admin", "demo_logins", "business_date",
             "gstin", "address", "phone", "logo", "doc_header", "doc_footer",
             "doc_header_align", "doc_footer_align",
             "pos_doc_header", "pos_doc_footer", "pos_doc_header_align", "pos_doc_footer_align",
