@@ -124,6 +124,49 @@ class SetupView(APIView):
         return Response(PropertySerializer(prop).data)
 
 
+class BootstrapAdminView(APIView):
+    """First-run only: create the very first owner / Super Admin on a fresh
+    install (no accounts yet). Guarded — once any super admin exists this 403s,
+    so it can never be used to escalate on a live system. The client then signs
+    in with the credentials it just set, reusing the normal token flow."""
+
+    permission_classes = [AllowAny]
+
+    def post(self, request):
+        from django.contrib.auth.password_validation import validate_password
+        from django.core.exceptions import ValidationError as DjangoValidationError
+
+        from .constants import ROLE_SUPER_ADMIN
+
+        if User.objects.filter(is_superuser=True).exists():
+            return Response({"detail": "Setup is already complete — sign in instead."},
+                            status=status.HTTP_403_FORBIDDEN)
+        username = (request.data.get("username") or "").strip()
+        email = (request.data.get("email") or "").strip()
+        password = request.data.get("password") or ""
+        name = (request.data.get("name") or "").strip()
+        first, _, last = name.partition(" ")
+        if not username:
+            return Response({"detail": "A username is required"}, status=status.HTTP_400_BAD_REQUEST)
+        if User.objects.filter(username__iexact=username).exists():
+            return Response({"detail": "That username is already taken"}, status=status.HTTP_400_BAD_REQUEST)
+        if not email:
+            return Response({"detail": "An email is required"}, status=status.HTTP_400_BAD_REQUEST)
+        try:
+            validate_password(password)
+        except DjangoValidationError as exc:
+            return Response({"detail": " ".join(exc.messages)}, status=status.HTTP_400_BAD_REQUEST)
+        user = User.objects.create_user(
+            username=username, email=email, password=password,
+            first_name=first, last_name=last, role=ROLE_SUPER_ADMIN,
+            is_superuser=True, is_staff=True,
+        )
+        log_action(None, "bootstrap_admin", entity="User", entity_id=user.id,
+                   after={"username": username, "role": ROLE_SUPER_ADMIN})
+        return Response({"username": user.username, "role": user.role},
+                        status=status.HTTP_201_CREATED)
+
+
 class EntitlementView(APIView):
     """Reconfigure entitlements from Settings. Was IsAuthenticated only —
     the docstring claimed server-side enforcement but the permission class

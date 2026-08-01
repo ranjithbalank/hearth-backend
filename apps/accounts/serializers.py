@@ -124,11 +124,18 @@ class EntitlementSerializer(serializers.ModelSerializer):
 
 class PropertySerializer(serializers.ModelSerializer):
     entitlement = EntitlementSerializer(read_only=True)
+    # First-run flag for the (AllowAny) property read: true when no owner account
+    # exists yet, so the client shows the create-Super-Admin onboarding step.
+    needs_admin = serializers.SerializerMethodField()
+
+    def get_needs_admin(self, obj):
+        from .models import User
+        return not User.objects.filter(is_superuser=True).exists()
 
     class Meta:
         model = Property
         fields = [
-            "id", "name", "edition", "setup_done", "business_date",
+            "id", "name", "edition", "setup_done", "needs_admin", "business_date",
             "gstin", "address", "phone", "logo", "doc_header", "doc_footer",
             "doc_header_align", "doc_footer_align",
             "pos_doc_header", "pos_doc_footer", "pos_doc_header_align", "pos_doc_footer_align",

@@ -3,6 +3,7 @@ from rest_framework.routers import DefaultRouter
 
 from .views import (
     AuditLogView,
+    BootstrapAdminView,
     BranchViewSet,
     EntitlementView,
     FeatureModelView,
@@ -30,6 +31,7 @@ urlpatterns = [
     path("me/", MeView.as_view(), name="me"),
     path("property/", PropertyView.as_view(), name="property"),
     path("setup/", SetupView.as_view(), name="setup"),
+    path("bootstrap/", BootstrapAdminView.as_view(), name="bootstrap"),
     path("entitlements/", EntitlementView.as_view(), name="entitlements"),
     path("feature-model/", FeatureModelView.as_view(), name="feature-model"),
     path("roles/matrix/", RoleMatrixView.as_view(), name="roles-matrix"),

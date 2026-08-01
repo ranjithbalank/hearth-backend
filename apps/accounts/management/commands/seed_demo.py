@@ -67,13 +67,15 @@ class Command(BaseCommand):
         base_only = options["boilerplate"]
         self.stdout.write("Seeding Hearth "
                           + ("boilerplate (base only — no demo data)…" if base_only else "demo data…"))
-        # A new customer starts from Setup; the demo is a ready-to-show property.
+        # A new customer starts from first-run onboarding; the demo is a
+        # ready-to-show property.
         prop = self._property(setup_done=not base_only)
-        self._users()
-        # Everything below is demo content (catalog + guests) and demo
-        # transactions (bookings, bills, night audits) — skipped for the
-        # boilerplate so the owner builds their own from a blank slate.
+        # No accounts in the boilerplate — first-run onboarding creates the
+        # Super Admin. Everything else below is demo content (catalog + guests)
+        # and demo transactions (bookings, bills, night audits), all skipped so
+        # the owner builds their own from a blank slate.
         if not base_only:
+            self._users()
             room_types = self._room_types()
             self._rooms(room_types)
             self._reservations(room_types)
@@ -86,11 +88,11 @@ class Command(BaseCommand):
         self._masters()
         if not base_only:
             self._activity()
-        self._branch_access()
+            self._branch_access()  # grants seeded staff a branch to operate in
         if base_only:
             self.stdout.write(self.style.SUCCESS(
-                f"Boilerplate ready — '{prop.name}', no demo data. The owner completes "
-                f"Setup, then adds rooms & menu. Logins: md / gm / … (pwd: {PASSWORD}). "
+                f"Boilerplate ready — '{prop.name}', no accounts, no demo data. First run "
+                f"opens onboarding to create the Super Admin, then property setup. "
                 f"Run 'seed_demo' without --boilerplate for the full showcase demo."))
         else:
             self.stdout.write(self.style.SUCCESS(
