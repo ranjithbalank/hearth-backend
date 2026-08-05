@@ -5,13 +5,28 @@ from .models import Folio, FolioLine, NightAuditRun, Settlement
 
 class FolioLineSerializer(serializers.ModelSerializer):
     kind_label = serializers.CharField(source="get_kind_display", read_only=True)
+    # Rule 46(f)'s SAC code, resolved server-side from GST Master. The browser
+    # print path and the server PDF are two renderers of the same invoice, so
+    # the code they show has to come from one place — deriving it again in
+    # TypeScript is how the two drift apart.
+    hsn_sac = serializers.SerializerMethodField()
 
     class Meta:
         model = FolioLine
         fields = [
             "id", "kind", "kind_label", "description", "source", "taxable",
-            "cgst", "sgst", "total", "gst_rate", "created_at",
+            "cgst", "sgst", "total", "gst_rate", "hsn_sac", "created_at",
         ]
+
+    def get_hsn_sac(self, obj):
+        from apps.tax.models import hsn_for_kinds
+
+        # Cached per serialization pass — one query for the whole folio rather
+        # than one per line.
+        cache = self.context.setdefault("_hsn", {}) if self.context is not None else {}
+        if obj.kind not in cache:
+            cache.update(hsn_for_kinds({obj.kind}))
+        return cache.get(obj.kind, "")
 
 
 class SettlementSerializer(serializers.ModelSerializer):

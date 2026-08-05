@@ -7,7 +7,7 @@ These functions are the integration points referenced in the plan:
   - run_night_audit -> atomic, resumable day-end close
 """
 from datetime import timedelta
-from decimal import Decimal
+from decimal import Decimal, InvalidOperation
 
 from django.db import transaction
 from django.utils import timezone
@@ -21,9 +21,10 @@ from .models import Folio, FolioLine, NightAuditRun, Settlement
 
 def _next_invoice_no():
     from apps.accounts.models import Property
-    from apps.accounts.numbering import next_document_number
+    from apps.accounts.numbering import GST_MAX_DOC_NUMBER, next_document_number
     prop = Property.objects.first()
-    return next_document_number(Folio, "invoice_no", prop.invoice_prefix if prop else "HRT")
+    return next_document_number(Folio, "invoice_no", prop.invoice_prefix if prop else "HRT",
+                                max_total=GST_MAX_DOC_NUMBER)
 
 
 @transaction.atomic
@@ -122,14 +123,46 @@ def post_charge(folio, *, kind, description, amount, gst_rate, source="",
 
 @transaction.atomic
 def settle_folio(folio, payments, user=None, generate_invoice=True):
-    """payments: list of {tender, amount, reference?, tip?}. Multi-tender (FR-PAY-002)."""
+    """payments: list of {tender, amount, reference?, tip?}. Multi-tender (FR-PAY-002).
+
+    Two guards that were missing, both found by the Aug-2026 logic audit:
+
+    * Every amount must be positive. A negative settlement is a payment that
+      *increases* what is owed — nothing in the product needs one (a refund is
+      its own flow, with its own audit trail), and it was a way to inflate a
+      balance, or reopen a closed one, with a row that reads as a payment.
+    * A folio that is already settled takes no further payment. Without this,
+      hitting Settle twice on a paid bill charged the guest a second time and
+      left the money sitting as a credit nobody reconciles.
+    """
+    # Re-read the row under a lock before deciding anything. Checking the
+    # in-memory instance was correct with one request in flight and wrong with
+    # two: both terminals load the folio, both see it open, both settle, and the
+    # guest pays the bill twice. The lock serialises the decision on Postgres;
+    # re-reading also fixes the far more common case of a stale instance, which
+    # is what the check was actually failing on.
+    fresh = Folio.objects.select_for_update().get(pk=folio.pk)
+    if fresh.status != Folio.OPEN:
+        raise ValueError("This folio is already settled — it can't take another payment.")
+    parsed = []
     for p in payments:
+        try:
+            amount = Decimal(str(p.get("amount", 0)))
+            tip = Decimal(str(p.get("tip", 0)))
+        except (InvalidOperation, TypeError):
+            raise ValueError("Payment amounts must be numbers.")
+        if amount <= 0:
+            raise ValueError("A payment must be for a positive amount.")
+        if tip < 0:
+            raise ValueError("A tip can't be negative.")
+        parsed.append((p, amount, tip))
+    for p, amount, tip in parsed:
         Settlement.objects.create(
             folio=folio,
             tender=p.get("tender", "Cash"),
-            amount=Decimal(str(p.get("amount", 0))),
+            amount=amount,
             reference=p.get("reference", ""),
-            tip=Decimal(str(p.get("tip", 0))),
+            tip=tip,
         )
     if folio.balance <= 0:
         folio.status = Folio.SETTLED
@@ -155,18 +188,50 @@ def post_stay_room_charges(folio, user=None):
     if rate <= 0:
         return Decimal("0")
     nights = max(1, resv.nights or 1)
-    already = folio.lines.filter(kind=FolioLine.KIND_ROOM).count()
+    billed, unkeyed = _nights_already_billed(folio)
     posted = Decimal("0")
     gst_rate = tax.room_rate_for(rate)
-    for i in range(already, nights):
+    for i in range(nights):
+        source = f"stay:{folio.id}:{i + 1}"
+        if source in billed:
+            continue
+        if unkeyed > 0:
+            # A night the audit (or a pre-existing row) billed without a
+            # per-night key. It still covers a night of this stay.
+            unkeyed -= 1
+            continue
         line = post_charge(
             folio, kind=FolioLine.KIND_ROOM,
             description=f"Room charge — night {i + 1}",
             amount=rate, gst_rate=gst_rate,
-            source=f"stay:{folio.id}:{i + 1}", user=user,
+            source=source, user=user,
         )
         posted += line.total
     return posted
+
+
+def _nights_already_billed(folio):
+    """(per-night source keys already posted, count of room lines without one).
+
+    Two things had to be reconciled here, and getting either wrong bills a
+    guest twice for a bed they slept in once:
+
+    * Room nights are posted by two different paths under two different source
+      schemes — the night audit writes "night-audit:<date>", check-out writes
+      "stay:<folio>:<n>". Only counting the keyed ones would re-bill every
+      night the audit had already captured.
+    * This used to be a plain count of the folio's room lines, which collapsed
+      the moment a line moved: transfer one night to a companion's folio and
+      the count dropped, so the night was posted again. The keyed lookup is
+      therefore global — a transferred line still exists, just somewhere else.
+    """
+    prefix = f"stay:{folio.id}:"
+    billed = set(
+        FolioLine.objects.filter(source__startswith=prefix).values_list("source", flat=True)
+    )
+    unkeyed = (folio.lines.filter(kind=FolioLine.KIND_ROOM)
+               .exclude(source__startswith=prefix).count())
+    return billed, unkeyed
 
 
 def pending_room_charges(folio):
@@ -180,11 +245,18 @@ def pending_room_charges(folio):
     if rate <= 0:
         return []
     nights = max(1, resv.nights or 1)
-    already = folio.lines.filter(kind=FolioLine.KIND_ROOM).count()
+    # Exactly the rule post_stay_room_charges uses, so the preview the desk
+    # quotes and the charges that actually post can never disagree.
+    billed, unkeyed = _nights_already_billed(folio)
     zero_tax = effective_billing_mode(folio) == "without_gst"
     gst_rate = tax.room_rate_for(rate)
     out = []
-    for i in range(already, nights):
+    for i in range(nights):
+        if f"stay:{folio.id}:{i + 1}" in billed:
+            continue
+        if unkeyed > 0:
+            unkeyed -= 1
+            continue
         b = tax.compute(rate, Decimal("0") if zero_tax else gst_rate)
         out.append({"description": f"Room charge — night {i + 1} (due at check-out)",
                     "total": b["total"]})
@@ -196,17 +268,35 @@ def company_account(name):
 
     Matches an existing corporate customer by name, else creates one keyed by a
     synthetic AR handle (companies often have no mobile on file).
+
+    That handle used to be ("CO:" + name)[:20], truncated to fit the 20-char
+    mobile column. Two customers whose names agreed for their first 17
+    characters therefore produced the same key — "Infosys Technologies Ltd" and
+    "Infosys Technologies Pvt" both became "CO:Infosys Technolog" — so
+    get_or_create returned the FIRST company and the second one's folio was
+    billed to it. Real money on the wrong receivable, silently. The key is now
+    a digest of the full name: fixed width, no collisions between distinct
+    names. (Aug-2026 logic audit.)
+
+    Existing rows are unaffected: the name lookup below runs first, so a company
+    already keyed the old way is still found by name and never re-created.
     """
+    import hashlib
+
     from apps.crm.models import Customer
     name = (name or "").strip()
     if not name:
         return None
-    company = Customer.objects.filter(name=name, customer_type=Customer.TYPE_CORPORATE).first()
+    # iexact, because "ACME Ltd" and "Acme Ltd" are one debtor to everyone
+    # except the database.
+    company = Customer.objects.filter(
+        name__iexact=name, customer_type=Customer.TYPE_CORPORATE).first()
     if not company:
-        key = ("CO:" + name)[:20]
+        digest = hashlib.sha1(name.casefold().encode("utf-8")).hexdigest()[:16]
         company, _ = Customer.objects.get_or_create(
-            mobile=key, defaults={"name": name, "customer_type": Customer.TYPE_CORPORATE,
-                                  "btc_enabled": True})
+            mobile=f"CO:{digest}",
+            defaults={"name": name, "customer_type": Customer.TYPE_CORPORATE,
+                      "btc_enabled": True})
     return company
 
 

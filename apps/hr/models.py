@@ -3,6 +3,7 @@ from datetime import timedelta
 from django.conf import settings
 from django.db import models
 from django.utils import timezone
+from apps.accounts.validators import NON_NEGATIVE
 
 
 class Employee(models.Model):
@@ -42,9 +43,9 @@ class Employee(models.Model):
     WEEKLY = "weekly"
     WAGE_CHOICES = [(MONTHLY, "Monthly salary"), (DAILY, "Daily wage"), (WEEKLY, "Weekly wage")]
     wage_type = models.CharField(max_length=10, choices=WAGE_CHOICES, default=MONTHLY)
-    monthly_salary = models.DecimalField(max_digits=12, decimal_places=2, default=0)
-    daily_rate = models.DecimalField(max_digits=10, decimal_places=2, default=0)
-    weekly_rate = models.DecimalField(max_digits=10, decimal_places=2, default=0)
+    monthly_salary = models.DecimalField(max_digits=12, decimal_places=2, default=0, validators=NON_NEGATIVE)
+    daily_rate = models.DecimalField(max_digits=10, decimal_places=2, default=0, validators=NON_NEGATIVE)
+    weekly_rate = models.DecimalField(max_digits=10, decimal_places=2, default=0, validators=NON_NEGATIVE)
     # Salaried structure: True = the standard basic/HRA/allowances split,
     # False = the whole gross is basic (no allowance components). Note the
     # PF effect: basic is the PF base, so an all-basic structure deducts
@@ -211,7 +212,7 @@ class SalaryAdvance(models.Model):
     amount = models.DecimalField(max_digits=12, decimal_places=2)
     # 0 for advances (recover everything next month); loans repay this much
     # per payroll month.
-    monthly_installment = models.DecimalField(max_digits=10, decimal_places=2, default=0)
+    monthly_installment = models.DecimalField(max_digits=10, decimal_places=2, default=0, validators=NON_NEGATIVE)
     recovered = models.DecimalField(max_digits=12, decimal_places=2, default=0)
     status = models.CharField(max_length=10, default=ACTIVE)
     note = models.CharField(max_length=200, blank=True)

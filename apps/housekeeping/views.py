@@ -6,6 +6,7 @@ from rest_framework.response import Response
 
 from apps.accounts.constants import ROLE_HOUSEKEEPING
 from apps.accounts.models import log_action
+from apps.accounts.rbac import base_role, role_names_for
 from apps.accounts.permissions import ModuleViewSetMixin, shared_or_visible
 from apps.masters.views import MasterViewSet
 from apps.rooms.models import Room
@@ -177,7 +178,7 @@ class HousekeepingTaskViewSet(ModuleViewSetMixin, viewsets.ModelViewSet):
             raise ValidationError(
                 {"detail": f"Room {room.number} already has an open task — reassign or complete it first"})
         assigned_to = serializer.validated_data.get("assigned_to")
-        if not assigned_to or assigned_to.role != ROLE_HOUSEKEEPING:
+        if not assigned_to or base_role(assigned_to.role) != ROLE_HOUSEKEEPING:
             raise ValidationError({"detail": "Pick an active Housekeeping-role attendant to assign"})
         checklist = [{"label": c.label, "done": False}
                      for c in ChecklistItem.objects.filter(active=True).order_by("sort_order", "label")]
@@ -190,7 +191,7 @@ class HousekeepingTaskViewSet(ModuleViewSetMixin, viewsets.ModelViewSet):
         """Housekeeping-role logins for the assignment picker — same shape
         as pos.TableViewSet.captains."""
         from apps.accounts.models import User
-        qs = (User.objects.filter(role=ROLE_HOUSEKEEPING, is_active=True)
+        qs = (User.objects.filter(role__in=role_names_for(ROLE_HOUSEKEEPING), is_active=True)
               .order_by("first_name", "username"))
         return Response([{"id": u.id, "name": u.get_full_name() or u.username} for u in qs])
 
@@ -204,7 +205,8 @@ class HousekeepingTaskViewSet(ModuleViewSetMixin, viewsets.ModelViewSet):
             task.assigned_to = None
         else:
             from apps.accounts.models import User
-            attendant = User.objects.filter(pk=attendant_id, role=ROLE_HOUSEKEEPING).first()
+            attendant = User.objects.filter(
+                pk=attendant_id, role__in=role_names_for(ROLE_HOUSEKEEPING)).first()
             if not attendant:
                 return Response({"detail": "Not a Housekeeping login — pick a valid attendant"}, status=400)
             task.assigned_to = attendant

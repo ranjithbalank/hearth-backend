@@ -8,7 +8,10 @@ from rest_framework.response import Response
 from rest_framework.views import APIView
 
 from apps.accounts.constants import currency_symbol
-from apps.accounts.permissions import ModulePermission
+from apps.accounts.permissions import (
+    ModulePermission, user_branch_ids, visible_branch_ids,
+)
+from apps.accounts.rbac import acting_role, allowed_modules_for, base_role
 from apps.crm.models import Customer
 from apps.frontoffice.models import FolioLine
 from apps.pos.models import Order
@@ -29,6 +32,29 @@ def _parse_range(request):
     return parse("from"), parse("to")
 
 
+def _scope(qs, branches, field="location_id"):
+    """Narrow a queryset to the branches this request may see.
+
+    `branches` is whatever `visible_branch_ids(request)` returned, and each of
+    its three shapes means something different:
+
+      "*"    an all-branch role that hasn't picked one — the group view.
+      {ids}  a branch was selected, or the caller is assigned to these.
+      set()  a branch-restricted user with no assignment: nothing, never
+             everything. Reading a group total is the failure this guards.
+
+    Note that it must NOT be driven by `resolve_active_branch()` alone: that
+    returns None whenever no X-Branch-Id header was sent, which is also what a
+    branch-restricted user's first page load looks like. Treating that None as
+    "don't filter" is how a restricted login ends up reading the whole group.
+    """
+    if branches == "*":
+        return qs
+    if not branches:
+        return qs.none()
+    return qs.filter(**{f"{field}__in": branches})
+
+
 def _between(qs, field, f, t, date_field=False):
     """Filter a queryset's datetime (or date) field to the [f, t] day window."""
     suffix = "" if date_field else "__date"
@@ -39,22 +65,43 @@ def _between(qs, field, f, t, date_field=False):
     return qs
 
 
-def _room_kpis(f=None, t=None):
+def _room_kpis(f=None, t=None, branches="*"):
     # Room-status counts are a live snapshot; only the revenue side is
     # windowed by the date range.
-    rooms = list(Room.objects.all())
+    rooms = list(_scope(Room.objects.all(), branches))
     total = len(rooms) or 1
     occupied = sum(1 for r in rooms if r.status == Room.OCCUPIED)
     available = sum(1 for r in rooms if r.status in Room.SELLABLE)
     dirty = sum(1 for r in rooms if r.status in (Room.VACANT_DIRTY, Room.CLEANING))
     ooo = sum(1 for r in rooms if r.status == Room.OOO)
-    room_lines = _between(FolioLine.objects.filter(kind=FolioLine.KIND_ROOM),
-                          "created_at", f, t)
+    # The folio carries the branch; its lines inherit it.
+    room_lines = _scope(FolioLine.objects.filter(kind=FolioLine.KIND_ROOM),
+                        branches, "folio__location_id")
+    room_lines = _between(room_lines, "created_at", f, t)
     room_revenue = sum((l.taxable for l in room_lines), start=Decimal("0"))
-    rooms_sold = room_lines.count() or 1
+    # The true count. It used to be `count() or 1`, which is fine as a division
+    # guard but wrong as a numerator — and it was used as both.
+    rooms_sold = room_lines.count()
+    nights = _nights_in_window(room_lines, f, t)
     occupancy = round(occupied / total * 100, 1)
-    adr = round(float(room_revenue) / rooms_sold, 2)
-    revpar = round(float(room_revenue) / total, 2)
+    adr = round(float(room_revenue) / (rooms_sold or 1), 2)
+    # RevPAR is revenue per available room PER NIGHT, so the denominator is
+    # room-nights — rooms x nights in the window — not the room count. Dividing
+    # by rooms alone multiplied the figure by the length of the period: over a
+    # 17-day month it read 17x high, which is how a dashboard ended up showing
+    # RevPAR above ADR. That is arithmetically impossible (RevPAR = ADR x
+    # occupancy, and occupancy <= 1), and it is the first thing any hotelier
+    # notices on the screen.
+    revpar = round(float(room_revenue) / (total * nights), 2)
+    # Occupancy over the same window as ADR/RevPAR, so the three reconcile.
+    # `occupancy_pct` stays the live snapshot the floor actually works from.
+    #
+    # This was gated on `if room_revenue`, to suppress the phantom occupancy the
+    # `or 1` above produced when nothing had been sold at all. With the real
+    # count it falls out to 0.0 on its own — and a comped or zero-rate night now
+    # reports the room as occupied, which it was. Occupancy counts rooms, not
+    # money; a free upgrade is still a room that couldn't be sold twice.
+    period_occupancy = round(rooms_sold / (total * nights) * 100, 1)
     return {
         "rooms_total": len(rooms),
         "occupied": occupied,
@@ -62,30 +109,179 @@ def _room_kpis(f=None, t=None):
         "dirty": dirty,
         "ooo": ooo,
         "occupancy_pct": occupancy,
+        "period_occupancy_pct": period_occupancy,
+        "nights": nights,
+        "rooms_sold": rooms_sold,
         "adr": adr,
         "revpar": revpar,
         "room_revenue": str(room_revenue),
     }
 
 
-def _fnb_kpis(f=None, t=None):
-    orders = _between(Order.objects.filter(
-        status__in=[Order.SETTLED, Order.POSTED_TO_ROOM]
-    ), "created_at", f, t).prefetch_related("lines__menu_item")
+def _dashboard_period(request):
+    """The window the dashboard's money KPIs cover: month-to-date on the
+    property's business date, unless the caller asks for something else.
+
+    Business date rather than the wall clock, because a property mid-night-audit
+    is still trading yesterday and its dashboard should agree with its folios.
+    """
+    from django.utils import timezone
+
+    from apps.accounts.views import get_property
+
+    f, t = _parse_range(request)
+    if f and t:
+        # Now that the screen has a custom range picker, the two dates arrive
+        # in whatever order they were typed. Reversed, every windowed query
+        # would filter >= the later date AND <= the earlier one and the whole
+        # dashboard would read zero — which looks like a dead property, not a
+        # mis-typed date.
+        return (f, t) if f <= t else (t, f)
+    prop = get_property()
+    today = getattr(prop, "business_date", None) or timezone.localdate()
+    return today.replace(day=1), today
+
+
+def _period_label(f, t):
+    """Name the window if it is one of the ones the screen offers, else call it
+    a custom range.
+
+    Named here rather than in the client so the label can never disagree with
+    the figures: the response carries the window and its name together, and a
+    screen still showing the previous period's numbers is still showing the
+    previous period's label with them.
+    """
+    from datetime import timedelta
+
+    from django.utils import timezone
+
+    from apps.accounts.views import get_property
+
+    today = getattr(get_property(), "business_date", None) or timezone.localdate()
+    if f == t:
+        if t == today:
+            return "Today"
+        if t == today - timedelta(days=1):
+            return "Yesterday"
+    if t == today:
+        if f == today.replace(day=1):
+            return "Month to date"
+        if f == today - timedelta(days=6):
+            return "Last 7 days"
+    prev_month_end = today.replace(day=1) - timedelta(days=1)
+    if f == prev_month_end.replace(day=1) and t == prev_month_end:
+        return "Last month"
+    return "Custom range"
+
+
+def _previous_window(f, t):
+    """The equal-length window immediately before [f, t].
+
+    Deliberately the preceding N days rather than "the same month last year" or
+    the whole previous calendar month: month-to-date on the 5th covers 5 days,
+    and comparing 5 days of trading against a full 31-day month would report a
+    catastrophe every time. Like-for-like length is the only comparison that
+    means anything mid-period. Year-on-year is the Executive Overview's job.
+    """
+    from datetime import timedelta
+
+    span = (t - f).days + 1
+    prev_to = f - timedelta(days=1)
+    return prev_to - timedelta(days=span - 1), prev_to
+
+
+def _nights_in_window(room_lines, f, t):
+    """How many nights the ADR/RevPAR window spans.
+
+    An explicit range is authoritative. Without one, fall back to the span the
+    data actually covers rather than assuming a single night — a caller asking
+    for "everything" still wants a per-night figure, not the whole period's
+    revenue divided by the room count.
+    """
+    if f and t:
+        return max(1, (t - f).days + 1)
+    first = room_lines.order_by("created_at").values_list("created_at", flat=True).first()
+    last = room_lines.order_by("-created_at").values_list("created_at", flat=True).first()
+    if not first or not last:
+        return 1
+    return max(1, (last.date() - first.date()).days + 1)
+
+
+def _fnb_kpis(f=None, t=None, branches="*"):
+    orders = _scope(Order.objects.filter(
+        status__in=[Order.SETTLED, Order.POSTED_TO_ROOM]), branches)
+    orders = _between(orders, "created_at", f, t).prefetch_related("lines__menu_item")
     total = Decimal("0")
     by_mode = {Order.DINEIN: Decimal("0"), Order.TAKEAWAY: Decimal("0"),
                Order.DELIVERY: Decimal("0")}
     count = 0
     for o in orders:
-        t = o.totals()["total"]
-        total += t
-        by_mode[o.mode] = by_mode.get(o.mode, Decimal("0")) + t
+        # Not `t` — that is the window bound this function was called with.
+        order_total = o.totals()["total"]
+        total += order_total
+        by_mode[o.mode] = by_mode.get(o.mode, Decimal("0")) + order_total
         count += 1
     return {
         "fnb_sales": str(total),
         "order_count": count,
         "by_mode": {k: str(v) for k, v in by_mode.items()},
     }
+
+
+def _comparison(sector, f, t, branches, banquets):
+    """The same figures over the window immediately before this one, so every
+    headline can say which way it is moving.
+
+    Computed by calling the very same KPI functions rather than a leaner
+    hand-rolled aggregate: a delta between two figures that were defined even
+    slightly differently is worse than no delta at all, because it looks
+    authoritative. Only the fields the screen actually compares are returned —
+    the room-status counts in `_room_kpis` are a live snapshot and have no
+    historical meaning.
+    """
+    pf, pt = _previous_window(f, t)
+    out = {"from": str(pf), "to": str(pt)}
+    if sector != "restaurant":
+        r = _room_kpis(pf, pt, branches)
+        out["rooms"] = {
+            "room_revenue": r["room_revenue"],
+            "adr": r["adr"],
+            "revpar": r["revpar"],
+            # The period figure, not the live one — the live snapshot describes
+            # this minute and has no counterpart in a window that has closed.
+            "occupancy_pct": r["period_occupancy_pct"],
+        }
+    if sector != "hotel":
+        fn = _fnb_kpis(pf, pt, branches)
+        out["fnb"] = {"fnb_sales": fn["fnb_sales"], "order_count": fn["order_count"]}
+    if banquets:
+        out["banquets"] = _banquet_kpis(pf, pt, branches)
+    return out
+
+
+def _banquet_kpis(f=None, t=None, branches="*"):
+    """Banquet revenue in the window — the third earning stream, and until now
+    the only one the dashboard drew in the trend chart without ever putting a
+    figure to it. The revenue-mix donut was rooms + F&B, so on a property doing
+    banquet business the mix didn't add up to the line above it.
+
+    Same rows and same date basis as the trend's banquet series (confirmed and
+    completed events, by event date, scoped through the function space), so the
+    two agree by construction.
+    """
+    from apps.banquets.models import Event
+
+    # An event has no branch column; the function space it books does.
+    events = _scope(
+        Event.objects.filter(status__in=[Event.CONFIRMED, Event.COMPLETED]),
+        branches, "space__location_id",
+    )
+    events = _between(events, "event_date", f, t, date_field=True)
+    # bill_subtotal is a Python property (package + catering), so this is a
+    # walk rather than an aggregate — the window keeps the row count small.
+    events = list(events)
+    total = sum((e.bill_subtotal for e in events), start=Decimal("0"))
+    return {"revenue": str(total), "events": len(events)}
 
 
 class ModuleAPIView(APIView):
@@ -106,7 +302,96 @@ def _receivables():
     }
 
 
-def _occupancy_forecast(days=14):
+def _floor_state(branches="*"):
+    """What the property looks like this minute — the state a duty manager
+    walks the floor with, as opposed to the money KPIs above it.
+
+    Deliberately live counts with no date window: "how many are in the house
+    right now" has no month-to-date equivalent.
+    """
+    rooms = _scope(Room.objects.all(), branches)
+    total = rooms.count()
+    clean = rooms.filter(status__in=list(Room.SELLABLE)).count()
+    orders = _scope(Order.objects.all(), branches)
+    return {
+        "in_house": rooms.filter(status=Room.OCCUPIED).count(),
+        "rooms_total": total,
+        "rooms_clean": clean,
+        # Housekeeping's progress through the property, as a share — the number
+        # a GM asks for at 11am ("are we ready for the arrivals?").
+        "clean_pct": round(clean / total * 100) if total else 0,
+        # Anything not yet settled is still the floor's problem: taken but not
+        # paid (open), sent to the kitchen (kot_fired), or printed (billed).
+        "open_tickets": orders.filter(
+            status__in=[Order.OPEN, Order.KOT_FIRED, Order.BILLED]).count(),
+        "kots_pending": orders.filter(status=Order.KOT_FIRED).count(),
+    }
+
+
+def _money_detail(f=None, t=None, branches="*", limit=5):
+    """The commercial detail behind the F&B tile: how guests actually paid,
+    what sold, and what was given away."""
+    from django.db.models import Sum
+
+    from apps.frontoffice.models import Settlement
+    from apps.pos.models import OrderLine
+
+    paid = _scope(Settlement.objects.all(), branches, "folio__location_id")
+    paid = _between(paid, "created_at", f, t)
+    mix = [{"label": row["tender"], "value": str(row["total"] or 0)}
+           for row in paid.values("tender").annotate(total=Sum("amount")).order_by("-total")
+           if row["total"]]
+
+    sold = _scope(Order.objects.filter(status__in=[Order.SETTLED, Order.POSTED_TO_ROOM]),
+                  branches)
+    sold = _between(sold, "created_at", f, t)
+    lines = (OrderLine.objects.filter(order__in=sold)
+             .values("menu_item__name")
+             .annotate(qty=Sum("qty"))
+             .order_by("-qty")[:limit])
+    top = [{"label": r["menu_item__name"], "qty": r["qty"]} for r in lines if r["menu_item__name"]]
+
+    # Discount is computed per order (it can be a percentage, and it is
+    # apportioned across lines), so there is no column to sum — one pass over
+    # the same orders the F&B tile already counts.
+    discount = sum((o.totals()["discount"] for o in sold.prefetch_related("lines__menu_item")),
+                   start=Decimal("0"))
+    return {"payment_mix": mix, "top_items": top, "discount": str(discount)}
+
+
+def _branch_rollup(f=None, t=None, branches="*"):
+    """One row per branch — the only view that shows every property at once.
+
+    The branch switcher answers "how is this one doing"; it cannot answer "which
+    one is behind", because you can only hold one branch at a time. Rows are
+    limited to the branches the caller may see, so this is not a way around the
+    scoping everything else obeys.
+    """
+    from apps.accounts.models import Branch
+    qs = Branch.objects.filter(status=Branch.STATUS_ACTIVE).order_by("name")
+    if branches != "*":
+        if not branches:
+            return []
+        qs = qs.filter(id__in=branches)
+    rows = []
+    for b in qs:
+        one = {b.id}
+        rooms = _room_kpis(f, t, one)
+        fnb = _fnb_kpis(f, t, one)
+        rows.append({
+            "id": b.id, "code": b.code, "name": b.name,
+            "occupancy_pct": rooms["occupancy_pct"],
+            "occupied": rooms["occupied"],
+            "rooms_total": rooms["rooms_total"],
+            "room_revenue": rooms["room_revenue"],
+            "adr": rooms["adr"],
+            "fnb_sales": fnb["fnb_sales"],
+            "covers": fnb["order_count"],
+        })
+    return rows
+
+
+def _occupancy_forecast(days=14, branches="*"):
     """Forward occupancy & room-revenue projection from reservations on the
     books — the pickup curve a revenue manager reads to price the coming
     fortnight. A night counts a booking if it spans that night
@@ -115,7 +400,7 @@ def _occupancy_forecast(days=14):
     from datetime import timedelta
     from apps.reservations.models import Reservation
     biz = _business_date()
-    total = Room.objects.count() or 1
+    total = _scope(Room.objects.all(), branches).count() or 1
     dead = (Reservation.CANCELLED, Reservation.NO_SHOW)
     nights = [biz + timedelta(days=i) for i in range(days)]
     lo, hi = nights[0], nights[-1]
@@ -123,7 +408,9 @@ def _occupancy_forecast(days=14):
     rev = {d: Decimal("0") for d in nights}
     arr = {d: 0 for d in nights}
     dep = {d: 0 for d in nights}
-    for r in Reservation.objects.all():
+    # A reservation reaches its branch through the room it holds. One without a
+    # room yet can't be placed, so it counts only in the unscoped group view.
+    for r in _scope(Reservation.objects.all(), branches, "room__location_id"):
         if r.status in dead:
             continue
         if lo <= r.checkin_date <= hi:
@@ -199,7 +486,7 @@ def _forward_book(banquets=False):
 
 
 def _revenue_trend(include_rooms=True, include_fnb=True, include_banquets=False,
-                   days=14, f=None, t=None):
+                   days=14, f=None, t=None, branches="*"):
     """Per-day revenue for the dashboard's trend chart: rooms from night-audit
     runs (revenue posts by business date), F&B from settled/room-posted orders
     by order date, banquets from confirmed/completed events by event date.
@@ -214,20 +501,41 @@ def _revenue_trend(include_rooms=True, include_fnb=True, include_banquets=False,
     # Longer windows label months for readability; short ones keep day+month.
     date_fmt = "%d %b" if span <= 60 else "%d %b %y"
     out = {"days": [d.strftime(date_fmt) for d in labels]}
+    from django.utils import timezone
     if include_rooms:
-        from apps.frontoffice.models import NightAuditRun
+        # Room revenue per day comes from the folio lines, not from
+        # NightAuditRun totals. Three reasons, in order of weight:
+        #
+        #  1. A NightAuditRun has no branch. The audit runs once for the whole
+        #     group and writes one row per business date, so its total cannot be
+        #     split — a per-branch chart could not be drawn from it at all.
+        #  2. It is not the whole picture anyway. Room charges also reach a
+        #     folio outside the audit, and those runs don't count them: on this
+        #     data the audit rows total a fraction of the room revenue on the
+        #     folios for the same window.
+        #  3. `_room_kpis` already derives room_revenue from these same lines.
+        #     Reading the runs here meant the KPI tile and the chart beside it
+        #     were quoting two different numbers for the same thing.
+        #
+        # Because both the group and the per-branch case now sum one set of
+        # rows, the branches add back up to the group by construction.
         by = {}
-        for r in NightAuditRun.objects.filter(business_date__gte=labels[0],
-                                              business_date__lte=labels[-1]):
-            by[r.business_date] = by.get(r.business_date, Decimal("0")) + r.room_revenue
+        lines = _scope(FolioLine.objects.filter(kind=FolioLine.KIND_ROOM),
+                       branches, "folio__location_id")
+        lines = lines.filter(created_at__date__gte=labels[0],
+                             created_at__date__lte=labels[-1])
+        for created, taxable in lines.values_list("created_at", "taxable"):
+            d = timezone.localtime(created).date()
+            by[d] = by.get(d, Decimal("0")) + taxable
         out["rooms"] = [float(by.get(d, 0)) for d in labels]
     if include_fnb:
-        from django.utils import timezone
         by = {}
-        orders = (Order.objects.filter(status__in=[Order.SETTLED, Order.POSTED_TO_ROOM],
-                                       created_at__date__gte=labels[0],
-                                       created_at__date__lte=labels[-1])
-                  .prefetch_related("lines__menu_item"))
+        orders = _scope(
+            Order.objects.filter(status__in=[Order.SETTLED, Order.POSTED_TO_ROOM],
+                                 created_at__date__gte=labels[0],
+                                 created_at__date__lte=labels[-1]),
+            branches,
+        ).prefetch_related("lines__menu_item")
         for o in orders:
             # Local date, not UTC — an order at 00:30 IST belongs to that
             # local day (the __date lookup above already converts).
@@ -237,58 +545,155 @@ def _revenue_trend(include_rooms=True, include_fnb=True, include_banquets=False,
     if include_banquets:
         from apps.banquets.models import Event
         by = {}
-        events = Event.objects.filter(status__in=[Event.CONFIRMED, Event.COMPLETED],
-                                      event_date__gte=labels[0],
-                                      event_date__lte=labels[-1])
+        # An event has no branch column; the function space it books does.
+        events = _scope(
+            Event.objects.filter(status__in=[Event.CONFIRMED, Event.COMPLETED],
+                                 event_date__gte=labels[0],
+                                 event_date__lte=labels[-1]),
+            branches, "space__location_id",
+        )
         for e in events:
             by[e.event_date] = by.get(e.event_date, Decimal("0")) + e.bill_subtotal
         out["banquets"] = [float(by.get(d, 0)) for d in labels]
     return out
 
 
+def _dashboard_sector(request):
+    """Which side of the business the dashboard shows, and whether the caller
+    may change it: ("hotel" | "restaurant" | "combined", locked).
+
+    Role wins over the query string. A Hotel Manager only runs the hotel and a
+    Restaurant Manager only runs the restaurant, so neither can opt into the
+    other's numbers by editing the URL — for them the answer is locked, and the
+    screen hides the switch rather than showing one that does nothing. Everyone
+    else — GM, MD, CEO, Admin, Finance — is cross-cutting and gets to choose,
+    the same way the Executive Overview already lets them drill into one side.
+    """
+    from apps.accounts.constants import ROLE_HOTEL_MGR, ROLE_REST_MGR
+    role = acting_role(request)
+    if role == ROLE_HOTEL_MGR:
+        return "hotel", True
+    if role == ROLE_REST_MGR:
+        return "restaurant", True
+    asked = request.query_params.get("view", "combined")
+    return (asked if asked in ("hotel", "restaurant", "combined") else "combined"), False
+
+
 class DashboardView(ModuleAPIView):
     """Rooms + F&B side by side for cross-cutting roles (Admin, Finance, and
     Super Admin/MD/GM if they land here) — but Hotel Manager only runs the
     hotel side and Restaurant Manager only runs the restaurant side, so each
-    gets just their own numbers, not the other side's."""
+    gets just their own numbers, not the other side's.
+
+    Every figure is scoped to the branch the switcher has active (the
+    `X-Branch-Id` header); no header, or an all-branch role that hasn't picked
+    one, means the whole group."""
 
     module = "dashboard"
 
     def get(self, request):
-        from apps.accounts.constants import ROLE_HOTEL_MGR, ROLE_REST_MGR
-        role = getattr(request.user, "role", "")
+        sector, locked = _dashboard_sector(request)
+        branches = visible_branch_ids(request)
         body = {}
-        if role != ROLE_REST_MGR:
-            body["rooms"] = _room_kpis()
-            body["receivables"] = _receivables()
-        if role != ROLE_HOTEL_MGR:
-            body["fnb"] = _fnb_kpis()
-        body["trend"] = _trend_for(request)
-        body["view"] = ("hotel" if role == ROLE_HOTEL_MGR
-                        else "restaurant" if role == ROLE_REST_MGR else "combined")
+        # These KPIs used to be computed with no window at all — lifetime
+        # totals, on a screen headed "Operations · today". They never moved,
+        # whatever happened in the property. Month-to-date is the period a
+        # general manager actually steers by, and the response now says which
+        # period it is so the screen can label it instead of implying "today".
+        period_from, period_to = _dashboard_period(request)
+        if sector != "restaurant":
+            body["rooms"] = _room_kpis(period_from, period_to, branches)
+            # A Customer has no branch — a corporate account owes the group,
+            # not one property — so AR can't be split. It is therefore shown
+            # only to callers entitled to the whole group; a branch-restricted
+            # login gets no receivables block rather than the group's figure
+            # mislabelled as its own.
+            if branches == "*":
+                body["receivables"] = _receivables()
+        if sector != "hotel":
+            body["fnb"] = _fnb_kpis(period_from, period_to, branches)
+        # The third stream. Sent whenever the trend chart draws it — same gate,
+        # same rows — so the revenue mix and the line above it reconcile. Only
+        # when there is something to reconcile: a property that runs no events
+        # gets no empty slice.
+        shows_banq = _shows_banquets(request)
+        if shows_banq:
+            banq = _banquet_kpis(period_from, period_to, branches)
+            if Decimal(banq["revenue"]) > 0:
+                body["banquets"] = banq
+        # The label follows the range: a screen that says "Month to date" over
+        # figures the reader has just set to yesterday is worse than one that
+        # says nothing at all.
+        body["period"] = {"from": str(period_from), "to": str(period_to),
+                          "label": _period_label(period_from, period_to)}
+        # Which way each of those figures is moving.
+        body["previous"] = _comparison(sector, period_from, period_to, branches, shows_banq)
+        # Deliberately NOT the selected window. This series exists to feed the
+        # "revenue · last 7 days" figure, which is a rolling 7-versus-7 read; if
+        # it followed the range picker, choosing "Today" would leave it summing
+        # a single day and calling it a week. The chart card fetches its own
+        # series, with its own range picker, from /reports/revenue-trend/.
+        body["trend"] = _trend_for(request, use_range=False)
+        body["view"] = sector
+        # Depth blocks. Each is gated on the sector it belongs to, so the Hotel
+        # tab doesn't carry F&B payment mix and the Restaurant tab doesn't carry
+        # a room pickup curve.
+        body["floor"] = _floor_state(branches)
+        if sector != "hotel":
+            body["money"] = _money_detail(period_from, period_to, branches)
+        if sector != "restaurant":
+            body["forward"] = _occupancy_forecast(7, branches)
+        # Keyed on what the caller is ENTITLED to, not on what they currently
+        # have selected. Using the selection would delete the table the moment
+        # you clicked a row in it — you would land on that branch with no way
+        # back to the comparison that got you there. Rows still never exceed
+        # the entitlement, so this widens nothing.
+        rollup = _branch_rollup(period_from, period_to, user_branch_ids(request.user))
+        if len(rollup) > 1:
+            body["branches"] = rollup
+        # Whether this user may switch sides at all — the tabs are hidden for a
+        # Hotel/Restaurant Manager rather than shown and then ignored.
+        body["can_switch_view"] = not locked
         return Response(body)
 
 
-def _trend_for(request):
-    """Role/entitlement-scoped revenue trend, honoring ?trend_days= or a
-    custom ?from=&to= window."""
-    from apps.accounts.constants import (
-        ROLE_HOTEL_MGR, ROLE_REST_MGR, entitlement_allows, role_can_access,
-    )
+def _shows_banquets(request):
+    """Whether this caller's dashboard carries the banquet stream at all.
+
+    One gate, read by both the trend series and the revenue-mix KPI: if the two
+    ever disagreed, the chart would draw a stream the mix beneath it denied.
+    Note it is deliberately not gated on the sector — banquets sit on both the
+    Hotel and Restaurant tabs, because a function room is sold by one side and
+    catered by the other.
+    """
+    from apps.accounts.constants import entitlement_allows, role_can_access
     from apps.accounts.permissions import active_entitlements
+
     role = getattr(request.user, "role", "")
-    ent = active_entitlements()
+    return (role_can_access(role, "banquets")
+            and entitlement_allows(active_entitlements(), "banquets"))
+
+
+def _trend_for(request, use_range=True):
+    """Role/entitlement-scoped revenue trend, honoring ?trend_days= or a
+    custom ?from=&to= window, ?view=, and the active branch.
+
+    `use_range=False` ignores ?from=&to= and returns the rolling default
+    window. The dashboard needs that for its embedded series: there, from/to
+    select the KPI period, and a 7-versus-7 comparison drawn from a one-day
+    window is not a comparison.
+    """
+    sector, _locked = _dashboard_sector(request)
     try:
         days = max(7, min(366, int(request.query_params.get("trend_days", 14))))
     except ValueError:
         days = 14
-    f, t = _parse_range(request)
+    f, t = _parse_range(request) if use_range else (None, None)
     return _revenue_trend(
-        include_rooms=role != ROLE_REST_MGR,
-        include_fnb=role != ROLE_HOTEL_MGR,
-        include_banquets=(role_can_access(role, "banquets")
-                          and entitlement_allows(ent, "banquets")),
-        days=days, f=f, t=t,
+        include_rooms=sector != "restaurant",
+        include_fnb=sector != "hotel",
+        include_banquets=_shows_banquets(request),
+        days=days, f=f, t=t, branches=visible_branch_ids(request),
     )
 
 
@@ -312,9 +717,13 @@ class ExecutiveView(ModuleAPIView):
         view = request.query_params.get("view", "all")
         if view not in ("all", "hotel", "restaurant"):
             view = "all"
-        rooms = _room_kpis()
-        fnb = _fnb_kpis()
-        receivables = _receivables()
+        branches = visible_branch_ids(request)
+        rooms = _room_kpis(branches=branches)
+        fnb = _fnb_kpis(branches=branches)
+        # Group-level, and unsplittable — see DashboardView. Zeroed rather than
+        # omitted here because this view's kpi blocks index it unconditionally.
+        receivables = (_receivables() if branches == "*"
+                       else {"total": "0", "corporate": "0", "corporate_accounts": 0})
         room_rev = Decimal(rooms["room_revenue"])
         fnb_rev = Decimal(fnb["fnb_sales"])
 
@@ -347,12 +756,13 @@ class ExecutiveView(ModuleAPIView):
             # into the operating trend (one event would spike it). The FE derives
             # week-on-week growth from this series.
             body["trend"] = _revenue_trend(include_rooms=True, include_fnb=True,
-                                           include_banquets=False, days=30)
+                                           include_banquets=False, days=30,
+                                           branches=branches)
             body["forward"] = _forward_book(banquets=banq)
             body["receivables_detail"] = receivables
             body["channels"] = _channel_mix()
             body["top_receivables"] = _top_receivables()
-            body["forecast"] = _occupancy_forecast()
+            body["forecast"] = _occupancy_forecast(branches=branches)
         elif view == "hotel":
             body["kpis"] = {
                 "revenue": rooms["room_revenue"],
@@ -364,12 +774,13 @@ class ExecutiveView(ModuleAPIView):
             # rooms-only trajectory, forward booked demand, AR and its
             # concentration, and the acquisition-channel mix (channels and AR
             # are hotel concepts, so they live here — not on the restaurant tab).
-            body["trend"] = _revenue_trend(include_rooms=True, include_fnb=False, days=30)
+            body["trend"] = _revenue_trend(include_rooms=True, include_fnb=False, days=30,
+                                           branches=branches)
             body["forward"] = _forward_book(banquets=banq)
             body["receivables_detail"] = receivables
             body["channels"] = _channel_mix()
             body["top_receivables"] = _top_receivables()
-            body["forecast"] = _occupancy_forecast()
+            body["forecast"] = _occupancy_forecast(branches=branches)
         else:  # restaurant
             body["kpis"] = {
                 "revenue": fnb["fnb_sales"],
@@ -378,18 +789,20 @@ class ExecutiveView(ModuleAPIView):
             }
             # F&B-only trajectory; the service-mode mix is derived on the FE from
             # body["fnb"].by_mode (no channels/AR — those belong to the hotel).
-            body["trend"] = _revenue_trend(include_rooms=False, include_fnb=True, days=30)
+            body["trend"] = _revenue_trend(include_rooms=False, include_fnb=True, days=30,
+                                           branches=branches)
         return Response(body)
 
 
-def _scoped_sales_kpis(role, f=None, t=None):
+def _scoped_sales_kpis(role, f=None, t=None, branches="*"):
     """Sales Summary content, scoped like the Dashboard: Restaurant Manager
     sees F&B only, Hotel Manager sees rooms only, everyone else authorized
     for 'sales' (full access, Finance, CEO) sees both. Returns (rooms, fnb),
     either of which is None when that side is hidden from this role."""
     from apps.accounts.constants import ROLE_HOTEL_MGR, ROLE_REST_MGR
-    rooms = _room_kpis(f, t) if role != ROLE_REST_MGR else None
-    fnb = _fnb_kpis(f, t) if role != ROLE_HOTEL_MGR else None
+    role = base_role(role)
+    rooms = _room_kpis(f, t, branches) if role != ROLE_REST_MGR else None
+    fnb = _fnb_kpis(f, t, branches) if role != ROLE_HOTEL_MGR else None
     return rooms, fnb
 
 
@@ -398,7 +811,7 @@ class SalesSummaryView(ModuleAPIView):
 
     def get(self, request):
         role = getattr(request.user, "role", "")
-        rooms, fnb = _scoped_sales_kpis(role)
+        rooms, fnb = _scoped_sales_kpis(role, branches=visible_branch_ids(request))
         body = {}
         if rooms is not None:
             body["rooms"] = rooms
@@ -572,10 +985,10 @@ def _operational_report(report, f=None, t=None):
     return None
 
 
-def _report_rows(report, role, f=None, t=None):
+def _report_rows(report, role, f=None, t=None, branches="*"):
     """Return (title, header, rows) for an exportable report."""
     if report == "sales":
-        rooms, fnb = _scoped_sales_kpis(role, f, t)
+        rooms, fnb = _scoped_sales_kpis(role, f, t, branches)
         rows = []
         if rooms is not None:
             rows += [
@@ -602,7 +1015,7 @@ def _report_rows(report, role, f=None, t=None):
     if report == "accounting":
         # ERP-importable daybook: revenue, output tax and purchases (FR-ACC-005).
         from apps.procurement.models import PurchaseOrder
-        r, fnb = _room_kpis(f, t), _fnb_kpis(f, t)
+        r, fnb = _room_kpis(f, t, branches), _fnb_kpis(f, t, branches)
         tax_total = sum((l.cgst + l.sgst for l in _between(
             FolioLine.objects.exclude(kind=FolioLine.KIND_TAX), "created_at", f, t)),
             start=Decimal("0"))
@@ -665,7 +1078,7 @@ class ReportExportView(ModuleAPIView):
         # NB: avoid the query param name 'format' — DRF reserves it as a renderer override.
         fmt = request.query_params.get("fmt", "xlsx")
         f, t = _parse_range(request)
-        title, header, rows = _report_rows(report, role, f, t)
+        title, header, rows = _report_rows(report, role, f, t, visible_branch_ids(request))
 
         if fmt == "csv":
             buf = io.StringIO()
@@ -954,7 +1367,7 @@ class ReportView(ModuleAPIView):
         if operational:
             return Response(operational)
         if report == "sales":
-            rooms, fnb = _scoped_sales_kpis(role, f, t)
+            rooms, fnb = _scoped_sales_kpis(role, f, t, visible_branch_ids(request))
             kpis = []
             if rooms is not None:
                 kpis += [
@@ -1021,7 +1434,7 @@ class CatalogueView(ModuleAPIView):
             role_can_view_report,
         )
         role = getattr(request.user, "role", "")
-        full = ROLE_ALLOW.get(role) == "*"
+        full = allowed_modules_for(role) == "*"
 
         all_reports = [
             "sales", "tax", "source", "occupancy", "accounting", "guests",

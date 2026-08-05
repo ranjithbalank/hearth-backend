@@ -288,15 +288,19 @@ class DashboardTrendTests(TestCase):
     F&B from settled orders, role-scoped like the rest of the dashboard."""
 
     def test_dashboard_carries_revenue_trend(self):
-        from django.utils import timezone
-        from apps.frontoffice.models import NightAuditRun
+        from apps.frontoffice.models import Folio, FolioLine
         client = APIClient()
         client.force_authenticate(User.objects.create_user(
             username="gmtrend", password="Tk9$mZ2pQw!7", role="General Manager"))
-        today = timezone.localdate()
-        NightAuditRun.objects.create(business_date=today, rooms_posted=2,
-                                     room_revenue=Decimal("9000"),
-                                     tax_posted=Decimal("1080"), completed=True)
+        # The rooms series comes from the room folio lines, not from
+        # NightAuditRun totals: a run has no branch, so a per-branch chart
+        # can't be drawn from it, and the lines are what _room_kpis already
+        # sums for the room-revenue tile beside the chart.
+        folio = Folio.objects.create(guest_name="Trend Guest")
+        FolioLine.objects.create(folio=folio, kind=FolioLine.KIND_ROOM,
+                                 description="Room charge", taxable=Decimal("9000"),
+                                 cgst=Decimal("540"), sgst=Decimal("540"),
+                                 total=Decimal("10080"), gst_rate=Decimal("12"))
         cat = Category.objects.create(name="TrendCat")
         item = MenuItem.objects.create(name="Tea", category=cat,
                                        price=Decimal("100"), gst_rate=Decimal("0"))
@@ -306,7 +310,7 @@ class DashboardTrendTests(TestCase):
 
         t = client.get("/api/reports/dashboard/").data["trend"]
         self.assertEqual(len(t["days"]), 14)
-        self.assertEqual(t["rooms"][-1], 9000.0)   # today's audit post
+        self.assertEqual(t["rooms"][-1], 9000.0)   # today's room posting
         self.assertEqual(t["fnb"][-1], 300.0)      # today's settled order
         self.assertEqual(t["rooms"][0], 0.0)       # quiet days read zero
 
@@ -324,6 +328,148 @@ class DashboardTrendTests(TestCase):
         t = hm.get("/api/reports/dashboard/").data["trend"]
         self.assertNotIn("fnb", t)
         self.assertEqual(t["rooms"][-1], 9000.0)
+
+    def test_banquet_revenue_reconciles_with_the_trend(self):
+        """The banquet stream was drawn in the trend chart and left out of the
+        revenue-mix KPI, so on a property running events the donut didn't add
+        up to the line above it. Both now read the same rows through the same
+        gate — this asserts the two agree."""
+        from apps.banquets.models import Event, FunctionSpace
+        from apps.reports.views import _business_date
+
+        client = APIClient()
+        client.force_authenticate(User.objects.create_user(
+            username="gmbanq", password="Tk9$mZ2pQw!7", role="General Manager"))
+        # The property's business date, not the wall clock — that is the day
+        # the trend's last bucket and the month-to-date window both key off.
+        today = _business_date()
+        space = FunctionSpace.objects.create(name="Emerald Hall", capacity=200)
+        Event.objects.create(
+            space=space, title="Wedding", event_date=today,
+            package_amount=Decimal("50000"), food_veg=100, veg_rate=Decimal("400"),
+            status=Event.CONFIRMED,
+        )
+        # Tentative is not revenue — it is an enquiry, and neither series counts it.
+        Event.objects.create(
+            space=space, title="Maybe", event_date=today,
+            package_amount=Decimal("99999"), status=Event.TENTATIVE,
+        )
+
+        body = client.get("/api/reports/dashboard/").data
+        # 50,000 hall + (100 plates x 400) catering.
+        self.assertEqual(Decimal(body["banquets"]["revenue"]), Decimal("90000"))
+        self.assertEqual(body["banquets"]["events"], 1)
+        # The KPI is the period total; the trend's last bucket is today's slice
+        # of it. With one event dated today the two are the same figure — which
+        # is the reconciliation the mix donut depends on.
+        self.assertEqual(body["trend"]["banquets"][-1], 90000.0)
+
+        # No banquet entitlement/role access, no block — rather than a zero
+        # slice on a property that runs no events.
+        rm = APIClient()
+        rm.force_authenticate(User.objects.create_user(
+            username="rmbanq", password="Tk9$mZ2pQw!7", role="Restaurant Manager"))
+        rm_body = rm.get("/api/reports/dashboard/").data
+        self.assertEqual("banquets" in rm_body, "banquets" in rm_body["trend"])
+
+    def test_period_range_labels_and_comparison_window(self):
+        """The KPI band takes ?from=&to=, names the window it landed on, and
+        carries the equal-length window before it to compare against."""
+        from datetime import timedelta
+
+        from apps.reports.views import _business_date
+
+        client = APIClient()
+        client.force_authenticate(User.objects.create_user(
+            username="gmrange", password="Tk9$mZ2pQw!7", role="General Manager"))
+        today = _business_date()
+
+        # Default: month to date, ending on the business date.
+        body = client.get("/api/reports/dashboard/").data
+        self.assertEqual(body["period"]["label"], "Month to date")
+        self.assertEqual(body["period"]["from"], str(today.replace(day=1)))
+        self.assertEqual(body["period"]["to"], str(today))
+
+        # A named preset is recognised rather than called "custom".
+        y = today - timedelta(days=1)
+        body = client.get(f"/api/reports/dashboard/?from={y}&to={y}").data
+        self.assertEqual(body["period"]["label"], "Yesterday")
+        # …and its comparison is the equal-length window immediately before:
+        # one day for a one-day period, not a whole month.
+        self.assertEqual(body["previous"]["from"], str(today - timedelta(days=2)))
+        self.assertEqual(body["previous"]["to"], str(today - timedelta(days=2)))
+
+        seven = client.get(
+            f"/api/reports/dashboard/?from={today - timedelta(days=6)}&to={today}").data
+        self.assertEqual(seven["period"]["label"], "Last 7 days")
+        self.assertEqual(seven["previous"]["from"], str(today - timedelta(days=13)))
+        self.assertEqual(seven["previous"]["to"], str(today - timedelta(days=7)))
+
+        # Reversed dates are normalised rather than silently returning nothing:
+        # >= the later AND <= the earlier matches no row, and a dashboard of
+        # zeroes reads as a dead property, not as a typo.
+        flipped = client.get(
+            f"/api/reports/dashboard/?from={today}&to={today - timedelta(days=6)}").data
+        self.assertEqual(flipped["period"]["from"], str(today - timedelta(days=6)))
+        self.assertEqual(flipped["period"]["to"], str(today))
+
+        # The embedded trend does NOT follow the range picker — it feeds the
+        # rolling 7-vs-7 read, which a one-day window would make meaningless.
+        one_day = client.get(f"/api/reports/dashboard/?from={today}&to={today}").data
+        self.assertEqual(len(one_day["trend"]["days"]), 14)
+
+    def test_branch_restricted_user_never_reads_the_group(self):
+        """A user assigned to one branch sees that branch, with or without the
+        X-Branch-Id header.
+
+        The header is the obvious case. The one that bites is the request
+        without it — a restricted user's first page load — because
+        resolve_active_branch() returns None there just as it does for an
+        all-branch role, and treating that None as "don't filter" hands the
+        whole group's numbers to someone entitled to one property.
+        """
+        from apps.accounts.models import Branch, Property, UserBranchAccess
+        from apps.frontoffice.models import Folio, FolioLine
+        from apps.rooms.models import Room, RoomType
+
+        prop = Property.objects.first() or Property.objects.create(name="P")
+        north = Branch.objects.create(property=prop, code="NTH", name="North", hms=True)
+        south = Branch.objects.create(property=prop, code="STH", name="South", hms=True)
+        rt = RoomType.objects.create(code="STD", name="Standard", base_rate=Decimal("1000"))
+        for i, br in ((1, north), (2, north), (3, south)):
+            Room.objects.create(number=f"{i}01", room_type=rt, location=br)
+        for br, amount in ((north, "5000"), (south, "3000")):
+            folio = Folio.objects.create(guest_name=f"G{br.code}", location=br)
+            FolioLine.objects.create(folio=folio, kind=FolioLine.KIND_ROOM,
+                                     description="Room", taxable=Decimal(amount),
+                                     total=Decimal(amount))
+
+        boss = User.objects.create_user(username="allbranch",
+                                        password="Tk9$mZ2pQw!7", role="General Manager")
+        client = APIClient()
+        client.force_authenticate(boss)
+        group = client.get("/api/reports/dashboard/").data
+        self.assertEqual(group["rooms"]["rooms_total"], 3)
+        self.assertEqual(Decimal(group["rooms"]["room_revenue"]), Decimal("8000"))
+
+        # Restricted to North, and sending no header at all.
+        local = User.objects.create_user(username="northonly",
+                                         password="Tk9$mZ2pQw!7", role="Hotel Manager")
+        UserBranchAccess.objects.create(user=local, branch=north, role=local.role)
+        scoped = APIClient()
+        scoped.force_authenticate(local)
+        seen = scoped.get("/api/reports/dashboard/").data
+        self.assertEqual(seen["rooms"]["rooms_total"], 2)
+        self.assertEqual(Decimal(seen["rooms"]["room_revenue"]), Decimal("5000"))
+        # Receivables are group-level and unsplittable, so they are withheld
+        # rather than shown to a branch as if they were its own.
+        self.assertNotIn("receivables", seen)
+
+        # And asking for a branch they have no access to falls back to their
+        # own, never to everything.
+        forged = scoped.get("/api/reports/dashboard/",
+                            HTTP_X_BRANCH_ID=str(south.id)).data
+        self.assertEqual(forged["rooms"]["rooms_total"], 2)
 
     def test_trend_endpoint_ranges_and_banquets(self):
         """/reports/revenue-trend/: preset windows via ?trend_days=, custom

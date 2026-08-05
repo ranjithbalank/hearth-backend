@@ -158,3 +158,41 @@ class NotificationTests(TestCase):
         resp = self.client.get(reverse("notifications"))
         titles = [a["title"] for a in resp.data["alerts"]]
         self.assertTrue(any("awaiting cleaning" in t for t in titles))
+
+
+class NewJoinerHandoverTests(TestCase):
+    """Admin creates the login, HR owes them a pay scale — the alert is what
+    carries the handover between the two desks."""
+
+    def setUp(self):
+        self.client = APIClient()
+
+    def _login(self, role):
+        u = User.objects.create_user(username=f"u_{role}", password="Tk9$mZ2pQw!7", role=role)
+        self.client.force_authenticate(u)
+        return u
+
+    def _hr_titles(self):
+        resp = self.client.get(reverse("notifications"))
+        return [a["title"] for a in resp.data["alerts"] if a["module"] == "hr"]
+
+    def test_hr_is_told_a_login_has_no_pay(self):
+        User.objects.create_user(username="arun", password="Tk9$mZ2pQw!7",
+                                 first_name="Arun", role="Chef / Kitchen")
+        self._login("HR Manager")
+        self.assertTrue(any("need pay set up" in t for t in self._hr_titles()))
+
+    def test_the_admin_who_made_the_login_is_not_pinged(self):
+        # They've done their half; chasing them about payroll is noise.
+        User.objects.create_user(username="arun", password="Tk9$mZ2pQw!7", role="Chef / Kitchen")
+        self._login("Admin")
+        self.assertEqual(self._hr_titles(), [])
+
+    def test_the_alert_clears_once_they_are_on_the_roster(self):
+        from apps.hr.models import Employee
+        arun = User.objects.create_user(username="arun", password="Tk9$mZ2pQw!7",
+                                        role="Chef / Kitchen")
+        hr = self._login("HR Manager")
+        Employee.objects.create(name="Arun", department="Kitchen", role="Cook", user=arun)
+        Employee.objects.create(name="HR", department="Admin", role="Manager", user=hr)
+        self.assertEqual(self._hr_titles(), [])

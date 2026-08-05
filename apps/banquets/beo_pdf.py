@@ -2,6 +2,7 @@
 import io
 from decimal import Decimal
 
+from django.utils import timezone
 from reportlab.lib import colors
 from reportlab.lib.pagesizes import A4
 from reportlab.lib.styles import ParagraphStyle, getSampleStyleSheet
@@ -35,10 +36,14 @@ def build_beo_pdf(event, property_name):
     docr = ParagraphStyle("d", parent=ss["Normal"], alignment=2, fontSize=13)
     lbl = ParagraphStyle("l", parent=ss["Normal"], fontSize=8, textColor=MUTED)
     story = []
+    # The event date lives in the Event card below; this is when the sheet was
+    # printed. Kitchen and banquet floor work off reissued BEOs as the brief
+    # changes, so "which copy am I holding?" has to be answerable at a glance.
+    printed = timezone.localtime()
     header = Table([[
         Paragraph(f"{property_name}<br/><font size=8 color='#8A8478'>Banquet &amp; Events</font>", brand),
         Paragraph(f"<b>BANQUET EVENT ORDER</b><br/><font size=9 color='#8A8478'>{ref} · "
-                  f"{event.status.upper()}</font>", docr),
+                  f"{event.status.upper()}<br/>Printed: {printed:%d %b %Y · %H:%M}</font>", docr),
     ]], colWidths=[100 * mm, 78 * mm])
     story += [header, Spacer(1, 4), HRFlowable(width="100%", thickness=2, color=PINE), Spacer(1, 10)]
 

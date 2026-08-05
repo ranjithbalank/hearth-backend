@@ -8,7 +8,7 @@ from rest_framework.response import Response
 from rest_framework.views import APIView
 
 from apps.accounts.constants import ROLE_CAPTAIN, ROLE_CASHIER, ROLE_BAR_CAPTAIN, ROLE_BAR_CASHIER
-from apps.accounts.rbac import PROTECTED
+from apps.accounts.rbac import PROTECTED, base_role, role_names_for
 from apps.accounts.models import log_action
 from apps.accounts.permissions import (
     AnyModuleViewSetMixin,
@@ -82,6 +82,20 @@ def _valid_override(passcode):
 CLOSED_STATUSES = (Order.SETTLED, Order.POSTED_TO_ROOM)
 
 
+def _claim_coupon_use(coupon_id):
+    """Take one use of a coupon, atomically. True if this caller got it.
+
+    A conditional UPDATE rather than read-check-write: the filter and the
+    increment are one statement, so exactly one of two simultaneous settles can
+    win. An unlimited coupon (usage_limit=0) always succeeds.
+    """
+    from django.db.models import F, Q
+
+    return Coupon.objects.filter(pk=coupon_id).filter(
+        Q(usage_limit=0) | Q(used_count__lt=F("usage_limit"))
+    ).update(used_count=F("used_count") + 1) > 0
+
+
 def _closed_error(order):
     """409 if the order is already settled/posted; None if it is still live."""
     if order.status in CLOSED_STATUSES:
@@ -134,7 +148,7 @@ class TableViewSet(BranchScopedMixin, BranchUniqueFriendlyMixin, ModuleViewSetMi
         from datetime import date
 
         location = request.query_params.get("location")
-        qs = User.objects.filter(role=ROLE_CAPTAIN, is_active=True)
+        qs = User.objects.filter(role__in=role_names_for(ROLE_CAPTAIN), is_active=True)
         if location:
             today = date.today()
             ids = [a.user_id for a in UserBranchAccess.objects.filter(branch_id=location) if a.is_active_on(today)]
@@ -148,7 +162,7 @@ class TableViewSet(BranchScopedMixin, BranchUniqueFriendlyMixin, ModuleViewSetMi
         floor and decides who's working which tables. Captains themselves
         can't self-assign (assigned_captain is read-only on the main
         serializer); send captain=null to clear an assignment."""
-        role = getattr(request.user, "role", "")
+        role = base_role(getattr(request.user, "role", ""))
         if role != ROLE_CASHIER and role not in PROTECTED:
             return Response({"detail": "Only the F&B Cashier can assign tables to captains"}, status=403)
         table = self.get_object()
@@ -157,7 +171,8 @@ class TableViewSet(BranchScopedMixin, BranchUniqueFriendlyMixin, ModuleViewSetMi
             table.assigned_captain = None
         else:
             from apps.accounts.models import User
-            captain = User.objects.filter(pk=captain_id, role=ROLE_CAPTAIN).first()
+            captain = User.objects.filter(
+                pk=captain_id, role__in=role_names_for(ROLE_CAPTAIN)).first()
             if not captain:
                 return Response({"detail": "Not a Captain — pick a valid captain login"}, status=400)
             table.assigned_captain = captain
@@ -296,7 +311,7 @@ class CounterOnlyMixin:
 
     def initial(self, request, *args, **kwargs):
         super().initial(request, *args, **kwargs)
-        if getattr(request.user, "role", "") == "Captain":
+        if base_role(getattr(request.user, "role", "")) == "Captain":
             from rest_framework.exceptions import PermissionDenied
             raise PermissionDenied("Till and reconciliation are handled at the cashier counter")
 
@@ -629,7 +644,7 @@ class KdsViewSet(ModuleViewSetMixin, viewsets.ViewSet):
         board but never marks food ready.
         """
         from apps.accounts.constants import KITCHEN_ROLES
-        if getattr(request.user, "role", "") not in KITCHEN_ROLES:
+        if base_role(getattr(request.user, "role", "")) not in KITCHEN_ROLES:
             return Response({"detail": "only the kitchen marks food ready"}, status=403)
         kot = Kot.objects.filter(pk=pk).select_related("order").first()
         if not kot:
@@ -656,7 +671,7 @@ class KdsViewSet(ModuleViewSetMixin, viewsets.ViewSet):
         moment every line on it is marked.
         """
         from apps.accounts.constants import KITCHEN_ROLES
-        if getattr(request.user, "role", "") not in KITCHEN_ROLES:
+        if base_role(getattr(request.user, "role", "")) not in KITCHEN_ROLES:
             return Response({"detail": "only the kitchen marks food ready"}, status=403)
         if not active_entitlements().get("kds_partial_ready"):
             return Response(
@@ -714,7 +729,7 @@ class KdsViewSet(ModuleViewSetMixin, viewsets.ViewSet):
     def beo_bump(self, request, pk=None):
         """Advance a banquet BEO prep ticket from the kitchen display (FR-BQT-004)."""
         from apps.accounts.constants import KITCHEN_ROLES
-        if getattr(request.user, "role", "") not in KITCHEN_ROLES:
+        if base_role(getattr(request.user, "role", "")) not in KITCHEN_ROLES:
             return Response({"detail": "only the kitchen marks food ready"}, status=403)
         from apps.accounts.permissions import shared_or_visible
         from apps.banquets.models import Event as BqEvent
@@ -986,7 +1001,9 @@ class OrderViewSet(AnyModuleViewSetMixin, viewsets.ModelViewSet):
         import uuid
         from rest_framework.exceptions import ValidationError
         user = self.request.user
-        role = getattr(user, "role", "")
+        # The floor rules below are written in terms of the built-in roles, so
+        # a property's own role plays by whichever one it was based on.
+        role = base_role(getattr(user, "role", ""))
 
         department = serializer.validated_data.get("department", Order.FOOD)
         bar_tbl = serializer.validated_data.get("bar_table")
@@ -1594,7 +1611,8 @@ class OrderViewSet(AnyModuleViewSetMixin, viewsets.ModelViewSet):
         pdf = build_bill_pdf(order, prop.name,
                              doc_header=prop.pos_doc_header, doc_header_align=prop.pos_doc_header_align,
                              doc_footer=prop.pos_doc_footer, doc_footer_align=prop.pos_doc_footer_align,
-                             columns=prop.pos_bill_columns)
+                             columns=prop.pos_bill_columns,
+                             with_gst=prop.gst_billing_mode == "with_gst", gstin=prop.gstin)
         resp = HttpResponse(pdf.read(), content_type="application/pdf")
         resp["Content-Disposition"] = f'attachment; filename="bill-{order.id}.pdf"'
         return resp
@@ -1668,18 +1686,22 @@ class OrderViewSet(AnyModuleViewSetMixin, viewsets.ModelViewSet):
             return Response(OrderSerializer(order).data)
         if not re.fullmatch(r"\+\d{1,4}", country):
             return Response({"detail": "country code must look like +91"}, status=400)
-        # Indian numbers are stored bare (matches walk-in and demo data);
-        # foreign guests keep their country code, e.g. "+44 7700123456".
-        if country == "+91":
-            if len(mobile) != 10:
-                return Response({"detail": "a 10-digit mobile number is required"}, status=400)
-            full = mobile
-        else:
-            if not 6 <= len(mobile) <= 12:
-                return Response({"detail": "that doesn't look like a valid number"}, status=400)
-            full = f"{country} {mobile}"
-        cust, created = Customer.objects.get_or_create(
-            mobile=full, defaults={"name": name or "Walk-in guest"})
+        # One stored shape for every guest. This used to branch on the country:
+        # Indian numbers bare, everyone else "+44 7700123456" — two conventions
+        # in one column, so the same person could occupy two rows depending on
+        # where they were entered from.
+        if country == "+91" and len(mobile) != 10:
+            return Response({"detail": "a 10-digit mobile number is required"}, status=400)
+        if country != "+91" and not 6 <= len(mobile) <= 12:
+            return Response({"detail": "that doesn't look like a valid number"}, status=400)
+        full = f"{country}{mobile}"
+        # Look across the older spellings before creating, so a returning guest
+        # keeps one profile (and one loyalty balance) across the change.
+        from apps.accounts.validators import phone_variants
+        cust = Customer.objects.filter(mobile__in=phone_variants(full, country)).first()
+        created = cust is None
+        if created:
+            cust = Customer.objects.create(mobile=full, name=name or "Walk-in guest")
         # A real name given at the counter upgrades a placeholder profile.
         if name and (created or cust.name in ("", "Online", "Online Guest", "Walk-in guest")):
             cust.name = name
@@ -1841,8 +1863,9 @@ class OrderViewSet(AnyModuleViewSetMixin, viewsets.ModelViewSet):
         which can differ from the rupee discount already baked into `total`
         via order.loyalty_redeemed — a raw-points redemption deducts exactly
         what was redeemed. Every earn/redeem is written to LoyaltyLedger."""
-        if order.coupon:
-            Coupon.objects.filter(pk=order.coupon_id).update(used_count=models.F("used_count") + 1)
+        # The coupon's use is claimed up-front in settle() (see
+        # _claim_coupon_use), before any money is taken — incrementing here as
+        # well would count it twice.
         cust = order.customer
         if cust:
             from apps.crm.models import LoyaltyLedger, LoyaltyReward
@@ -1883,6 +1906,16 @@ class OrderViewSet(AnyModuleViewSetMixin, viewsets.ModelViewSet):
         if order.lines.filter(kot_fired=False).exists():
             return Response({"detail": "Un-fired items on the order — fire the KOT before settling"},
                             status=400)
+        # Claim the coupon's use before taking any money. Its limit was checked
+        # when the coupon was attached, and never again — so two counters could
+        # both attach the last use of a single-use code and both settle, giving
+        # the promotion away twice. The claim is a conditional UPDATE, so only
+        # one of them wins, and the loser is told before the guest pays rather
+        # than after.
+        if order.coupon_id and not _claim_coupon_use(order.coupon_id):
+            return Response(
+                {"detail": "That coupon was just used up on another bill. Remove it and re-total."},
+                status=409)
         t = order.totals()
         # Tender must be an active row in the payment-methods master
         # (Settings > Masters), and the role must be allowed to accept it —

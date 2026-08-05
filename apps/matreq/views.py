@@ -10,6 +10,7 @@ from apps.accounts.permissions import (
     shared_or_visible,
     visible_branch_ids,
 )
+from apps.accounts.rbac import acting_role
 from apps.inventory.models import apply_movement
 
 from .models import MaterialRequest
@@ -51,7 +52,7 @@ class MaterialRequestViewSet(ModuleViewSetMixin, viewsets.ViewSet):
             INDENT_OVERSIGHT_ROLES,
             indent_approvers_for,
         )
-        role = getattr(request.user, "role", "")
+        role = acting_role(request)
         username = request.user.username
         qs = MaterialRequest.objects.prefetch_related("lines__ingredient")
         # Same "mine + not-yet-branch-tagged" rule as POS orders — an
@@ -98,7 +99,7 @@ class MaterialRequestViewSet(ModuleViewSetMixin, viewsets.ViewSet):
         department = (request.data.get("department") or "").strip()
         if not department:
             return Response({"detail": "department is required"}, status=400)
-        role = getattr(request.user, "role", "")
+        role = acting_role(request)
         if not role_can_request_department(role, department):
             approvers = ", ".join(sorted(indent_approvers_for(department) - {role}))
             return Response(
@@ -160,7 +161,7 @@ class MaterialRequestViewSet(ModuleViewSetMixin, viewsets.ViewSet):
         r = qs.filter(pk=pk).first()
         if not r:
             return Response({"detail": "not found"}, status=404)
-        role = getattr(request.user, "role", "")
+        role = acting_role(request)
         if r.status == MaterialRequest.REQUESTED:
             approvers = indent_approvers_for(r.department)
             if role not in approvers:

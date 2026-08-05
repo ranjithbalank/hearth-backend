@@ -12,6 +12,21 @@ from .models import (
 )
 
 
+def _pdf_text(build):
+    """Text of a freshly-built ReportLab PDF, so a test can assert on what
+    actually reached the page rather than on the template that fed it.
+    Page streams are deflate-compressed by default; this renders with that off
+    so the strings are readable, then restores the global setting."""
+    from reportlab import rl_config
+
+    was = rl_config.pageCompression
+    rl_config.pageCompression = 0
+    try:
+        return build().read().decode("latin-1")
+    finally:
+        rl_config.pageCompression = was
+
+
 def signed_aggregator_post(client, url, payload, secret):
     """POST with a real X-Hearth-Signature — same HMAC-SHA256-of-raw-body
     a real Swiggy/Zomato webhook caller would send (see AggregatorConnection
@@ -293,6 +308,39 @@ class DiscountLoyaltyTests(TestCase):
         prop.save()
         r = self.client.get(reverse("order-bill-pdf", args=[o.id]))
         self.assertEqual(r.status_code, 200)
+
+    def test_bill_masthead_carries_number_date_and_title(self):
+        """A receipt with no number or date isn't a document you can hand a
+        guest — the bill used to print the number bare and no date at all.
+        Asserts against the built PDF, not the template, so a regression in
+        either the builder or its caller is caught."""
+        from apps.accounts.views import get_property
+        from apps.pos.bill_pdf import build_bill_pdf
+
+        o = self._order()
+        o.bill_no = "BILL-202608-00042"
+        o.save()
+        prop = get_property()
+        prop.gstin = "33ABCDE1234F1Z5"
+        prop.gst_billing_mode = "with_gst"
+        prop.save()
+
+        from django.utils import timezone
+
+        text = _pdf_text(lambda: build_bill_pdf(o, prop.name, with_gst=True, gstin=prop.gstin))
+        stamp = timezone.localtime(o.created_at)
+        self.assertIn("TAX INVOICE", text)
+        self.assertIn("Bill No", text)
+        self.assertIn("BILL-202608-00042", text)
+        self.assertIn(f"{stamp:%d %b %Y}", text)
+        self.assertIn("33ABCDE1234F1Z5", text)
+
+        # Without GST registration it's a bill of supply, and no GSTIN is shown.
+        prop.gst_billing_mode = "without_gst"
+        prop.save()
+        text = _pdf_text(lambda: build_bill_pdf(o, prop.name, with_gst=False, gstin=prop.gstin))
+        self.assertIn("BILL OF SUPPLY", text)
+        self.assertNotIn("33ABCDE1234F1Z5", text)
 
     def test_discount_within_cap_ok(self):
         self.client.force_authenticate(self.cashier)
@@ -722,7 +770,12 @@ class KotBillFlowTests(TestCase):
                              {"name": "Meera", "mobile": "98765 43210"}, format="json")
         self.assertEqual(r.status_code, 200)
         self.assertEqual(r.data["customer_name"], "Meera")
-        cust = Customer.objects.get(mobile="9876543210")
+        # One stored shape for every guest, Indian or not (Aug-2026 audit F2).
+        # This used to assert the bare "9876543210" that the +91 branch wrote,
+        # while foreign numbers were stored "+44 7700123456" — two conventions
+        # in one column, so the same person could occupy two rows depending on
+        # which counter entered them.
+        cust = Customer.objects.get(mobile="+919876543210")
         self.client.post(reverse("order-settle", args=[o.id]),
                          {"tender": "Cash", "receipt": "whatsapp"}, format="json")
         cust.refresh_from_db()
@@ -732,22 +785,40 @@ class KotBillFlowTests(TestCase):
         from apps.integrations.models import SentMessage
         msg = SentMessage.objects.latest("id")
         self.assertEqual(msg.channel, "whatsapp")
-        self.assertEqual(msg.to, "9876543210")
+        self.assertEqual(msg.to, "+919876543210")
 
     def test_attach_customer_keeps_foreign_country_code(self):
-        """A foreign guest's number is stored with its country code so the
-        receipt reaches them and the profile is found again next visit."""
+        """A foreign guest's number keeps its country code so the receipt
+        reaches them — in the same canonical shape as everyone else's."""
         from apps.crm.models import Customer
         o = self._order()
         r = self.client.post(reverse("order-attach-customer", args=[o.id]),
                              {"name": "Oliver", "mobile": "7700 123456", "country": "+44"},
                              format="json")
         self.assertEqual(r.status_code, 200)
-        self.assertTrue(Customer.objects.filter(mobile="+44 7700123456", name="Oliver").exists())
+        self.assertTrue(Customer.objects.filter(mobile="+447700123456", name="Oliver").exists())
         # Garbage country code refused.
         r = self.client.post(reverse("order-attach-customer", args=[o.id]),
                              {"mobile": "7700123456", "country": "44"}, format="json")
         self.assertEqual(r.status_code, 400)
+
+    def test_a_guest_saved_under_an_older_spelling_is_not_duplicated(self):
+        """The change of convention must not split a returning guest in two.
+
+        Rows created before the canonical form are still out there in every
+        live database — bare national numbers, and the spaced "+44 7700123456"
+        that POS wrote for foreign guests. Attaching that same person again has
+        to find them, not mint a second profile with its own loyalty balance."""
+        from apps.crm.models import Customer
+        legacy = Customer.objects.create(mobile="9876543210", name="Meera", loyalty_points=40)
+        o = self._order()
+        r = self.client.post(reverse("order-attach-customer", args=[o.id]),
+                             {"name": "Meera", "mobile": "9876543210"}, format="json")
+        self.assertEqual(r.status_code, 200)
+        self.assertEqual(Customer.objects.filter(name="Meera").count(), 1)
+        o.refresh_from_db()
+        self.assertEqual(o.customer_id, legacy.id)
+        self.assertEqual(Customer.objects.get(pk=legacy.pk).loyalty_points, 40)
 
     def test_settle_rejects_unfired_lines(self):
         o = self._order(fired=False)

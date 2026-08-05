@@ -1,6 +1,7 @@
 from django.db import models
 
 from apps.inventory.models import Ingredient
+from apps.accounts.validators import NON_NEGATIVE
 
 
 class MaterialRequest(models.Model):
@@ -33,7 +34,7 @@ class MaterialRequest(models.Model):
 class MaterialRequestLine(models.Model):
     request = models.ForeignKey(MaterialRequest, on_delete=models.CASCADE, related_name="lines")
     ingredient = models.ForeignKey(Ingredient, on_delete=models.PROTECT, related_name="indent_lines")
-    qty = models.DecimalField(max_digits=12, decimal_places=3)
+    qty = models.DecimalField(max_digits=12, decimal_places=3, validators=NON_NEGATIVE)
 
     def __str__(self):
         return f"{self.qty} {self.ingredient.name}"

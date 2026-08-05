@@ -112,7 +112,12 @@ class FolioViewSet(ModuleViewSetMixin, viewsets.ModelViewSet):
         payments = request.data.get("payments", [])
         if not payments:
             return Response({"detail": "payments required"}, status=400)
-        services.settle_folio(folio, payments, user=request.user)
+        try:
+            services.settle_folio(folio, payments, user=request.user)
+        except ValueError as e:
+            # settle_folio rejects non-positive amounts and already-settled
+            # folios; both are the cashier's mistake, not a server fault.
+            return Response({"detail": str(e)}, status=400)
         # settle_folio() creates new Settlement rows — the queryset that fetched
         # `folio` already prefetched (and cached) the old, empty settlements list,
         # so re-fetch before serializing or the response would show stale data.

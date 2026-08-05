@@ -53,8 +53,14 @@ def build_invoice_pdf(folio, property_name, gstin, address="", with_gst=True,
     """with_gst=True → GST tax invoice; False → bill of supply (no tax columns).
     logo/doc_header/doc_footer/alignment come from Settings → Letterhead.
     columns: optional extra line-item columns from Settings → Bill Template
-    (⊆ "type", "gst_rate") — additive only; the statutory GST columns below
-    are never hidden (BRD FR-TAX-003)."""
+    (⊆ "type") — additive only; the statutory GST columns below are never
+    hidden (BRD FR-TAX-003).
+
+    HSN/SAC and the tax rate are NOT in that optional set. Rule 46(f) and
+    46(k) require both against every line of a tax invoice, so they print
+    whenever with_gst is on. "gst_rate" used to be an opt-in column that
+    defaulted to off, which meant the default invoice was short a mandatory
+    particular."""
     buf = io.BytesIO()
     doc = SimpleDocTemplate(buf, pagesize=A4, topMargin=18 * mm, bottomMargin=18 * mm,
                             leftMargin=16 * mm, rightMargin=16 * mm, title=f"Invoice {folio.invoice_no or folio.id}")
@@ -79,10 +85,15 @@ def build_invoice_pdf(folio, property_name, gstin, address="", with_gst=True,
     logo_img = _logo_flowable(logo) if logo else None
     if logo_img:
         brand_cell.insert(0, logo_img)
+    # Invoice date is the date it was ISSUED, not when the folio opened — a stay
+    # checked in on the 1st and settled on the 5th is a 5th-of-the-month invoice,
+    # and the GST return it lands in follows this date. Falls back to opened_at
+    # for a proforma pulled before settlement.
+    issued_at = folio.settled_at or folio.opened_at
     header = Table([[
         brand_cell,
         Paragraph(f"<b>{doc_title}</b><br/><font size=9 color='#8A8478'>No. {folio.invoice_no or '—'}<br/>"
-                  f"{folio.opened_at:%d %b %Y}</font>", h_doc),
+                  f"Date: {issued_at:%d %b %Y}</font>", h_doc),
     ]], colWidths=[100 * mm, 78 * mm])
     header.setStyle(TableStyle([("VALIGN", (0, 0), (-1, -1), "TOP")]))
     story += [header, Spacer(1, 4), HRFlowable(width="100%", thickness=2, color=PINE), Spacer(1, 8)]
@@ -99,38 +110,35 @@ def build_invoice_pdf(folio, property_name, gstin, address="", with_gst=True,
     # are optional extra columns (Settings → Bill Template); the statutory
     # columns (Description/Taxable/CGST/SGST/Amount) are always present.
     show_type = "type" in columns
-    show_rate = with_gst and "gst_rate" in columns
     cgst = sgst = Decimal("0")
     if with_gst:
+        from apps.tax.models import hsn_for_kinds
+
+        lines = list(folio.lines.all())
+        hsn = hsn_for_kinds({l.kind for l in lines})
+        # Description, [Type], HSN/SAC, GST %, Taxable, CGST, SGST, Amount —
+        # the last six are statutory and always present.
         head = ["Description"]
         if show_type:
             head.append("Type")
-        if show_rate:
-            head.append("GST %")
-        head += ["Taxable", "CGST", "SGST", "Amount"]
+        head += ["HSN/SAC", "GST %", "Taxable", "CGST", "SGST", "Amount"]
         rows = [head]
-        for l in folio.lines.all():
+        for l in lines:
             row = [l.description]
             if show_type:
                 row.append(l.get_kind_display())
-            if show_rate:
-                row.append(f"{l.gst_rate}%")
-            row += [_money(l.taxable), _money(l.cgst), _money(l.sgst), _money(l.total)]
+            row += [hsn.get(l.kind, ""), f"{l.gst_rate}%",
+                    _money(l.taxable), _money(l.cgst), _money(l.sgst), _money(l.total)]
             rows.append(row)
             cgst += l.cgst
             sgst += l.sgst
-        # Widths in header order: Description, [Type], [GST %], Taxable, CGST, SGST, Amount.
-        desc_width = 74 * mm
-        if show_type:
-            desc_width -= 16 * mm
-        if show_rate:
-            desc_width -= 16 * mm
+        # Must total the 178mm of usable width (A4 less the 16mm margins), or
+        # ReportLab overflows the frame: 52 + 18 + 14 + 24 + 22 + 22 + 26.
+        desc_width = 52 * mm - (16 * mm if show_type else 0)
         col_widths = [desc_width]
         if show_type:
             col_widths.append(16 * mm)
-        if show_rate:
-            col_widths.append(16 * mm)
-        col_widths += [26 * mm, 24 * mm, 24 * mm, 30 * mm]
+        col_widths += [18 * mm, 14 * mm, 24 * mm, 22 * mm, 22 * mm, 26 * mm]
     else:
         head = ["Description"]
         if show_type:

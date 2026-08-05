@@ -12,6 +12,7 @@ from rest_framework.decorators import action
 from rest_framework.response import Response
 
 from apps.accounts.permissions import BranchUniqueFriendlyMixin, ModuleViewSetMixin, shared_or_visible
+from apps.accounts.rbac import base_role
 
 from .models import Ingredient, IngredientCategory, StockMovement, Uom, apply_movement
 from .serializers import (
@@ -266,7 +267,7 @@ class IngredientViewSet(BranchUniqueFriendlyMixin, ModuleViewSetMixin, viewsets.
         ?category=Liquor narrows the shared ledger to just the bar's stock
         (or any other category) without needing a separate system."""
         from apps.accounts.constants import ROLE_CHEF
-        show_cost = getattr(request.user, "role", "") != ROLE_CHEF
+        show_cost = base_role(getattr(request.user, "role", "")) != ROLE_CHEF
         days = int(request.query_params.get("days", 30))
         since = timezone.now() - timedelta(days=days)
         ingredients = Ingredient.objects.all()

@@ -116,6 +116,11 @@ DATABASES = {
 
 AUTH_USER_MODEL = "accounts.User"
 
+# Usernames are stored lower-case and compared without regard to capitals, so
+# one person has exactly one login however they type it (apps/accounts/
+# auth_backends.py explains the fallback rules for older mixed-case accounts).
+AUTHENTICATION_BACKENDS = ["apps.accounts.auth_backends.CaseInsensitiveUsernameBackend"]
+
 # Local-memory cache backs DRF throttling in dev; swap for Redis in production.
 CACHES = {
     "default": {

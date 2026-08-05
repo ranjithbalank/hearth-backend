@@ -111,8 +111,15 @@ class CustomerViewSet(AnyModuleViewSetMixin, viewsets.ModelViewSet):
     @action(detail=False, methods=["get"])
     def lookup(self, request):
         """Auto-fill a saved customer by mobile (FR-POS-009)."""
+        from apps.accounts.validators import phone_variants
+        from apps.accounts.views import get_property
+
         mobile = request.query_params.get("mobile", "")
-        cust = Customer.objects.filter(mobile=mobile).first()
+        # Match across every spelling the number may already be stored as —
+        # an exact match alone missed guests saved under an older convention
+        # and the counter would then create a duplicate profile for them.
+        default_code = getattr(get_property(), "default_country_code", "+91") or "+91"
+        cust = Customer.objects.filter(mobile__in=phone_variants(mobile, default_code)).first()
         if not cust:
             return Response({"found": False})
         return Response({"found": True, "customer": CustomerSerializer(cust).data})

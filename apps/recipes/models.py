@@ -4,6 +4,7 @@ from django.db import models
 
 from apps.inventory.models import Ingredient
 from apps.pos.models import MenuItem
+from apps.accounts.validators import NON_NEGATIVE, PERCENT
 
 
 class Recipe(models.Model):
@@ -51,12 +52,12 @@ class RecipeLine(models.Model):
     sub_recipe = models.ForeignKey(
         "pos.MenuItem", on_delete=models.PROTECT, null=True, blank=True, related_name="used_in_recipes"
     )
-    qty = models.DecimalField(max_digits=10, decimal_places=3, help_text="per single dish")
+    qty = models.DecimalField(max_digits=10, decimal_places=3, help_text="per single dish", validators=NON_NEGATIVE)
     # Recipe-side unit; blank = the ingredient's base unit. Allows "250 g" of
     # an ingredient stocked in kg — converted on deduction (spec §2).
     unit = models.CharField(max_length=12, blank=True, default="")
     # Expected prep wastage: consumption is inflated by this % (spec §2).
-    wastage_pct = models.DecimalField(max_digits=5, decimal_places=2, default=0)
+    wastage_pct = models.DecimalField(max_digits=5, decimal_places=2, default=0, validators=PERCENT)
 
     def __str__(self):
         target = self.ingredient.name if self.ingredient_id else f"sub:{self.sub_recipe}"
@@ -79,7 +80,7 @@ class ProductionBatch(models.Model):
     """
 
     menu_item = models.ForeignKey(MenuItem, on_delete=models.PROTECT, related_name="production_batches")
-    portions = models.DecimalField(max_digits=10, decimal_places=2)
+    portions = models.DecimalField(max_digits=10, decimal_places=2, validators=NON_NEGATIVE)
     produced_by = models.CharField(max_length=80, blank=True)
     created_at = models.DateTimeField(auto_now_add=True)
 

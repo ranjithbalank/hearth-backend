@@ -1,4 +1,5 @@
 from django.db import models
+from apps.accounts.validators import NON_NEGATIVE
 
 
 class FunctionSpace(models.Model):
@@ -22,8 +23,8 @@ class FunctionSpace(models.Model):
 class CateringRate(models.Model):
     """Singleton: the property's standard per-plate catering prices. New banquet
     events pre-fill their veg/non-veg rates from here (overridable per event)."""
-    veg_rate = models.DecimalField(max_digits=10, decimal_places=2, default=0)
-    nonveg_rate = models.DecimalField(max_digits=10, decimal_places=2, default=0)
+    veg_rate = models.DecimalField(max_digits=10, decimal_places=2, default=0, validators=NON_NEGATIVE)
+    nonveg_rate = models.DecimalField(max_digits=10, decimal_places=2, default=0, validators=NON_NEGATIVE)
 
     @classmethod
     def get_solo(cls):
@@ -47,8 +48,8 @@ class Event(models.Model):
     start_time = models.TimeField(null=True, blank=True, help_text="event start time")
     end_time = models.TimeField(null=True, blank=True, help_text="event end time")
     covers = models.PositiveSmallIntegerField(default=50)
-    package_amount = models.DecimalField(max_digits=12, decimal_places=2, default=0)
-    deposit = models.DecimalField(max_digits=12, decimal_places=2, default=0)
+    package_amount = models.DecimalField(max_digits=12, decimal_places=2, default=0, validators=NON_NEGATIVE)
+    deposit = models.DecimalField(max_digits=12, decimal_places=2, default=0, validators=NON_NEGATIVE)
     # Optional catering (only when the restaurant/F&B module is enabled).
     food_covers = models.PositiveSmallIntegerField(default=0, help_text="approx. plates to cater (veg + nonveg)")
     food_pref = models.CharField(max_length=10, blank=True, help_text="veg | nonveg | both")
@@ -56,8 +57,8 @@ class Event(models.Model):
     food_veg = models.PositiveSmallIntegerField(default=0, help_text="approx. veg plates")
     food_nonveg = models.PositiveSmallIntegerField(default=0, help_text="approx. non-veg plates")
     # Per-plate catering rates (₹/person) by preference.
-    veg_rate = models.DecimalField(max_digits=10, decimal_places=2, default=0, help_text="₹ per veg plate")
-    nonveg_rate = models.DecimalField(max_digits=10, decimal_places=2, default=0, help_text="₹ per non-veg plate")
+    veg_rate = models.DecimalField(max_digits=10, decimal_places=2, default=0, help_text="₹ per veg plate", validators=NON_NEGATIVE)
+    nonveg_rate = models.DecimalField(max_digits=10, decimal_places=2, default=0, help_text="₹ per non-veg plate", validators=NON_NEGATIVE)
     # BEO prep status shown on the kitchen display (FR-BQT-004): "" | pending | ready
     beo_status = models.CharField(max_length=10, blank=True, default="")
     # Sequential BEO document number, assigned once the event is first confirmed.

@@ -1,21 +1,28 @@
 from rest_framework import serializers
 
 from .models import Department, Designation, KitchenStation, PaymentMethod
+from apps.accounts.validators import CaseInsensitiveUniqueMixin
 
 
-class DepartmentSerializer(serializers.ModelSerializer):
+class DepartmentSerializer(CaseInsensitiveUniqueMixin, serializers.ModelSerializer):
+    ci_unique_fields = ['name']
+
     class Meta:
         model = Department
         fields = ["id", "name", "active"]
 
 
-class DesignationSerializer(serializers.ModelSerializer):
+class DesignationSerializer(CaseInsensitiveUniqueMixin, serializers.ModelSerializer):
+    ci_unique_fields = ['name']
+
     class Meta:
         model = Designation
         fields = ["id", "name", "active"]
 
 
-class KitchenStationSerializer(serializers.ModelSerializer):
+class KitchenStationSerializer(CaseInsensitiveUniqueMixin, serializers.ModelSerializer):
+    ci_unique_fields = ['name']
+
     class Meta:
         model = KitchenStation
         fields = ["id", "name", "mode", "is_bar", "active"]
@@ -31,7 +38,9 @@ class KitchenStationSerializer(serializers.ModelSerializer):
         return value
 
 
-class PaymentMethodSerializer(serializers.ModelSerializer):
+class PaymentMethodSerializer(CaseInsensitiveUniqueMixin, serializers.ModelSerializer):
+    ci_unique_fields = ['name']
+
     class Meta:
         model = PaymentMethod
         fields = ["id", "name", "active", "counts_as_cash", "captain_allowed", "builtin"]

@@ -3,6 +3,7 @@ from decimal import Decimal
 from django.db import models
 
 from apps.inventory.models import Ingredient
+from apps.accounts.validators import NON_NEGATIVE
 
 
 class Supplier(models.Model):
@@ -91,9 +92,9 @@ class PurchaseOrder(models.Model):
 class PurchaseOrderLine(models.Model):
     purchase_order = models.ForeignKey(PurchaseOrder, on_delete=models.CASCADE, related_name="lines")
     ingredient = models.ForeignKey(Ingredient, on_delete=models.PROTECT, related_name="po_lines")
-    qty = models.DecimalField(max_digits=12, decimal_places=3)
-    rate = models.DecimalField(max_digits=10, decimal_places=2)
-    received_qty = models.DecimalField(max_digits=12, decimal_places=3, default=0)
+    qty = models.DecimalField(max_digits=12, decimal_places=3, validators=NON_NEGATIVE)
+    rate = models.DecimalField(max_digits=10, decimal_places=2, validators=NON_NEGATIVE)
+    received_qty = models.DecimalField(max_digits=12, decimal_places=3, default=0, validators=NON_NEGATIVE)
 
     def __str__(self):
         return f"{self.qty} {self.ingredient.name} @ {self.rate}"

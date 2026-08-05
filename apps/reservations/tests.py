@@ -106,3 +106,61 @@ class PreCheckinTests(TestCase):
         self.res.refresh_from_db()
         self.assertTrue(self.res.precheckin_done)
         self.assertEqual(self.res.precheckin["id_type"], "Aadhaar")
+
+
+class StayDateRuleTests(TestCase):
+    """Aug-2026 audit F3. A stay that runs backwards posts negative room nights
+    into revenue, occupancy and ADR, and nothing downstream re-checks it. The
+    rule already existed on channel ingest and on stay extension; these pin it
+    everywhere else."""
+
+    def setUp(self):
+        self.client = APIClient()
+        self.mgr = User.objects.create_user(
+            username="daterule", password="Tk9$mZ2pQw!7", role="General Manager")
+        self.client.force_authenticate(self.mgr)
+        self.rt = RoomType.objects.create(code="STDX", name="Standard X", base_rate=3000)
+
+    def _booking(self, checkin, checkout, **extra):
+        body = {"guest_name": "Ravi Kumar", "room_type": self.rt.id,
+                "checkin_date": checkin, "checkout_date": checkout}
+        body.update(extra)
+        return self.client.post("/api/reservations/", body, format="json")
+
+    def test_a_stay_cannot_end_before_it_starts(self):
+        r = self._booking("2026-09-10", "2026-09-05", nights=5)
+        self.assertEqual(r.status_code, 400)
+
+    def test_a_stay_cannot_start_and_end_the_same_day(self):
+        r = self._booking("2026-09-10", "2026-09-10", nights=1)
+        self.assertEqual(r.status_code, 400)
+
+    def test_nights_is_derived_from_the_dates_not_trusted(self):
+        # A nights that disagrees with the dates would bill a different stay
+        # from the one booked.
+        r = self._booking("2026-09-10", "2026-09-13", nights=99)
+        self.assertEqual(r.status_code, 201)
+        self.assertEqual(Reservation.objects.get(pk=r.data["id"]).nights, 3)
+
+    def test_a_walk_in_cannot_book_a_negative_stay(self):
+        r = self.client.post("/api/reservations/walkin/", {
+            "guest_name": "Priya Nair", "room_type": "STDX", "nights": -3}, format="json")
+        self.assertEqual(r.status_code, 400)
+        self.assertFalse(Reservation.objects.filter(guest_name="Priya Nair").exists())
+
+    def test_a_group_block_cannot_run_backwards(self):
+        r = self.client.post("/api/group-blocks/", {
+            "name": "Wedding", "room_type": "STDX", "rooms_blocked": 4,
+            "checkin_date": "2026-09-20", "checkout_date": "2026-09-15"}, format="json")
+        self.assertEqual(r.status_code, 400)
+
+    def test_a_group_block_cannot_hold_a_negative_number_of_rooms(self):
+        r = self.client.post("/api/group-blocks/", {
+            "name": "Wedding", "room_type": "STDX", "rooms_blocked": -4,
+            "checkin_date": "2026-09-15", "checkout_date": "2026-09-20"}, format="json")
+        self.assertEqual(r.status_code, 400)
+
+    def test_a_normal_booking_still_saves(self):
+        r = self._booking("2026-09-10", "2026-09-12")
+        self.assertEqual(r.status_code, 201)
+        self.assertEqual(Reservation.objects.get(pk=r.data["id"]).nights, 2)

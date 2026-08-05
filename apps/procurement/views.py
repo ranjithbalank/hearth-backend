@@ -4,6 +4,7 @@ from rest_framework.decorators import action
 from rest_framework.response import Response
 
 from apps.accounts.models import log_action
+from apps.accounts.rbac import acting_role
 from apps.accounts.permissions import (
     AnyModuleViewSetMixin,
     ModuleViewSetMixin,
@@ -217,7 +218,7 @@ class PurchaseOrderViewSet(AnyModuleViewSetMixin, viewsets.ViewSet):
         from apps.accounts.constants import PO_APPROVER_ROLES, PO_HANDLER_ROLES
         from apps.inventory.models import Ingredient
 
-        if getattr(request.user, "role", "") not in PO_HANDLER_ROLES:
+        if acting_role(request) not in PO_HANDLER_ROLES:
             return Response(
                 {"detail": "raising a purchase order is the store's job — Restaurant Manager or "
                            "Store Keeper (Finance approves the spend once it's raised)"},
@@ -246,7 +247,7 @@ class PurchaseOrderViewSet(AnyModuleViewSetMixin, viewsets.ViewSet):
         # A raiser who IS a spend authority (Restaurant Manager, Finance,
         # GM/MD/SA) doesn't queue behind themselves — their PO is approved on
         # creation. Only non-approver raisers (Store Keeper) need a sign-off.
-        auto_approved = getattr(request.user, "role", "") in PO_APPROVER_ROLES
+        auto_approved = acting_role(request) in PO_APPROVER_ROLES
         with transaction.atomic():
             from apps.accounts.models import Property
             from apps.accounts.numbering import next_document_number
@@ -268,7 +269,7 @@ class PurchaseOrderViewSet(AnyModuleViewSetMixin, viewsets.ViewSet):
     @action(detail=True, methods=["post"])
     def approve(self, request, pk=None):
         from apps.accounts.constants import PO_APPROVER_ROLES
-        if getattr(request.user, "role", "") not in PO_APPROVER_ROLES:
+        if acting_role(request) not in PO_APPROVER_ROLES:
             return Response(
                 {"detail": "PO approval is a spend decision — it needs the restaurant manager, finance or GM"},
                 status=403)
@@ -292,7 +293,7 @@ class PurchaseOrderViewSet(AnyModuleViewSetMixin, viewsets.ViewSet):
         receipt (another GRN) closes it."""
         from decimal import Decimal, InvalidOperation
         from apps.accounts.constants import PO_HANDLER_ROLES
-        if getattr(request.user, "role", "") not in PO_HANDLER_ROLES:
+        if acting_role(request) not in PO_HANDLER_ROLES:
             return Response(
                 {"detail": "goods receipt is the store's job — Restaurant Manager or Store Keeper"},
                 status=403)

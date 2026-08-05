@@ -122,14 +122,28 @@ class BanquetViewSet(ModuleViewSetMixin, viewsets.ViewSet):
         defaults = CateringRate.get_solo()
         veg_rate = Decimal(str(request.data.get("veg_rate") or 0)) or defaults.veg_rate
         nonveg_rate = Decimal(str(request.data.get("nonveg_rate") or 0)) or defaults.nonveg_rate
+        # This path builds kwargs and calls Event.objects.create(), which skips
+        # the non-negative rules declared on the model — those only fire through
+        # a serializer. A banquet contract is often the largest single amount a
+        # property books, so it gets the checks spelled out.
+        package_amount = Decimal(str(request.data.get("package_amount", 0) or 0))
+        deposit = Decimal(str(request.data.get("deposit", 0) or 0))
+        if package_amount < 0:
+            return Response({"detail": "the package amount can't be negative"}, status=400)
+        if deposit < 0:
+            return Response({"detail": "the deposit can't be negative"}, status=400)
+        if package_amount and deposit > package_amount:
+            # Otherwise the property is holding more of the customer's money
+            # than the event is contracted to be worth.
+            return Response({"detail": "the deposit can't be more than the package amount"},
+                            status=400)
         e = Event.objects.create(
             space=space, title=request.data.get("title", "Event"),
             host=request.data.get("host", ""), contact=request.data.get("contact", ""),
             event_type=request.data.get("event_type", ""), event_date=event_date,
             start_time=request.data.get("start_time") or None,
             end_time=request.data.get("end_time") or None,
-            covers=covers, package_amount=Decimal(str(request.data.get("package_amount", 0) or 0)),
-            deposit=Decimal(str(request.data.get("deposit", 0) or 0)),
+            covers=covers, package_amount=package_amount, deposit=deposit,
             food_covers=food_covers, food_pref=food_pref,
             food_veg=food_veg, food_nonveg=food_nonveg,
             veg_rate=veg_rate, nonveg_rate=nonveg_rate,
@@ -174,10 +188,18 @@ class BanquetViewSet(ModuleViewSetMixin, viewsets.ViewSet):
             e.start_time = d.get("start_time") or None
         if "end_time" in d:
             e.end_time = d.get("end_time") or None
+        # Same money rules as create — an amend must not be the way around them.
         if "package_amount" in d:
             e.package_amount = Decimal(str(d.get("package_amount") or 0))
         if "deposit" in d:
             e.deposit = Decimal(str(d.get("deposit") or 0))
+        if e.package_amount < 0:
+            return Response({"detail": "the package amount can't be negative"}, status=400)
+        if e.deposit < 0:
+            return Response({"detail": "the deposit can't be negative"}, status=400)
+        if e.package_amount and e.deposit > e.package_amount:
+            return Response({"detail": "the deposit can't be more than the package amount"},
+                            status=400)
 
         if any(k in d for k in ("food_pref", "food_veg", "food_nonveg")):
             food_pref = d.get("food_pref", e.food_pref)

@@ -1,3 +1,6 @@
+import re
+
+from django.db import models
 from django.utils import timezone
 from rest_framework import status, viewsets
 from rest_framework.decorators import action
@@ -6,14 +9,32 @@ from rest_framework.response import Response
 from rest_framework.views import APIView
 from rest_framework_simplejwt.views import TokenObtainPairView
 
-from .constants import ALL_MODULES, ROLE_ALLOW, edition_entitlements
-from .models import Branch, Entitlement, PasswordReset, Property, User, UserBranchAccess, log_action
+from .constants import ALL_MODULES, LICENSED_FLAGS, ROLE_ALLOW, ROLE_SUPER_ADMIN, edition_entitlements
+from .rbac import (
+    allowed_modules_for,
+    assignable_roles,
+    base_role,
+    can_assign_role,
+    role_names_for,
+    role_rank,
+)
+from .models import (
+    Branch,
+    Entitlement,
+    PasswordReset,
+    Property,
+    Role,
+    User,
+    UserBranchAccess,
+    log_action,
+)
 from .permissions import ModulePermission, ModuleViewSetMixin
 from .serializers import (
     BranchSerializer,
     EntitlementSerializer,
     HearthTokenSerializer,
     PropertySerializer,
+    RoleSerializer,
     UserBranchAccessSerializer,
     UserSerializer,
 )
@@ -68,8 +89,26 @@ class PropertyView(APIView):
     def get(self, request):
         return Response(PropertySerializer(get_property()).data)
 
+    # A document number is PREFIX-YYYYMM-NNNNN (numbering.py) = len(prefix)+13.
+    # Rule 46(b) caps a tax-invoice number at 16 characters, so the prefix on
+    # the two statutory series can be at most 3. The field itself allows 12,
+    # which silently produced 25-character numbers that breach the rule; the
+    # internal series (PO/GRN/BEO) aren't tax documents and stay unrestricted.
+    STATUTORY_PREFIXES = {"invoice_prefix": "guest invoice", "bill_prefix": "POS bill"}
+    MAX_PREFIX = 3
+
     def patch(self, request):
         prop = get_property()
+        for field, label in self.STATUTORY_PREFIXES.items():
+            value = (request.data.get(field) or "").strip()
+            if value and len(value) > self.MAX_PREFIX:
+                return Response(
+                    {"detail": f"The {label} prefix can be at most {self.MAX_PREFIX} characters "
+                               f"— a GST invoice number may not exceed 16 in total "
+                               f"(PREFIX-YYYYMM-NNNNN).",
+                     "field": field},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
         for f in ["name", "gstin", "address", "phone", "logo", "currency",
                   "doc_header", "doc_footer", "doc_header_align", "doc_footer_align",
                   "pos_doc_header", "pos_doc_footer", "pos_doc_header_align", "pos_doc_footer_align",
@@ -96,32 +135,133 @@ class FeatureModelView(APIView):
         return Response({"features": feature_model()})
 
 
-class SetupView(APIView):
-    """One-time property setup: choose edition -> write entitlement record."""
+def _branch_code(name: str) -> str:
+    """A short unique code for a branch, derived from its name (SEA, SEA2…).
 
-    permission_classes = [AllowAny]
+    `Branch.code` is unique and lands in the invoice series, so two locations can
+    never collide on a number — it has to be generated, not guessed.
+    """
+    base = re.sub(r"[^A-Za-z0-9]", "", name).upper()[:3] or "MAIN"
+    code, n = base, 1
+    while Branch.objects.filter(code=code).exists():
+        n += 1
+        code = f"{base}{n}"[:10]
+    return code
+
+
+class SetupView(APIView):
+    """First-run setup, run once by the owner on their own property.
+
+    The EDITION is deliberately not settable here. It is what the customer
+    bought, so Hearth provisions it before handover (`manage.py provision`) and
+    the wizard shows it read-only. This endpoint only records the business
+    details the owner fills in, opens their first branch, and flips setup_done.
+
+    It was AllowAny with no completion guard, which meant anyone — logged out,
+    from anywhere — could POST {"edition": "both"} and unlock the full hotel
+    suite on a restaurant-only licence. Now guarded three ways: owner account
+    only, refuses once setup is complete, and ignores any edition/entitlement
+    keys in the payload.
+    """
+
+    permission_classes = [IsAuthenticated]
+
+    # What the first-run wizard is allowed to write. `edition` and the four
+    # LICENSED_FLAGS are absent on purpose — see the docstring.
+    FIELDS = ["name", "address", "phone", "gstin", "currency", "gst_billing_mode",
+              "default_country_code"]
 
     def post(self, request):
-        edition = request.data.get("edition")
-        if edition not in {"hotel", "restaurant", "both"}:
-            return Response(
-                {"detail": "edition must be hotel, restaurant or both"},
-                status=status.HTTP_400_BAD_REQUEST,
-            )
+        if not request.user.is_superuser:
+            return Response({"detail": "Only the owner account can run first-time setup."},
+                            status=status.HTTP_403_FORBIDDEN)
         prop = get_property()
-        prop.edition = edition
+        if prop.setup_done:
+            return Response({"detail": "Setup is already complete."},
+                            status=status.HTTP_409_CONFLICT)
+        if prop.edition not in {"hotel", "restaurant", "both"}:
+            return Response(
+                {"detail": "This install has not been provisioned with an edition yet — "
+                           "contact Hearth to activate it."},
+                status=status.HTTP_409_CONFLICT,
+            )
+        # Route the payload through the serializer's own field rules rather than
+        # writing it raw — setup was the one path that could seed a property
+        # with a phone number nothing had validated.
+        submitted = {k: request.data[k] for k in self.FIELDS if request.data.get(k)}
+        checked = PropertySerializer(prop, data=submitted, partial=True)
+        checked.is_valid(raise_exception=True)
+        for field, value in checked.validated_data.items():
+            setattr(prop, field, value)
         prop.setup_done = True
-        if request.data.get("name"):
-            prop.name = request.data["name"]
+        if not prop.business_date:
+            prop.business_date = timezone.localdate()
         prop.save()
-        flags = edition_entitlements(edition)
-        ent = prop.entitlement
-        for k, v in flags.items():
-            setattr(ent, k, v)
-        ent.save()
-        log_action(getattr(request, "user", None), "property_setup",
-                   entity="Property", entity_id=prop.id, after={"edition": edition})
+        branch = self._first_branch(prop, request.data)
+        log_action(request.user, "property_setup", entity="Property", entity_id=prop.id,
+                   after={"edition": prop.edition, "name": prop.name, "branch": branch.code})
         return Response(PropertySerializer(prop).data)
+
+    def _first_branch(self, prop, data):
+        """Open the property's first location. Setup used to leave the customer
+        with zero branches, so every branch-scoped screen came up empty on the
+        very first login."""
+        existing = prop.branches.first()
+        if existing:
+            return existing
+        name = (data.get("branch_name") or prop.name or "Main").strip()
+        code = (data.get("branch_code") or "").strip().upper() or _branch_code(name)
+        return Branch.objects.create(
+            property=prop, name=name, code=code,
+            address=prop.address, gstin=prop.gstin,
+            city=(data.get("city") or "").strip(),
+            state=(data.get("state") or "").strip(),
+            edition=prop.edition, status=Branch.STATUS_ACTIVE,
+            **edition_entitlements(prop.edition),
+        )
+
+
+class SetupChecklistView(APIView):
+    """What setup still needs, and the starter packs on offer for this licence.
+
+    Computed from live rows rather than a stored step counter, so it stays
+    honest when the owner imports a spreadsheet, does things out of order, or
+    deletes something later. `blocking` is the subset that genuinely stops them
+    operating — everything else can wait, which is what keeps this a checklist
+    rather than a twenty-step wall.
+    """
+
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request):
+        from .onboarding import checklist, pack_catalog
+
+        prop = get_property()
+        return Response({"checklist": checklist(prop), "packs": pack_catalog(prop)})
+
+
+class StarterPackView(APIView):
+    """Apply starter data packs. Writes master data, so it is settings-gated the
+    same way the masters screens are — and each pack is skipped unless the
+    licence covers it, so a restaurant install can't seed itself room types."""
+
+    module = "settings"
+
+    def get_permissions(self):
+        return [IsAuthenticated(), ModulePermission()]
+
+    def post(self, request):
+        from .onboarding import apply_packs, checklist
+
+        keys = request.data.get("packs") or []
+        if not isinstance(keys, list):
+            return Response({"detail": "packs must be a list of pack keys"},
+                            status=status.HTTP_400_BAD_REQUEST)
+        prop = get_property()
+        created = apply_packs(prop, keys, request.data.get("options") or {})
+        log_action(request.user, "starter_packs", entity="Property", entity_id=prop.id,
+                   after={"packs": keys, "created": created})
+        return Response({"created": created, "checklist": checklist(prop)})
 
 
 class BootstrapAdminView(APIView):
@@ -141,17 +281,29 @@ class BootstrapAdminView(APIView):
         if User.objects.filter(is_superuser=True).exists():
             return Response({"detail": "Setup is already complete — sign in instead."},
                             status=status.HTTP_403_FORBIDDEN)
-        username = (request.data.get("username") or "").strip()
+        from rest_framework.serializers import ValidationError as DRFValidationError
+
+        from .validators import validate_username as clean_username
         email = (request.data.get("email") or "").strip()
         password = request.data.get("password") or ""
         name = (request.data.get("name") or "").strip()
         first, _, last = name.partition(" ")
-        if not username:
-            return Response({"detail": "A username is required"}, status=status.HTTP_400_BAD_REQUEST)
+        try:
+            username = clean_username(request.data.get("username") or "")
+        except DRFValidationError as e:
+            detail = e.detail[0] if isinstance(e.detail, list) else str(e.detail)
+            return Response({"detail": detail}, status=status.HTTP_400_BAD_REQUEST)
         if User.objects.filter(username__iexact=username).exists():
             return Response({"detail": "That username is already taken"}, status=status.HTTP_400_BAD_REQUEST)
         if not email:
             return Response({"detail": "An email is required"}, status=status.HTTP_400_BAD_REQUEST)
+        from .validators import normalize_email
+        email = normalize_email(email)
+        # Same rule the Users screen enforces: password reset is delivered to
+        # this address, so it has to identify exactly one account.
+        if User.objects.filter(email__iexact=email).exists():
+            return Response({"detail": "That email is already on another account"},
+                            status=status.HTTP_400_BAD_REQUEST)
         try:
             validate_password(password)
         except DjangoValidationError as exc:
@@ -173,7 +325,14 @@ class EntitlementView(APIView):
     never actually checked role/module, so any logged-in user (Housekeeping,
     a cashier, a captain) could flip HMS/restaurant/banquets/RMS for the
     whole property (go-live QA finding CX-RBAC-02: PATCH /auth/entitlements/).
-    Now gated the same way as /auth/property/: settings-capable roles only."""
+    Now gated the same way as /auth/property/: settings-capable roles only.
+
+    Role is only half of it, though: the four LICENSED_FLAGS are what the
+    customer BOUGHT, so nobody on the customer side may write them regardless of
+    role — the owner included. Settings still owns everything else on this model
+    (bar mode, KDS behaviour, the per-feature toggles), which is configuration
+    within the licence. See constants.LICENSED_FLAGS.
+    """
 
     module = "settings"
 
@@ -183,6 +342,14 @@ class EntitlementView(APIView):
     def patch(self, request):
         prop = get_property()
         ent = prop.entitlement
+        licensed = [f for f in LICENSED_FLAGS if f in request.data]
+        if licensed:
+            return Response(
+                {"detail": f"{', '.join(licensed)} is part of your Hearth licence and can't be "
+                           f"changed here. Contact Hearth to change your plan.",
+                 "licensed_flags": licensed},
+                status=status.HTTP_403_FORBIDDEN,
+            )
         # A per-feature toggle (Settings > Features): {feature, enabled}. Runs
         # the dependency engine so the choice always leaves a valid combination
         # — enabling pulls prerequisites on, disabling cascades dependents off.
@@ -285,9 +452,207 @@ class PasswordResetConfirmView(APIView):
 
 
 class UserViewSet(ModuleViewSetMixin, viewsets.ModelViewSet):
-    module = "settings"
+    """Users & Roles. Gated on "users" rather than "settings" so HR can run the
+    staff roster end to end (hire on the Employees master, hand out the login
+    here) without seeing property configuration, entitlements or numbering.
+
+    Every write also passes the seniority ladder in constants.ROLE_RANK — a
+    module gate alone would let an Admin PATCH themselves to Super Admin.
+    """
+
+    module = "users"
     queryset = User.objects.all().order_by("role", "username")
     serializer_class = UserSerializer
+
+    def _deny(self, detail):
+        return Response({"detail": detail}, status=status.HTTP_403_FORBIDDEN)
+
+    @action(detail=False, methods=["get"], url_path="assignable-roles")
+    def role_options(self, request):
+        """The role picker's options: every role the caller may hand out — the
+        property's own roles included — each with the modules it unlocks, so
+        whoever creates the login sees the access they're granting instead of
+        guessing from the role name."""
+        mine = getattr(request.user, "role", "")
+        rows = {r.name: r for r in Role.objects.all()}
+        out = []
+        for name in assignable_roles(mine):
+            row = rows.get(name)
+            out.append({
+                "role": name,
+                "rank": role_rank(name),
+                "modules": allowed_modules_for(name),
+                "custom": bool(row and not row.is_system),
+                "behaves_as": row.behaves_as if row else name,
+                "description": row.description if row else "",
+            })
+        return Response(out)
+
+    def create(self, request, *args, **kwargs):
+        mine = getattr(request.user, "role", "")
+        target = request.data.get("role")
+        if not can_assign_role(mine, target):
+            return self._deny(
+                f"As {mine} you can't create a {target or 'user with no role'}. "
+                f"You may only assign roles at or below your own."
+            )
+        return super().create(request, *args, **kwargs)
+
+    def update(self, request, *args, **kwargs):
+        instance = self.get_object()
+        mine = getattr(request.user, "role", "")
+        # Editing someone more senior than you — even to flip is_active — is
+        # not yours to do, so check the CURRENT role before the requested one.
+        if role_rank(instance.role) > role_rank(mine):
+            return self._deny(f"{instance.username} is a {instance.role} — only "
+                              f"{instance.role} or above can change that account.")
+        target = request.data.get("role", instance.role)
+        if target != instance.role:
+            if instance.pk == request.user.pk:
+                return self._deny("You can't change your own role — ask someone "
+                                  "at or above your level.")
+            if not can_assign_role(mine, target):
+                return self._deny(f"As {mine} you can't move {instance.username} to {target}.")
+            if base_role(instance.role) == ROLE_SUPER_ADMIN and self._last_owner(instance):
+                return self._deny("This is the only Super Admin — appoint another "
+                                  "one before changing this account's role.")
+        # Form-encoded requests send "false" as a string, JSON sends a bool —
+        # read both, or the guard below silently never fires.
+        deactivating = str(request.data.get("is_active", "")).lower() in ("false", "0")
+        if deactivating and self._last_owner(instance):
+            return self._deny("This is the only Super Admin — the property would "
+                              "be left with no owner.")
+        return super().update(request, *args, **kwargs)
+
+    def destroy(self, request, *args, **kwargs):
+        instance = self.get_object()
+        mine = getattr(request.user, "role", "")
+        if instance.pk == request.user.pk:
+            return self._deny("You can't delete your own account.")
+        if role_rank(instance.role) > role_rank(mine):
+            return self._deny(f"{instance.username} is a {instance.role} — that's "
+                              f"above your level.")
+        if self._last_owner(instance):
+            return self._deny("This is the only Super Admin — the property would "
+                              "be left with no owner.")
+        return super().destroy(request, *args, **kwargs)
+
+    @staticmethod
+    def _last_owner(user):
+        """True when deactivating/deleting/demoting `user` would leave the
+        property with no active Super Admin at all."""
+        if base_role(user.role) != ROLE_SUPER_ADMIN or not user.is_active:
+            return False
+        return not User.objects.filter(
+            role__in=role_names_for(ROLE_SUPER_ADMIN), is_active=True).exclude(pk=user.pk).exists()
+
+
+class RoleViewSet(ModuleViewSetMixin, viewsets.ModelViewSet):
+    """Role Master — the roles this property hands out.
+
+    The seventeen built-ins arrive seeded and stay `is_system`: their name,
+    base and rank are fixed because the rest of the backend reasons in those
+    names, but their module mapping is editable like any other. Anything else
+    is a role the property created, based on a built-in whose behaviour it
+    inherits (see models.Role).
+
+    Guards are the same two ideas as everywhere else in Users & Roles — you
+    can't create seniority above your own, and you can't hand out access you
+    don't hold yourself. Without the second one, "new role" would be a way to
+    build yourself a Super Admin one module at a time.
+    """
+
+    module = "roles"
+    queryset = Role.objects.all()
+    serializer_class = RoleSerializer
+
+    def _check(self, request, data, instance=None):
+        """Returns an error string, or None when the write is allowed."""
+        mine = getattr(request.user, "role", "")
+        my_modules = allowed_modules_for(mine)
+
+        if instance is not None and instance.is_system:
+            for field, label in (("name", "name"), ("base_role", "base role"), ("rank", "rank")):
+                if field in data and str(data[field]) != str(getattr(instance, field)):
+                    return (f"{instance.name} is a built-in role — its {label} is fixed. "
+                            f"You can still change which screens it opens.")
+
+        rank = data.get("rank", getattr(instance, "rank", 1))
+        try:
+            rank = int(rank)
+        except (TypeError, ValueError):
+            return "Rank must be a whole number."
+        if rank > role_rank(mine):
+            return (f"As {mine} you can't create a role more senior than yourself "
+                    f"(rank {rank} vs your {role_rank(mine)}).")
+
+        base = data.get("base_role", getattr(instance, "base_role", "")) or ""
+        if base and not can_assign_role(mine, base):
+            return f"As {mine} you can't base a role on {base}."
+        if base and base not in ROLE_ALLOW:
+            return f"'{base}' isn't a built-in role — pick one to base this on."
+        if instance is None and not base:
+            return "Pick the built-in role this one should behave as."
+
+        modules = data.get("modules")
+        if modules is not None and my_modules != "*":
+            if modules == "*":
+                return "Only a full-access role can grant full access."
+            unknown = [m for m in modules if m not in ALL_MODULES]
+            if unknown:
+                return f"Unknown screen(s): {', '.join(unknown)}."
+            over = [m for m in modules if m not in my_modules]
+            if over:
+                return (f"You don't have {', '.join(sorted(over))} yourself, so you can't "
+                        f"grant it. Ask a Super Admin, Managing Director or General Manager.")
+        return None
+
+    def create(self, request, *args, **kwargs):
+        error = self._check(request, request.data)
+        if error:
+            return Response({"detail": error}, status=status.HTTP_403_FORBIDDEN)
+        return super().create(request, *args, **kwargs)
+
+    def update(self, request, *args, **kwargs):
+        error = self._check(request, request.data, self.get_object())
+        if error:
+            return Response({"detail": error}, status=status.HTTP_403_FORBIDDEN)
+        return super().update(request, *args, **kwargs)
+
+    def destroy(self, request, *args, **kwargs):
+        role = self.get_object()
+        if role.is_system:
+            return Response({"detail": f"{role.name} is a built-in role and can't be deleted. "
+                                       f"Set it inactive if you don't use it."},
+                            status=status.HTTP_403_FORBIDDEN)
+        holders = User.objects.filter(role=role.name).count()
+        if holders:
+            return Response({"detail": f"{holders} account(s) still hold {role.name} — move them "
+                                       f"to another role first, or set this one inactive."},
+                            status=status.HTTP_400_BAD_REQUEST)
+        if role_rank(role.name) > role_rank(getattr(request.user, "role", "")):
+            return Response({"detail": f"{role.name} is above your level."},
+                            status=status.HTTP_403_FORBIDDEN)
+        return super().destroy(request, *args, **kwargs)
+
+    def perform_create(self, serializer):
+        role = serializer.save(is_system=False)
+        log_action(self.request.user, "role_create", entity="Role", entity_id=role.id,
+                   after={"name": role.name, "base": role.base_role, "rank": role.rank,
+                          "modules": role.modules})
+
+    def perform_update(self, serializer):
+        before = {"modules": serializer.instance.modules, "rank": serializer.instance.rank,
+                  "active": serializer.instance.active}
+        role = serializer.save()
+        log_action(self.request.user, "role_update", entity="Role", entity_id=role.id,
+                   before=before,
+                   after={"modules": role.modules, "rank": role.rank, "active": role.active})
+
+    def perform_destroy(self, instance):
+        log_action(self.request.user, "role_delete", entity="Role", entity_id=instance.id,
+                   before={"name": instance.name, "base": instance.base_role})
+        instance.delete()
 
 
 class BranchViewSet(ModuleViewSetMixin, viewsets.ModelViewSet):
@@ -380,7 +745,9 @@ class UserBranchAccessViewSet(ModuleViewSetMixin, viewsets.ModelViewSet):
     calls it this way); unfiltered lists everyone's, for the Branch Master
     screen's roster view."""
 
-    module = "settings"
+    # Part of the Users screen, so it follows "users" — and it grants a role at
+    # a branch, so it obeys the same ladder (perform_create below).
+    module = "users"
     serializer_class = UserBranchAccessSerializer
 
     def get_queryset(self):
@@ -392,6 +759,15 @@ class UserBranchAccessViewSet(ModuleViewSetMixin, viewsets.ModelViewSet):
         if branch_id:
             qs = qs.filter(branch_id=branch_id)
         return qs
+
+    def create(self, request, *args, **kwargs):
+        mine = getattr(request.user, "role", "")
+        target = request.data.get("role")
+        if target and not can_assign_role(mine, target):
+            return Response(
+                {"detail": f"As {mine} you can't assign someone as {target} at a branch."},
+                status=status.HTTP_403_FORBIDDEN)
+        return super().create(request, *args, **kwargs)
 
     def perform_create(self, serializer):
         access = serializer.save()
@@ -457,52 +833,86 @@ class MfaDisableView(APIView):
 class RoleMatrixView(APIView):
     """Editable role × module permission matrix (BRD FR-USR-002 / 5.10).
 
-    GET returns the live matrix (honours RoleConfig overrides). POST toggles a
-    module for a role: {role, module, allowed}. Super Admin/MD/GM are protected
-    (full access). Only roles with the 'roles' module may view or edit —
-    segregation of duties: nobody grants themselves access.
+    The grid half of Role Master: GET returns every role in the table — the
+    property's own included — against every module; POST toggles one cell
+    ({role, module, allowed}) straight onto that role's mapping. Super
+    Admin/MD/GM are protected (full access). Only roles holding the 'roles'
+    module may view or edit, and never their own row (see post()).
     """
 
     permission_classes = [IsAuthenticated, ModulePermission]
     module = "roles"
 
     def get(self, request):
-        from .rbac import allowed_modules_for
-        roles = list(ROLE_ALLOW.keys())
-        allow_by_role = {r: allowed_modules_for(r) for r in roles}
+        from .rbac import PROTECTED
+        rows = list(Role.objects.all())
+        if not rows:            # unseeded database — fall back to the constants
+            names = list(ROLE_ALLOW.keys())
+            meta = [{"role": n, "is_system": True, "rank": role_rank(n),
+                     "behaves_as": n, "users": 0, "active": True} for n in names]
+        else:
+            counts = {r["role"]: r["n"] for r in
+                      User.objects.values("role").annotate(n=models.Count("id"))}
+            names = [r.name for r in rows]
+            meta = [{"role": r.name, "is_system": r.is_system, "rank": r.rank,
+                     "behaves_as": r.behaves_as, "users": counts.get(r.name, 0),
+                     "active": r.active} for r in rows]
+        allow_by_role = {n: allowed_modules_for(n) for n in names}
         matrix = []
         for module in ALL_MODULES:
             cells = []
-            for role in roles:
+            for role in names:
                 allow = allow_by_role[role]
                 cells.append(allow == "*" or module in allow)
             matrix.append({"module": module, "cells": cells})
-        from .rbac import PROTECTED
-        return Response({"roles": roles, "matrix": matrix, "protected": list(PROTECTED)})
+        return Response({"roles": names, "matrix": matrix, "meta": meta,
+                         "protected": list(PROTECTED),
+                         "my_role": getattr(request.user, "role", "")})
 
     def post(self, request):
-        from .models import RoleConfig
-        from .rbac import PROTECTED, allowed_modules_for
+        from .rbac import PROTECTED
         role = request.data.get("role")
         module = request.data.get("module")
         allowed = bool(request.data.get("allowed"))
-        if role not in ROLE_ALLOW:
+        row = Role.objects.filter(name=role).first()
+        if row is None and role not in ROLE_ALLOW:
             return Response({"detail": "unknown role"}, status=status.HTTP_400_BAD_REQUEST)
-        if role in PROTECTED:
+        if base_role(role) in PROTECTED:
             return Response({"detail": f"{role} always has full access and can't be edited"},
                             status=status.HTTP_400_BAD_REQUEST)
         if module not in ALL_MODULES:
             return Response({"detail": "unknown module"}, status=status.HTTP_400_BAD_REQUEST)
-        # Seed the config from the current effective allow-list, then toggle.
+        # The two ways this screen could be used to escalate, now closed (the
+        # docstring above always claimed this; nothing actually enforced it):
+        #   1. editing your own row — the direct route to giving yourself more;
+        #   2. granting a module you don't hold — the indirect route, since
+        #      whoever edits the matrix can also create a user in that role and
+        #      set its password. Revoking is always allowed, and the "*" roles
+        #      (Super Admin / MD / GM) are unaffected by either rule.
+        mine = getattr(request.user, "role", "")
+        my_modules = allowed_modules_for(mine)
+        if role == mine:
+            return Response({"detail": "You can't edit your own role's permissions."},
+                            status=status.HTTP_403_FORBIDDEN)
+        if allowed and my_modules != "*" and module not in my_modules:
+            return Response(
+                {"detail": f"You don't have '{module}' yourself, so you can't grant it "
+                           f"to {role}. Ask a Super Admin, Managing Director or "
+                           f"General Manager."},
+                status=status.HTTP_403_FORBIDDEN)
+        # Start from the role's current mapping, toggle the one cell, save.
         current = allowed_modules_for(role)
         mods = list(current) if isinstance(current, list) else []
         if allowed and module not in mods:
             mods.append(module)
         elif not allowed and module in mods:
             mods.remove(module)
-        RoleConfig.objects.update_or_create(role=role, defaults={"modules": mods})
-        log_action(request.user, "role_permission", entity="RoleConfig", entity_id=role,
-                   after={"module": module, "allowed": allowed})
+        if row is None:         # unseeded database: materialise the row now
+            row = Role(name=role, rank=role_rank(role), is_system=True)
+        row.modules = mods
+        row.save()
+        log_action(request.user, "role_permission", entity="Role", entity_id=row.id,
+                   after={"role": role, "module": module, "allowed": allowed})
         return Response({"role": role, "modules": mods})
 
 

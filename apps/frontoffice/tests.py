@@ -480,3 +480,70 @@ class BillingModeTests(TestCase):
                          {"mode": "without_gst"}, format="json")
         r = self.client.get(reverse("folio-invoice-pdf", args=[self.folio.id]))
         self.assertEqual(r.status_code, 200)
+
+
+class InvoiceStatutoryColumnsTests(TestCase):
+    """Rule 46(f) and 46(k): HSN/SAC and the tax rate against every line.
+
+    Both used to be missing from the default invoice — HSN was never printed
+    at all, and the rate was an opt-in column that defaulted to off.
+    """
+
+    def _text(self, folio, **kw):
+        from reportlab import rl_config
+
+        from .invoice_pdf import build_invoice_pdf
+
+        was = rl_config.pageCompression
+        rl_config.pageCompression = 0
+        try:
+            return build_invoice_pdf(folio, "Seaside Grand", "33ABCDE1234F1Z5",
+                                     **kw).read().decode("latin-1")
+        finally:
+            rl_config.pageCompression = was
+
+    def setUp(self):
+        from decimal import Decimal
+
+        from apps.tax.models import GstSlab
+
+        from .models import Folio, FolioLine
+
+        GstSlab.objects.get_or_create(name="Rooms (low)", defaults={
+            "rate": Decimal("12"), "hsn_sac": "996311", "applies_to": "rooms"})
+        GstSlab.objects.get_or_create(name="F&B", defaults={
+            "rate": Decimal("5"), "hsn_sac": "996331", "applies_to": "fnb"})
+        self.folio = Folio.objects.create(guest_name="Meera Rao")
+        FolioLine.objects.create(folio=self.folio, kind=FolioLine.KIND_ROOM,
+                                 description="Deluxe room — 1 night", taxable=Decimal("4000"),
+                                 cgst=Decimal("240"), sgst=Decimal("240"),
+                                 total=Decimal("4480"), gst_rate=Decimal("12"))
+        FolioLine.objects.create(folio=self.folio, kind=FolioLine.KIND_FNB,
+                                 description="Restaurant — dinner", taxable=Decimal("1000"),
+                                 cgst=Decimal("25"), sgst=Decimal("25"),
+                                 total=Decimal("1050"), gst_rate=Decimal("5"))
+
+    def test_hsn_and_rate_print_without_being_asked_for(self):
+        text = self._text(self.folio, with_gst=True)  # note: no `columns`
+        self.assertIn("HSN/SAC", text)
+        self.assertIn("996311", text)   # room SAC, from GST Master
+        self.assertIn("996331", text)   # F&B SAC
+        self.assertIn("GST %", text)
+        self.assertIn("12.0%", text)
+        self.assertIn("5.0%", text)
+
+    def test_sac_falls_back_when_gst_master_is_empty(self):
+        """A property that hasn't configured its slabs still gets the standard
+        9963 headings rather than a blank statutory column."""
+        from apps.tax.models import GstSlab
+
+        GstSlab.objects.all().delete()
+        text = self._text(self.folio, with_gst=True)
+        self.assertIn("996311", text)
+        self.assertIn("996331", text)
+
+    def test_bill_of_supply_carries_no_tax_columns(self):
+        text = self._text(self.folio, with_gst=False)
+        self.assertIn("BILL OF SUPPLY", text)
+        self.assertNotIn("HSN/SAC", text)
+        self.assertNotIn("CGST", text)

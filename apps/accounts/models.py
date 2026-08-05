@@ -5,6 +5,7 @@ from django.db import models
 from django.utils import timezone
 
 from .constants import ROLE_CHOICES, ROLE_FRONT_OFFICE
+from .validators import NON_NEGATIVE, PERCENT
 
 
 class Property(models.Model):
@@ -26,6 +27,13 @@ class Property(models.Model):
     gstin = models.CharField(max_length=20, blank=True)
     address = models.CharField(max_length=300, blank=True)
     phone = models.CharField(max_length=30, blank=True)
+    # Which country code the phone picker offers first on every screen. A
+    # property-level default rather than a hardcoded +91: Hearth ships to more
+    # than one market, and the alternative — guessing a country code when a bare
+    # national number is typed — is how a guest record becomes undialable.
+    default_country_code = models.CharField(
+        max_length=6, default="+91",
+        help_text="dialling code prefilled in phone fields, e.g. +91")
     logo = models.TextField(blank=True, help_text="hotel logo as a data URL (white-label)")
     # Letterhead blocks printed on the guest invoice. Simple markup (<b>, <i>)
     # is allowed — edited in Settings > Bill Template — Hotel. Kept separate
@@ -65,8 +73,8 @@ class Property(models.Model):
     gst_billing_mode = models.CharField(max_length=12, default="with_gst")
     # Aggregator commission %, so the Zomato/Swiggy report can show net
     # realization after the platform's cut, not just gross sales.
-    zomato_commission_pct = models.DecimalField(max_digits=5, decimal_places=2, default=25)
-    swiggy_commission_pct = models.DecimalField(max_digits=5, decimal_places=2, default=23)
+    zomato_commission_pct = models.DecimalField(max_digits=5, decimal_places=2, default=25, validators=PERCENT)
+    swiggy_commission_pct = models.DecimalField(max_digits=5, decimal_places=2, default=23, validators=PERCENT)
     created_at = models.DateTimeField(auto_now_add=True)
 
     class Meta:
@@ -186,7 +194,9 @@ class UserBranchAccess(models.Model):
 
     user = models.ForeignKey("accounts.User", on_delete=models.CASCADE, related_name="branch_access")
     branch = models.ForeignKey(Branch, on_delete=models.CASCADE, related_name="staff_access")
-    role = models.CharField(max_length=40, choices=ROLE_CHOICES)
+    # Validated against the Role Master rather than a static choices list, so
+    # a role the property created is assignable at a branch too.
+    role = models.CharField(max_length=40)
     start_date = models.DateField(null=True, blank=True)
     end_date = models.DateField(null=True, blank=True, help_text="Temporary assignment — leave blank for a standing one")
     created_at = models.DateTimeField(auto_now_add=True)
@@ -220,12 +230,15 @@ class User(AbstractUser):
         (CAP_FIXED, "Fixed-amount cap"),
     ]
 
-    role = models.CharField(max_length=40, choices=ROLE_CHOICES, default=ROLE_FRONT_OFFICE)
+    # No choices= here: the valid set lives in the Role Master (accounts.Role)
+    # and is enforced by the serializers, so custom roles are assignable and
+    # an account whose role was later retired still loads.
+    role = models.CharField(max_length=40, default=ROLE_FRONT_OFFICE)
     user_code = models.CharField(max_length=20, blank=True)
     passcode = models.CharField(max_length=12, blank=True, help_text="Numeric POS quick-login")
     phone = models.CharField(max_length=20, blank=True)
     discount_cap_type = models.CharField(max_length=10, choices=CAP_CHOICES, default=CAP_NONE)
-    discount_cap_value = models.DecimalField(max_digits=10, decimal_places=2, default=0)
+    discount_cap_value = models.DecimalField(max_digits=10, decimal_places=2, default=0, validators=NON_NEGATIVE)
     rights = models.JSONField(default=list, blank=True)
     # MFA / TOTP (BRD SR-040)
     mfa_enabled = models.BooleanField(default=False)
@@ -235,11 +248,76 @@ class User(AbstractUser):
         return f"{self.get_full_name() or self.username} ({self.role})"
 
 
-class RoleConfig(models.Model):
-    """Editable per-role module allow-list (BRD FR-USR-002 / 5.10 role mapping).
+class Role(models.Model):
+    """Role Master (BRD FR-USR-002 / 5.10): every role the property can hand
+    out, as data rather than a Python constant.
 
-    Overrides the built-in ROLE_ALLOW constant when present. Managing Director and
-    General Manager are always full-access and are not stored/editable here.
+    The seventeen built-ins are seeded as `is_system` rows — their name, base
+    and rank are fixed because the rest of the codebase reasons in those names —
+    but their module mapping is editable like any other. A property that needs
+    a role of its own ("Night Manager") creates a row `based_on` one of them.
+
+    `base_role` is what makes custom roles safe: roughly sixty checks across the
+    backend ask "is this person a Captain / may this role approve a PO", keyed
+    to the built-in names. A custom role answers those questions as its base
+    does, and owns only its own screen list and rank. So a Night Manager based
+    on Front Office approves what Front Office approves, while seeing whichever
+    screens the owner ticked for it.
+    """
+
+    name = models.CharField(max_length=40, unique=True)
+    base_role = models.CharField(
+        max_length=40, blank=True,
+        help_text="Which built-in role's behaviour this one inherits. Blank on the built-ins themselves.")
+    rank = models.PositiveSmallIntegerField(
+        default=1, help_text="Seniority: you may only hand out roles ranked at or below your own.")
+    modules = models.JSONField(default=list, help_text='Module keys, or "*" for full access.')
+    is_system = models.BooleanField(default=False)
+    active = models.BooleanField(
+        default=True, help_text="Inactive roles stay on the accounts that hold them but can't be assigned.")
+    description = models.CharField(max_length=200, blank=True)
+
+    class Meta:
+        ordering = ["-rank", "name"]
+
+    def __str__(self):
+        return f"{self.name} (rank {self.rank}, {'system' if self.is_system else 'custom'})"
+
+    @property
+    def behaves_as(self):
+        """The built-in whose rules apply to this role."""
+        return self.base_role or self.name
+
+    def save(self, *args, **kwargs):
+        super().save(*args, **kwargs)
+        invalidate_role_cache()
+
+    def delete(self, *args, **kwargs):
+        super().delete(*args, **kwargs)
+        invalidate_role_cache()
+
+
+def invalidate_role_cache():
+    """Bump the version every read of the Role table is keyed on.
+
+    RBAC resolves a role on nearly every request, so the rows are cached; any
+    write here has to be visible immediately or someone keeps the access they
+    were just stripped of.
+    """
+    from django.core.cache import cache
+    # Read-then-write rather than incr(): incr raises when the key was never
+    # set, and the obvious except-branch (set it to 1) leaves the version
+    # exactly where it started — the stale rows would survive the write.
+    cache.set(ROLE_CACHE_VERSION_KEY, (cache.get(ROLE_CACHE_VERSION_KEY) or 1) + 1, None)
+
+
+ROLE_CACHE_VERSION_KEY = "hearth:roles:version"
+
+
+class RoleConfig(models.Model):
+    """Superseded by Role (its rows were folded into Role.modules by migration
+    0026). Kept for one release so a rollback still has its data; nothing reads
+    it any more — see rbac.allowed_modules_for.
     """
 
     role = models.CharField(max_length=40, unique=True)

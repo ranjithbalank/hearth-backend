@@ -1,6 +1,7 @@
 from django.db import models
 
 from apps.rooms.models import RoomType
+from apps.accounts.validators import NON_NEGATIVE
 
 
 class RateRecommendation(models.Model):
@@ -12,8 +13,8 @@ class RateRecommendation(models.Model):
     STATUS_CHOICES = [(OPEN, "Open"), (ACCEPTED, "Accepted"), (DISMISSED, "Dismissed")]
 
     room_type = models.ForeignKey(RoomType, on_delete=models.CASCADE, related_name="rate_recs")
-    current_rate = models.DecimalField(max_digits=10, decimal_places=2)
-    recommended_rate = models.DecimalField(max_digits=10, decimal_places=2)
+    current_rate = models.DecimalField(max_digits=10, decimal_places=2, validators=NON_NEGATIVE)
+    recommended_rate = models.DecimalField(max_digits=10, decimal_places=2, validators=NON_NEGATIVE)
     reason = models.CharField(max_length=200)
     demand_index = models.PositiveSmallIntegerField(default=50, help_text="0-100 demand signal")
     status = models.CharField(max_length=12, choices=STATUS_CHOICES, default=OPEN)

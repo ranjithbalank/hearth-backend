@@ -58,6 +58,36 @@ ROLE_CHOICES = [
     (ROLE_HR, ROLE_HR),
 ]
 
+# --- Who may hand out which role ---------------------------------------------
+# Holding the "users" module says you may manage logins at all; this ladder says
+# whose. The rule is one line — you may grant any role ranked at or below your
+# own, never above — which keeps the owner-first chain the property actually
+# runs on: the Super Admin bootstraps in onboarding, appoints an Admin (or HR),
+# and they staff up everyone below without ever being able to mint a peer of the
+# owner. Without this a bare ModelViewSet let anyone on the Users screen PATCH
+# themselves to Super Admin.
+ROLE_RANK = {
+    ROLE_SUPER_ADMIN: 4,          # the owner account
+    ROLE_MD: 3, ROLE_GM: 3,       # full access ("*"), appointed by the owner
+    # Department heads and back-office: staff up their own desks, never the top.
+    ROLE_ADMIN: 2, ROLE_CEO: 2, ROLE_FINANCE: 2,
+    ROLE_HOTEL_MGR: 2, ROLE_REST_MGR: 2, ROLE_HR: 2,
+    # Floor / operational logins.
+    ROLE_FRONT_OFFICE: 1, ROLE_CASHIER: 1, ROLE_CAPTAIN: 1,
+    ROLE_HOUSEKEEPING: 1, ROLE_CHEF: 1, ROLE_STORE: 1,
+    ROLE_BAR_CAPTAIN: 1, ROLE_BAR_CASHIER: 1,
+}
+
+
+# ROLE_RANK above and ROLE_ALLOW below are the SEED for the Role Master table
+# (accounts.Role, migration 0026). At runtime everything resolves through
+# rbac.py — role_rank(), base_role(), can_assign_role(), assignable_roles(),
+# allowed_modules_for() — so a property's own roles and its edits to the
+# mapping count. These constants remain the fallback for a database that
+# hasn't been seeded yet, and the vocabulary the rest of the backend reasons
+# in: a custom role always behaves as one of the names defined here.
+
+
 # Module keys used across nav, RBAC and entitlement gating.
 ALL_MODULES = [
     "execdashboard", "dashboard", "frontdesk", "checkin", "checkout", "livegrid",
@@ -66,9 +96,18 @@ ALL_MODULES = [
     "accounting", "tax", "gstmaster", "roommaster", "tablemaster", "menumaster",
     "employees", "roles", "customers", "vendors", "suppliers", "hr", "engineering",
     "crm", "notifications", "reports", "settings", "cateringmaster", "branchmaster",
+    # User accounts (create a login, assign its role) is its own key, split out
+    # of "settings" so HR can staff up the property without also holding the
+    # property/entitlement/numbering configuration that lives on that screen.
+    "users",
     # leave is a shared service like matreq — every role can open its own
     # leave desk (apply, balances, track); approvals are role-gated inside.
     "leave",
+    # These three were granted in ROLE_ALLOW but missing from this list, so the
+    # Role Mapping screen (which iterates ALL_MODULES) had no row for the
+    # Approvals inbox, the Kitchen Display or Online Orders — three live
+    # screens that could not be mapped to a role from the UI.
+    "approvals", "kds", "online",
 ]
 
 # "*" == full access. Otherwise an explicit allow-list of module keys.
@@ -83,7 +122,7 @@ ROLE_ALLOW = {
     # management and settings. No day-to-day operations, no guest money.
     # Can still raise a general-supplies indent (office stationery etc.).
     ROLE_ADMIN: [
-        "dashboard", "settings", "roles", "employees", "roommaster",
+        "dashboard", "settings", "users", "roles", "employees", "roommaster",
         "tablemaster", "menumaster", "gstmaster", "cateringmaster", "branchmaster",
         "customers", "vendors", "suppliers", "notifications", "matreq", "leave",
     ],
@@ -184,7 +223,7 @@ ROLE_ALLOW = {
     # the leave desk (types master, on-behalf requests, full oversight).
     # No floor operations, no guest money, no RBAC config.
     ROLE_HR: [
-        "hr", "employees", "leave", "matreq", "notifications",
+        "hr", "employees", "users", "leave", "matreq", "notifications",
         "approvals",  # final sign-off on leave (LEAVE_FINAL_APPROVERS)
     ],
 }
@@ -309,6 +348,8 @@ def role_can_request_department(role: str, department: str) -> bool:
     sign off on it). Universal approvers (GM/MD/Super Admin) are exempt —
     they're already full-access executives everywhere else in this system.
     """
+    from .rbac import base_role
+    role = base_role(role)
     if role in UNIVERSAL_INDENT_APPROVERS:
         return True
     return role not in DEPARTMENT_APPROVERS.get(department, set())
@@ -371,6 +412,8 @@ def leave_approvers_for(department: str) -> set:
 def can_enter_leave_on_behalf(role: str, department: str) -> bool:
     """HR, the department's own approver, or a universal role may file a
     request for an employee without a login (kitchen helpers, cleaners)."""
+    from .rbac import base_role
+    role = base_role(role)
     return role == ROLE_HR or role in leave_approvers_for(department)
 
 # Marking food ready on the KDS is the kitchen's alone (chef + managers).
@@ -405,10 +448,12 @@ ROLE_REPORT_ACCESS = {
 
 def role_can_view_report(role: str, report: str) -> bool:
     """Full-access roles (Super Admin/MD/GM) see every report. Everyone else
-    with 'reports' only sees their slice — see ROLE_REPORT_ACCESS above."""
-    if ROLE_ALLOW.get(role) == "*":
+    with 'reports' only sees their slice — see ROLE_REPORT_ACCESS above.
+    A custom role sees its base's slice."""
+    from .rbac import allowed_modules_for, base_role
+    if allowed_modules_for(role) == "*":
         return True
-    return report in ROLE_REPORT_ACCESS.get(role, set())
+    return report in ROLE_REPORT_ACCESS.get(base_role(role), set())
 
 
 # --- POS tender mapping (BRD 5.10 role mapping) ---
@@ -433,7 +478,8 @@ ROLE_TENDERS = {
 
 
 def role_can_tender(role: str, tender: str) -> bool:
-    allow = ROLE_TENDERS.get(role)
+    from .rbac import base_role
+    allow = ROLE_TENDERS.get(base_role(role))
     if allow is None:
         return False
     from apps.masters.models import PaymentMethod
@@ -448,12 +494,16 @@ def role_can_tender(role: str, tender: str) -> bool:
 
 
 def role_can_access(role: str, module: str) -> bool:
-    allow = ROLE_ALLOW.get(role)
-    if allow == "*":
-        return True
-    if allow is None:
-        return False
-    return module in allow
+    """Module access for a role — resolved against the Role Master table.
+
+    This used to read ROLE_ALLOW directly, which meant every caller of it
+    (notifications filtering, the POS master-screen checks, branch import)
+    silently ignored whatever the property had configured in Role Mapping.
+    It delegates now, so there is one answer to "may this role open that
+    screen" and custom roles work everywhere.
+    """
+    from .rbac import can_access
+    return can_access(role, module)
 
 
 def entitlement_allows(entitlements: dict, module: str) -> bool:
@@ -461,6 +511,23 @@ def entitlement_allows(entitlements: dict, module: str) -> bool:
     if flag is None:
         return True
     return bool(entitlements.get(flag))
+
+
+# --- The commercial line -----------------------------------------------------
+# `Entitlement` carries two kinds of flag and they have opposite owners:
+#
+#   LICENSED  — what the customer BOUGHT. Hearth sets these at provisioning
+#               (`manage.py provision`); no customer-facing endpoint may write
+#               them, or a restaurant-only licence can unlock the hotel suite
+#               by itself. Enforced in SetupView + EntitlementView.
+#   CONFIG    — how the owner chooses to run what they bought. Theirs to change
+#               freely, and always clamped to a subset of the licensed flags by
+#               the resolver in features.py.
+#
+# The two live on one model for now; the post-demo split moves LICENSED onto its
+# own table so the boundary is structural rather than enforced at the view.
+LICENSED_FLAGS = ("hms", "restaurant", "banquets", "rms")
+CONFIG_FLAGS = ("bar_mode", "kds_partial_ready")
 
 
 def edition_entitlements(edition: str) -> dict:

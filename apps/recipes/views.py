@@ -7,7 +7,11 @@ from rest_framework.response import Response
 
 from apps.accounts.constants import COST_VISIBLE_ROLES, MENU_APPROVER_ROLES, ROLE_CHEF
 from apps.accounts.models import log_action
-from apps.accounts.permissions import ModuleViewSetMixin
+from apps.accounts.permissions import (
+    ModuleViewSetMixin, requester_branch, shared_or_visible, user_branch_ids,
+    visible_branch_ids,
+)
+from apps.accounts.rbac import base_role
 
 from .models import ProductionBatch, Recipe, RecipeLine
 
@@ -26,8 +30,14 @@ class RecipeViewSet(ModuleViewSetMixin, viewsets.ViewSet):
         flagged unmapped — unmapped items skip stock deduction silently."""
         from apps.pos.models import MenuItem
         show_cost = _can_see_cost(request.user)
-        items = (MenuItem.objects.select_related("category")
-                 .prefetch_related("recipe__lines__ingredient", "recipe__lines__sub_recipe"))
+        # A blank location on a MenuItem means "on every branch's menu"; a set
+        # one makes the dish that branch's own. shared_or_visible keeps the
+        # shared menu visible everywhere while never showing branch A another
+        # branch's exclusive dish.
+        items = shared_or_visible(
+            MenuItem.objects.select_related("category")
+            .prefetch_related("recipe__lines__ingredient", "recipe__lines__sub_recipe"),
+            request)
         out = []
         for m in items:
             recipe = getattr(m, "recipe", None)
@@ -65,10 +75,15 @@ class RecipeViewSet(ModuleViewSetMixin, viewsets.ViewSet):
 
         days = int(request.query_params.get("days", 30))
         since = timezone.now() - timedelta(days=days)
-        sold = dict(OrderLine.objects
-                    .filter(kot_fired=True, order__created_at__gte=since)
-                    .values_list("menu_item")
-                    .annotate(total=Sum("qty")))
+        # Plates fired come from orders, and an order belongs to exactly one
+        # branch — so unlike the menu above this is a strict filter, not a
+        # shared-or-mine one.
+        lines = OrderLine.objects.filter(kot_fired=True, order__created_at__gte=since)
+        visible = visible_branch_ids(request)
+        if visible != "*":
+            lines = (lines.filter(order__location_id__in=visible) if visible
+                     else lines.none())
+        sold = dict(lines.values_list("menu_item").annotate(total=Sum("qty")))
         rows = []
         for r in Recipe.objects.select_related("menu_item").prefetch_related(
                 "lines__ingredient", "lines__sub_recipe"):
@@ -118,7 +133,7 @@ class RecipeViewSet(ModuleViewSetMixin, viewsets.ViewSet):
             name = (new_item.get("name") or "").strip()
             if not name:
                 return Response({"detail": "the dish needs a name"}, status=400)
-            if MenuItem.objects.filter(name__iexact=name).exists():
+            if shared_or_visible(MenuItem.objects.filter(name__iexact=name), request).exists():
                 return Response({"detail": f'"{name}" is already on the menu — edit its recipe from the mapping tab'},
                                 status=400)
             try:
@@ -134,10 +149,14 @@ class RecipeViewSet(ModuleViewSetMixin, viewsets.ViewSet):
             # Chef proposes; a manager (MENU_APPROVER_ROLES) has to approve
             # before it's orderable. Anyone else creating a dish here is
             # already trusted, so theirs goes live immediately.
-            needs_approval = getattr(request.user, "role", "") == ROLE_CHEF
+            needs_approval = base_role(getattr(request.user, "role", "")) == ROLE_CHEF
             username = getattr(request.user, "username", "") or ""
             now = timezone.now()
+            # requester_branch: the active branch if one is selected, else the
+            # caller's own when they only have one. An all-branch role with no
+            # selection creates a shared dish, which is the old behaviour.
             item = MenuItem.objects.create(
+                location_id=requester_branch(request),
                 name=name, category=category, price=price,
                 gst_rate=Decimal(str(new_item.get("gst_rate") or 5)),
                 diet=new_item.get("diet") or MenuItem.VEG,
@@ -148,7 +167,8 @@ class RecipeViewSet(ModuleViewSetMixin, viewsets.ViewSet):
                 approved_at=None if needs_approval else now,
             )
         else:
-            item = MenuItem.objects.filter(pk=request.data.get("menu_item")).first()
+            item = shared_or_visible(
+                MenuItem.objects.filter(pk=request.data.get("menu_item")), request).first()
             if not item:
                 return Response({"detail": "menu item not found"}, status=400)
         lines = request.data.get("lines") or []
@@ -187,6 +207,117 @@ class RecipeViewSet(ModuleViewSetMixin, viewsets.ViewSet):
         return Response(body, status=201 if created else 200)
 
     @action(detail=False, methods=["get"])
+    def importable(self, request):
+        """Dishes another branch has that this one doesn't — ?from_branch=<id>.
+
+        Making dishes branch-exclusive created the obvious next need: a new
+        branch shouldn't have to retype a menu the group already has. This is
+        the only place that deliberately reads across the branch boundary, so
+        it is gated twice — the caller must be entitled to the source branch
+        AND to the target, and matches are by name, since a copy is a distinct
+        row with its own id.
+        """
+        from apps.accounts.models import Branch
+        from apps.pos.models import MenuItem
+        visible = visible_branch_ids(request)
+        try:
+            source = int(request.query_params.get("from_branch", ""))
+        except ValueError:
+            return Response({"detail": "from_branch is required"}, status=400)
+        allowed = user_branch_ids(request.user)
+        if allowed != "*" and source not in allowed:
+            return Response({"detail": "you do not have access to that branch"}, status=403)
+        target = requester_branch(request)
+        if target == source:
+            return Response({"detail": "pick a branch other than the one you are in"}, status=400)
+
+        here = {n.lower() for n in
+                shared_or_visible(MenuItem.objects.all(), request).values_list("name", flat=True)}
+        rows = []
+        for m in (MenuItem.objects.filter(location_id=source)
+                  .select_related("category")
+                  .prefetch_related("recipe__lines__ingredient", "recipe__lines__sub_recipe")
+                  .order_by("name")):
+            if m.name.lower() in here:
+                continue          # already on this branch's menu, under any form
+            recipe = getattr(m, "recipe", None)
+            rows.append({
+                "menu_item": m.id, "name": m.name,
+                "category": m.category.name if m.category_id else "",
+                "price": str(m.price),
+                "has_recipe": recipe is not None,
+                "lines": recipe.lines.count() if recipe else 0,
+            })
+        src = Branch.objects.filter(id=source).first()
+        return Response({
+            "from_branch": {"id": source, "name": src.name if src else str(source)},
+            "to_branch": target,
+            "items": rows,
+        })
+
+    @action(detail=False, methods=["post"])
+    def import_dish(self, request):
+        """Copy a dish and its recipe onto this branch. Body: {menu_item}.
+
+        A copy, not a move or a share: the source branch keeps its dish
+        untouched, and the new row is this branch's own to price and edit.
+        Ingredient lines point at the same Ingredient rows, which is right —
+        a blank-location ingredient is one central stock both branches draw
+        on, and a branch-exclusive one would have failed the entitlement check
+        above before we got here.
+        """
+        from apps.pos.models import Category, MenuItem
+        from .models import Recipe, RecipeLine
+
+        target = requester_branch(request)
+        if target is None:
+            return Response(
+                {"detail": "pick the branch to import into with the branch switcher first"},
+                status=400)
+        source_item = MenuItem.objects.filter(pk=request.data.get("menu_item")).first()
+        if not source_item:
+            return Response({"detail": "menu item not found"}, status=404)
+        allowed = user_branch_ids(request.user)
+        if (allowed != "*" and source_item.location_id
+                and source_item.location_id not in allowed):
+            return Response({"detail": "you do not have access to that branch"}, status=403)
+        if source_item.location_id == target:
+            return Response({"detail": "that dish is already on this branch"}, status=400)
+        if shared_or_visible(
+                MenuItem.objects.filter(name__iexact=source_item.name), request).exists():
+            return Response(
+                {"detail": f'"{source_item.name}" is already on this branch\'s menu'}, status=400)
+
+        # The category may itself be branch-scoped; match by name so the copy
+        # lands in this branch's equivalent rather than borrowing the other's.
+        category = source_item.category
+        if category is not None:
+            category, _ = Category.objects.get_or_create(name=category.name)
+        username = getattr(request.user, "username", "") or ""
+        copy = MenuItem.objects.create(
+            location_id=target, name=source_item.name, category=category,
+            price=source_item.price, gst_rate=source_item.gst_rate, diet=source_item.diet,
+            # Imported live: a manager already signed this dish off at the
+            # source branch, so re-running approval would be ceremony.
+            available=True, approval_status=MenuItem.APPROVED,
+            created_by=username, approved_by=username, approved_at=timezone.now(),
+        )
+        source_recipe = getattr(source_item, "recipe", None)
+        copied_lines = 0
+        if source_recipe:
+            recipe = Recipe.objects.create(menu_item=copy)
+            for l in source_recipe.lines.all():
+                RecipeLine.objects.create(
+                    recipe=recipe, ingredient=l.ingredient, sub_recipe=l.sub_recipe,
+                    qty=l.qty, unit=l.unit, wastage_pct=l.wastage_pct)
+                copied_lines += 1
+        log_action(request.user, "dish_imported", entity="MenuItem", entity_id=copy.id,
+                   after={"name": copy.name, "from_branch": source_item.location_id,
+                          "to_branch": target, "lines": copied_lines})
+        return Response({"menu_item": copy.id, "name": copy.name,
+                         "lines": copied_lines}, status=201)
+
+    @action(detail=False, methods=["get"])
     def pending_dishes(self, request):
         """Chef-proposed dishes awaiting a manager's sign-off before they're
         orderable. Only MENU_APPROVER_ROLES can see this — and since they're
@@ -195,10 +326,12 @@ class RecipeViewSet(ModuleViewSetMixin, viewsets.ViewSet):
         from apps.pos.models import MenuItem
         if getattr(request.user, "role", "") not in MENU_APPROVER_ROLES:
             return Response({"detail": "only a manager can review pending dishes"}, status=403)
-        items = (MenuItem.objects.filter(approval_status=MenuItem.PENDING)
-                 .select_related("category")
-                 .prefetch_related("recipe__lines__ingredient", "recipe__lines__sub_recipe")
-                 .order_by("id"))
+        items = shared_or_visible(
+            MenuItem.objects.filter(approval_status=MenuItem.PENDING)
+            .select_related("category")
+            .prefetch_related("recipe__lines__ingredient", "recipe__lines__sub_recipe")
+            .order_by("id"),
+            request)
         out = []
         for m in items:
             recipe = getattr(m, "recipe", None)
@@ -223,7 +356,10 @@ class RecipeViewSet(ModuleViewSetMixin, viewsets.ViewSet):
         from apps.pos.models import MenuItem
         if getattr(request.user, "role", "") not in MENU_APPROVER_ROLES:
             return Response({"detail": "only a manager can approve a new dish"}, status=403)
-        item = MenuItem.objects.filter(pk=pk, approval_status=MenuItem.PENDING).first()
+        # Scoped, not just fetched by id: a manager at one branch signing off
+        # another branch's exclusive dish is the write-side of the same leak.
+        item = shared_or_visible(
+            MenuItem.objects.filter(pk=pk, approval_status=MenuItem.PENDING), request).first()
         if not item:
             return Response({"detail": "no pending dish with that id"}, status=404)
         item.approval_status = MenuItem.APPROVED
@@ -245,7 +381,8 @@ class RecipeViewSet(ModuleViewSetMixin, viewsets.ViewSet):
         reason = (request.data.get("reason") or "").strip()
         if not reason:
             return Response({"detail": "a reason is required to reject a dish"}, status=400)
-        item = MenuItem.objects.filter(pk=pk, approval_status=MenuItem.PENDING).first()
+        item = shared_or_visible(
+            MenuItem.objects.filter(pk=pk, approval_status=MenuItem.PENDING), request).first()
         if not item:
             return Response({"detail": "no pending dish with that id"}, status=404)
         item.approval_status = MenuItem.REJECTED

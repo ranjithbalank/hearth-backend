@@ -1,6 +1,7 @@
 from django.db import models
 
 from apps.rooms.models import RoomType
+from apps.accounts.validators import NON_NEGATIVE, PERCENT
 
 
 class Channel(models.Model):
@@ -8,7 +9,7 @@ class Channel(models.Model):
 
     name = models.CharField(max_length=80, unique=True)
     connected = models.BooleanField(default=True)
-    commission_pct = models.DecimalField(max_digits=4, decimal_places=1, default=15)
+    commission_pct = models.DecimalField(max_digits=4, decimal_places=1, default=15, validators=PERCENT)
 
     def __str__(self):
         return self.name
@@ -19,7 +20,7 @@ class ChannelRate(models.Model):
 
     channel = models.ForeignKey(Channel, on_delete=models.CASCADE, related_name="rates")
     room_type = models.ForeignKey(RoomType, on_delete=models.CASCADE, related_name="channel_rates")
-    rate = models.DecimalField(max_digits=10, decimal_places=2)
+    rate = models.DecimalField(max_digits=10, decimal_places=2, validators=NON_NEGATIVE)
     availability = models.PositiveSmallIntegerField(default=0)
     updated_at = models.DateTimeField(auto_now=True)
 

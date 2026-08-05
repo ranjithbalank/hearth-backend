@@ -37,14 +37,35 @@ class GroupBlockViewSet(ModuleViewSetMixin, viewsets.ViewSet):
         return Response([self._dict(b) for b in GroupBlock.objects.select_related("room_type")])
 
     def create(self, request):
+        from django.utils.dateparse import parse_date
+
+        from apps.accounts.validators import validate_date_order
+        from rest_framework.serializers import ValidationError as DRFValidationError
+
         rt = RoomType.objects.filter(code=request.data.get("room_type")).first()
         if not rt:
             return Response({"detail": "room_type not found"}, status=400)
+        # This path built the block straight out of request data, so a block
+        # could run backwards in time and hold rooms out of inventory forever.
+        ci = parse_date(str(request.data.get("checkin_date") or ""))
+        co = parse_date(str(request.data.get("checkout_date") or ""))
+        if not ci or not co:
+            return Response({"detail": "checkin_date and checkout_date are required (YYYY-MM-DD)."},
+                            status=400)
+        try:
+            validate_date_order(ci, co, start_label="start", end_label="end")
+        except DRFValidationError as e:
+            return Response({"detail": e.detail[0] if isinstance(e.detail, list) else str(e.detail)},
+                            status=400)
+        try:
+            blocked = int(request.data.get("rooms_blocked", 1))
+        except (TypeError, ValueError):
+            return Response({"detail": "rooms_blocked must be a whole number."}, status=400)
+        if blocked < 1:
+            return Response({"detail": "A block must hold at least one room."}, status=400)
         b = GroupBlock.objects.create(
             name=request.data.get("name", "Group"), room_type=rt,
-            rooms_blocked=int(request.data.get("rooms_blocked", 1)),
-            checkin_date=request.data["checkin_date"],
-            checkout_date=request.data["checkout_date"],
+            rooms_blocked=blocked, checkin_date=ci, checkout_date=co,
         )
         return Response(self._dict(b), status=201)
 
@@ -112,7 +133,15 @@ class ReservationViewSet(ModuleViewSetMixin, viewsets.ModelViewSet):
             validate_person_name(request.data.get("guest_name", ""))
         except DRFValidationError as e:
             return Response({"detail": e.detail[0] if isinstance(e.detail, list) else str(e.detail)}, status=400)
-        nights = int(request.data.get("nights", 1))
+        # Unbounded before: nights came straight off the request, so a negative
+        # value put checkout behind check-in. Same 1-30 bound the extend action
+        # already applies to an overstay.
+        try:
+            nights = int(request.data.get("nights", 1))
+        except (TypeError, ValueError):
+            return Response({"detail": "nights must be a number"}, status=400)
+        if not 1 <= nights <= 30:
+            return Response({"detail": "Stay length must be 1-30 nights."}, status=400)
         guest = None
         mobile = request.data.get("mobile", "").strip()
         if mobile:

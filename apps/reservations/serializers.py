@@ -26,3 +26,20 @@ class ReservationSerializer(serializers.ModelSerializer):
     def validate_guest_name(self, value):
         from apps.accounts.validators import validate_person_name
         return validate_person_name(value)
+
+    def validate(self, attrs):
+        """Dates are the source of truth for a stay; `nights` follows them.
+
+        Both were accepted independently, so a booking could carry a checkout
+        before its check-in (negative room nights into revenue, occupancy and
+        ADR) or a `nights` that simply disagreed with the dates it was billed
+        against. Deriving nights here means the two can no longer drift.
+        """
+        from apps.accounts.validators import validate_date_order
+        attrs = super().validate(attrs)
+        checkin = attrs.get("checkin_date") or getattr(self.instance, "checkin_date", None)
+        checkout = attrs.get("checkout_date") or getattr(self.instance, "checkout_date", None)
+        validate_date_order(checkin, checkout)
+        if checkin and checkout:
+            attrs["nights"] = (checkout - checkin).days
+        return attrs

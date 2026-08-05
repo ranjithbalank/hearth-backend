@@ -1,12 +1,13 @@
 from django.db import models
+from apps.accounts.validators import NON_NEGATIVE, PERCENT
 
 
 class RoomType(models.Model):
     code = models.CharField(max_length=20, unique=True)
     name = models.CharField(max_length=120)
-    base_rate = models.DecimalField(max_digits=10, decimal_places=2)
+    base_rate = models.DecimalField(max_digits=10, decimal_places=2, validators=NON_NEGATIVE)
     max_occupancy = models.PositiveSmallIntegerField(default=2)
-    gst_slab = models.DecimalField(max_digits=4, decimal_places=1, default=12)
+    gst_slab = models.DecimalField(max_digits=4, decimal_places=1, default=12, validators=PERCENT)
 
     def __str__(self):
         return self.name
@@ -15,7 +16,7 @@ class RoomType(models.Model):
 class RatePlan(models.Model):
     name = models.CharField(max_length=120)
     room_type = models.ForeignKey(RoomType, on_delete=models.CASCADE, related_name="rate_plans")
-    rate = models.DecimalField(max_digits=10, decimal_places=2)
+    rate = models.DecimalField(max_digits=10, decimal_places=2, validators=NON_NEGATIVE)
     inclusions = models.CharField(max_length=200, blank=True)
 
     def __str__(self):

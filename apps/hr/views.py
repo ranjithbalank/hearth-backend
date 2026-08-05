@@ -10,7 +10,6 @@ from rest_framework.permissions import AllowAny
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
-from apps.accounts.constants import ROLE_CHOICES
 from apps.accounts.models import User, UserBranchAccess, log_action
 from apps.accounts.permissions import (
     AnyModuleViewSetMixin,
@@ -18,7 +17,7 @@ from apps.accounts.permissions import (
     resolve_active_branch,
     shared_or_visible,
 )
-from apps.accounts.rbac import PROTECTED
+from apps.accounts.rbac import PROTECTED, acting_role, base_role
 
 from .models import (
     AdvanceRecovery,
@@ -74,6 +73,14 @@ def _validate_employee_row(data):
         weekly_rate = Decimal(str(data.get("weekly_rate") or 0))
     except InvalidOperation:
         return None, "monthly_salary/daily_rate/weekly_rate must be numbers"
+    # The non-negative rule declared on the model only fires through a
+    # serializer; this path builds kwargs and calls Employee.objects.create()
+    # directly, so it needs the check spelled out. A negative wage flows into
+    # payroll and comes out the other side as a deduction nobody authorised.
+    for label, value in (("monthly salary", monthly_salary), ("daily rate", daily_rate),
+                         ("weekly rate", weekly_rate)):
+        if value < 0:
+            return None, f"{label} cannot be negative"
     return {
         "name": name, "department": department, "role": role,
         "phone": data.get("phone", ""), "country_code": country_code, "wage_type": wage_type,
@@ -120,17 +127,54 @@ class HrViewSet(AnyModuleViewSetMixin, viewsets.ViewSet):
         return Response([_employee_dict(e) for e in qs])
 
     def create(self, request):
-        """Add a staff record: {name, department, role, phone?, monthly_salary?, branch?}.
-        `branch` defaults to the caller's own branch when they're only ever
-        assigned to one — no picker needed for the common case."""
+        """Add a staff record: {name, department, role, phone?, monthly_salary?,
+        branch?, user?}. `branch` defaults to the caller's own branch when
+        they're only ever assigned to one — no picker needed for the common
+        case. `user` links this record to an existing login, which is how a
+        person created in Users & Roles gets onto payroll (see `unpaid`)."""
         kwargs, error = _validate_employee_row(request.data)
         if error:
             return Response({"detail": error}, status=400)
+        # The CSV import has always skipped a name already on the roster; this
+        # path accepted it, so the same person could end up with two payroll
+        # records — two salaries, two leave balances, two advance ledgers.
+        if Employee.objects.filter(name__iexact=kwargs["name"]).exists():
+            return Response(
+                {"detail": f"{kwargs['name']} is already on the roster. Open that record, or "
+                           f"add a distinguishing detail if these are two different people."},
+                status=400)
         branch_id = request.data.get("branch") or resolve_active_branch(request)
-        e = Employee.objects.create(branch_id=branch_id, **kwargs)
+        user_id = request.data.get("user") or None
+        if user_id:
+            if not User.objects.filter(pk=user_id).exists():
+                return Response({"detail": "That login no longer exists."}, status=400)
+            if Employee.objects.filter(user_id=user_id).exists():
+                return Response({"detail": "That login is already on the roster."}, status=400)
+        e = Employee.objects.create(branch_id=branch_id, user_id=user_id, **kwargs)
         log_action(request.user, "employee_add", entity="Employee", entity_id=e.id,
-                   after={"name": kwargs["name"], "department": kwargs["department"], "branch": branch_id})
+                   after={"name": kwargs["name"], "department": kwargs["department"],
+                          "branch": branch_id, "user": user_id})
         return Response(_employee_dict(e), status=201)
+
+    @action(detail=False, methods=["get"])
+    def unpaid(self, request):
+        """Logins that aren't on the roster yet — created in Users & Roles but
+        with no pay, no attendance and no payslip behind them.
+
+        The two records are deliberately separate (the roster covers people
+        who never get a login at all), but nothing connected them in the other
+        direction: a login created in Settings was invisible to HR, so that
+        person silently never appeared in a payroll run. This is the list HR
+        works through."""
+        on_roster = set(Employee.objects.exclude(user__isnull=True)
+                        .values_list("user_id", flat=True))
+        rows = [
+            {"id": u.id, "username": u.username,
+             "name": u.get_full_name() or u.username, "role": u.role}
+            for u in User.objects.filter(is_active=True).exclude(id__in=on_roster)
+            .order_by("first_name", "username")
+        ]
+        return Response(rows)
 
     @action(detail=False, methods=["get", "post"], url_path="import")
     def import_employees(self, request):
@@ -220,14 +264,26 @@ class HrViewSet(AnyModuleViewSetMixin, viewsets.ViewSet):
         if e.user_id:
             return Response({"detail": f"{e.name} already has a login ({e.user.username})"}, status=400)
         role = (request.data.get("role") or "").strip()
-        valid_roles = {r for r, _ in ROLE_CHOICES}
-        if role not in valid_roles:
+        # The Role Master is the valid set, so a role the property created is
+        # invitable too — and a retired one isn't.
+        from apps.accounts.models import Role
+        if not Role.objects.filter(name=role, active=True).exists():
             return Response({"detail": "Choose a valid role"}, status=400)
-        if role in PROTECTED:
+        if base_role(role) in PROTECTED:
             return Response(
                 {"detail": "Super Admin / Managing Director / General Manager accounts "
                             "can't be self-onboarded — set these up directly in Settings."},
                 status=400,
+            )
+        # An invite mints a login, so it obeys the same seniority ladder as
+        # Users & Roles — otherwise it would be the way around that screen.
+        from apps.accounts.rbac import can_assign_role
+        mine = getattr(request.user, "role", "")
+        if not can_assign_role(mine, role):
+            return Response(
+                {"detail": f"As {mine} you can't invite someone as {role} — you may "
+                           f"only assign roles at or below your own."},
+                status=403,
             )
         inv = Invite.issue(employee=e, role=role, created_by=request.user)
         log_action(request.user, "invite_created", entity="Employee", entity_id=e.id,
@@ -454,7 +510,7 @@ class HrViewSet(AnyModuleViewSetMixin, viewsets.ViewSet):
             pk=request.query_params.get("payslip")).first()
         if not s:
             return Response({"detail": "not found"}, status=404)
-        role = getattr(request.user, "role", "")
+        role = acting_role(request)
         is_own = s.employee.user_id is not None and s.employee.user_id == request.user.id
         if role not in PAYSLIP_VIEWER_ROLES and not is_own:
             return Response({"detail": "you can only view your own payslip"}, status=403)
@@ -534,7 +590,7 @@ class HrViewSet(AnyModuleViewSetMixin, viewsets.ViewSet):
         branch-scoped for display; the underlying run always covers
         everyone."""
         from apps.accounts.constants import PAYROLL_MANAGER_ROLES
-        if getattr(request.user, "role", "") not in PAYROLL_MANAGER_ROLES:
+        if acting_role(request) not in PAYROLL_MANAGER_ROLES:
             return Response({"detail": "only HR or Finance can run payroll"}, status=403)
         month = request.data.get("month") or ""
         try:
@@ -570,7 +626,7 @@ class HrViewSet(AnyModuleViewSetMixin, viewsets.ViewSet):
         Not branch-scoped: acting on one already-identified payslip id is a
         payroll-manager action, not a listing — same reasoning as run_payroll."""
         from apps.accounts.constants import PAYROLL_MANAGER_ROLES
-        if getattr(request.user, "role", "") not in PAYROLL_MANAGER_ROLES:
+        if acting_role(request) not in PAYROLL_MANAGER_ROLES:
             return Response({"detail": "only HR or Finance can adjust payroll"}, status=403)
         s = Payslip.objects.select_related("run", "employee").filter(
             pk=request.data.get("payslip")).first()
@@ -600,7 +656,7 @@ class HrViewSet(AnyModuleViewSetMixin, viewsets.ViewSet):
         Not branch-scoped: a PayrollRun is one company-wide monthly object —
         same reasoning as run_payroll."""
         from apps.accounts.constants import PAYROLL_MANAGER_ROLES
-        if getattr(request.user, "role", "") not in PAYROLL_MANAGER_ROLES:
+        if acting_role(request) not in PAYROLL_MANAGER_ROLES:
             return Response({"detail": "only HR or Finance can run payroll"}, status=403)
         run = PayrollRun.objects.filter(month=request.data.get("month")).first()
         if not run:
@@ -728,7 +784,7 @@ class SalaryAdvanceViewSet(ModuleViewSetMixin, viewsets.ViewSet):
         """Issue one: {employee, kind: advance|loan, amount,
         monthly_installment? (loans), note?}."""
         from apps.accounts.constants import PAYROLL_MANAGER_ROLES
-        if getattr(request.user, "role", "") not in PAYROLL_MANAGER_ROLES:
+        if acting_role(request) not in PAYROLL_MANAGER_ROLES:
             return Response({"detail": "only HR or Finance can issue an advance or loan"}, status=403)
         emp = Employee.objects.filter(pk=request.data.get("employee")).first()
         if not emp:
@@ -762,7 +818,7 @@ class SalaryAdvanceViewSet(ModuleViewSetMixin, viewsets.ViewSet):
         """Write off whatever's left — an unrecoverable loan, or a manager's
         call to forgive it. Stops it being planned into future payroll."""
         from apps.accounts.constants import PAYROLL_MANAGER_ROLES
-        if getattr(request.user, "role", "") not in PAYROLL_MANAGER_ROLES:
+        if acting_role(request) not in PAYROLL_MANAGER_ROLES:
             return Response({"detail": "only HR or Finance can write off a balance"}, status=403)
         a = SalaryAdvance.objects.filter(pk=pk).first()
         if not a:
@@ -798,7 +854,7 @@ class LeaveViewSet(ModuleViewSetMixin, viewsets.ViewSet):
             LEAVE_OVERSIGHT_ROLES,
             leave_approvers_for,
         )
-        role = getattr(request.user, "role", "")
+        role = acting_role(request)
         view = request.query_params.get("view", "mine")
         qs = LeaveRequest.objects.select_related("employee", "leave_type")
         if view == "all" and role in LEAVE_OVERSIGHT_ROLES:
@@ -827,7 +883,7 @@ class LeaveViewSet(ModuleViewSetMixin, viewsets.ViewSet):
         they approve). Most of these roles don't have the full 'hr' module,
         so this can't just proxy to /hr/ — same pattern as matreq/materials."""
         from apps.accounts.constants import can_enter_leave_on_behalf
-        role = getattr(request.user, "role", "")
+        role = acting_role(request)
         rows = [e for e in Employee.objects.filter(status="Active")
                 if can_enter_leave_on_behalf(role, e.department)]
         return Response([{"id": e.id, "name": e.name, "department": e.department,
@@ -838,7 +894,7 @@ class LeaveViewSet(ModuleViewSetMixin, viewsets.ViewSet):
         """Active leave types for the apply form; managers get inactive too."""
         from apps.accounts.constants import LEAVE_TYPE_MANAGER_ROLES
         qs = LeaveType.objects.all()
-        if getattr(request.user, "role", "") not in LEAVE_TYPE_MANAGER_ROLES:
+        if acting_role(request) not in LEAVE_TYPE_MANAGER_ROLES:
             qs = qs.filter(active=True)
         return Response([_type_dict(t) for t in qs])
 
@@ -847,7 +903,7 @@ class LeaveViewSet(ModuleViewSetMixin, viewsets.ViewSet):
         """Create/update a leave type: {id?, name, annual_quota, is_paid,
         carry_forward, active}. HR/Admin/GM/MD/Super Admin only."""
         from apps.accounts.constants import LEAVE_TYPE_MANAGER_ROLES
-        if getattr(request.user, "role", "") not in LEAVE_TYPE_MANAGER_ROLES:
+        if acting_role(request) not in LEAVE_TYPE_MANAGER_ROLES:
             return Response({"detail": "only HR or an administrator can manage leave types"}, status=403)
         name = (request.data.get("name") or "").strip()
         if not name:
@@ -892,7 +948,7 @@ class LeaveViewSet(ModuleViewSetMixin, viewsets.ViewSet):
             emp = Employee.objects.filter(pk=emp_id).first()
             if not emp:
                 return Response({"detail": "not found"}, status=404)
-            role = getattr(request.user, "role", "")
+            role = acting_role(request)
             if role not in LEAVE_OVERSIGHT_ROLES and role not in leave_approvers_for(emp.department):
                 return Response({"detail": "you can only view your own leave balance"}, status=403)
         else:
@@ -980,7 +1036,7 @@ class LeaveViewSet(ModuleViewSetMixin, viewsets.ViewSet):
             return Response({"detail": "not found"}, status=404)
         if r.status not in (LeaveRequest.PENDING, LeaveRequest.MANAGER_APPROVED):
             return Response({"detail": f"this request is already {r.status}"}, status=400)
-        role = getattr(request.user, "role", "")
+        role = acting_role(request)
         if r.status == LeaveRequest.PENDING:
             approvers = leave_approvers_for(r.employee.department)
             if role not in approvers:
@@ -1044,7 +1100,7 @@ class LeaveViewSet(ModuleViewSetMixin, viewsets.ViewSet):
             return Response({"detail": "not found"}, status=404)
         if r.status not in LeaveRequest.ACTIVE_STATUSES:
             return Response({"detail": f"this request is already {r.status}"}, status=400)
-        role = getattr(request.user, "role", "")
+        role = acting_role(request)
         own = self._own_employee(request)
         # Everyone with cancel authority at either approval level — the
         # department's approvers plus HR/universal. Deliberately NOT
@@ -1090,11 +1146,18 @@ class InvitePublicView(APIView):
             token=request.data.get("t", "")).first()
         if not inv or not inv.is_valid():
             return Response({"detail": "This invite link is invalid or has expired"}, status=404)
-        username = (request.data.get("username") or "").strip()
+        from rest_framework.serializers import ValidationError as DRFValidationError
+
+        from apps.accounts.validators import validate_username
         password = request.data.get("password") or ""
-        if not username:
-            return Response({"detail": "Choose a username"}, status=400)
-        if User.objects.filter(username=username).exists():
+        try:
+            username = validate_username(request.data.get("username") or "")
+        except DRFValidationError as e:
+            detail = e.detail[0] if isinstance(e.detail, list) else str(e.detail)
+            return Response({"detail": detail}, status=400)
+        # __iexact, not an exact match: `ABISHEK1828` alongside `abishek1828`
+        # is two accounts nobody can tell apart.
+        if User.objects.filter(username__iexact=username).exists():
             return Response({"detail": "That username is already taken"}, status=400)
         from django.contrib.auth.password_validation import validate_password
         from django.core.exceptions import ValidationError as DjangoValidationError

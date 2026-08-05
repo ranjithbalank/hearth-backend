@@ -89,6 +89,7 @@ class Command(BaseCommand):
         if not base_only:
             self._activity()
             self._branch_access()  # grants seeded staff a branch to operate in
+            self._second_branch()  # so branch scoping is visible, not just wired
         if base_only:
             self.stdout.write(self.style.SUCCESS(
                 f"Boilerplate ready — '{prop.name}', no accounts, no demo data. First run "
@@ -523,7 +524,15 @@ class Command(BaseCommand):
             if emp and user:
                 emp.user = user
                 emp.save(update_fields=["user"])
-        # Leave types (FR-HRM): standard Indian set; quota 0 = uncapped.
+        if not LostFoundItem.objects.exists():
+            LostFoundItem.objects.create(description="Black umbrella", location="Lobby", handler="Anil Kumar")
+            LostFoundItem.objects.create(description="Phone charger", location="Room 204", handler="Sunita Pal")
+
+    def _masters(self):
+        # Leave types are reference data, not demo content — they used to be
+        # seeded inside _hr(), which the boilerplate skips, so a clean install
+        # opened its leave desk with nothing to request. Standard Indian set;
+        # quota 0 = uncapped.
         if not LeaveType.objects.exists():
             for name, quota, paid, carry in [
                 ("Casual Leave", 12, True, False),
@@ -533,11 +542,7 @@ class Command(BaseCommand):
             ]:
                 LeaveType.objects.create(name=name, annual_quota=quota,
                                          is_paid=paid, carry_forward=carry)
-        if not LostFoundItem.objects.exists():
-            LostFoundItem.objects.create(description="Black umbrella", location="Lobby", handler="Anil Kumar")
-            LostFoundItem.objects.create(description="Phone charger", location="Room 204", handler="Sunita Pal")
 
-    def _masters(self):
         vendors = [
             ("CoolAir HVAC Services", "Maintenance", "Net 30"),
             ("BrightClean Laundry", "Laundry", "Net 15"),
@@ -662,3 +667,57 @@ class Command(BaseCommand):
                         obj.save(update_fields=["location"])
                 except IntegrityError:
                     pass
+
+        # Transactions and venues need the same backfill, and for a sharper
+        # reason: the reports are branch-scoped now, so a folio or order left
+        # with a NULL location belongs to no branch and silently drops out of
+        # every per-branch total — the branches would stop adding up to the
+        # group. With one property there is no ambiguity about whose they are.
+        from apps.banquets.models import FunctionSpace
+        from apps.frontoffice.models import Folio
+        from apps.pos.models import Order
+        for model in (Folio, Order, FunctionSpace):
+            model.objects.filter(location__isnull=True).update(location=branch)
+
+    def _second_branch(self):
+        """A second property, so branch scoping is something you can actually
+        see working.
+
+        With one branch, "All branches" and that branch return identical
+        numbers whether or not the reports honour the filter — which is exactly
+        how the reports came to ignore it unnoticed. Splitting the sixth floor
+        and the N-series tables onto a second branch makes the difference
+        visible, and moves each room's folios and each table's orders with it
+        so neither branch is left with revenue for rooms it doesn't have.
+
+        The group total is unchanged: nothing is created or deleted, only
+        reassigned, so "All branches" reads exactly as it did before.
+        """
+        prop = Property.objects.first()
+        if not prop:
+            return
+        city, created = Branch.objects.get_or_create(
+            code="CTY", defaults={
+                "property": prop, "name": "Hearth Grand - City",
+                "hms": True, "restaurant": True, "banquets": False, "rms": True,
+                "status": Branch.STATUS_ACTIVE,
+            })
+        # Only split on first creation. Re-running the seed must not keep
+        # shovelling rows across, and a real branch layout set up through
+        # Branch Master is not ours to rearrange.
+        if not created:
+            return
+
+        from apps.frontoffice.models import Folio
+        from apps.pos.models import Order
+
+        room_ids = [r.id for r in Room.objects.all() if str(r.number).startswith("6")]
+        Room.objects.filter(id__in=room_ids).update(location=city)
+        Folio.objects.filter(room_id__in=room_ids).update(location=city)
+
+        table_ids = list(Table.objects.filter(name__startswith="N").values_list("id", flat=True))
+        Table.objects.filter(id__in=table_ids).update(location=city)
+        Order.objects.filter(table_id__in=table_ids).update(location=city)
+
+        self.stdout.write(
+            f"  second branch CTY: {len(room_ids)} rooms, {len(table_ids)} tables moved")

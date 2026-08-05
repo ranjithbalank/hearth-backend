@@ -1,4 +1,5 @@
 from django.db import models
+from apps.accounts.validators import NON_NEGATIVE
 
 
 class Customer(models.Model):
@@ -53,7 +54,7 @@ class LoyaltyTier(models.Model):
 
     name = models.CharField(max_length=40, unique=True)
     min_lifetime_points = models.PositiveIntegerField(default=0)
-    earn_multiplier = models.DecimalField(max_digits=4, decimal_places=2, default=1)
+    earn_multiplier = models.DecimalField(max_digits=4, decimal_places=2, default=1, validators=NON_NEGATIVE)
     active = models.BooleanField(default=True)
 
     class Meta:
@@ -75,7 +76,7 @@ class LoyaltyReward(models.Model):
     name = models.CharField(max_length=80)
     points_cost = models.PositiveIntegerField()
     kind = models.CharField(max_length=10, choices=KIND_CHOICES, default=FIXED)
-    value = models.DecimalField(max_digits=10, decimal_places=2)
+    value = models.DecimalField(max_digits=10, decimal_places=2, validators=NON_NEGATIVE)
     active = models.BooleanField(default=True)
     redeemed_count = models.PositiveIntegerField(default=0)
 

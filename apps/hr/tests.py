@@ -216,3 +216,53 @@ class OverviewTests(TestCase):
         r = self.client.get(reverse("hr-overview"))
         self.assertEqual(r.data["weekly"], 1)
         self.assertEqual(Decimal(r.data["monthly_wage_bill"]), Decimal("3000") * 52 / 12)
+
+
+class LoginToPayrollTests(TestCase):
+    """A login created in Users & Roles has to reach HR, or that person never
+    appears in a payroll run and nobody finds out until payday."""
+
+    def setUp(self):
+        self.client = APIClient()
+        self.hr = User.objects.create_user(
+            username="hrm", password="Tk9$mZ2pQw!7", role="HR Manager")
+        self.client.force_authenticate(self.hr)
+        from apps.masters.models import Department, Designation
+        Department.objects.get_or_create(name="Kitchen", defaults={"active": True})
+        Designation.objects.get_or_create(name="Cook", defaults={"active": True})
+
+    def test_a_new_login_shows_up_as_having_no_pay(self):
+        new = User.objects.create_user(username="arun", password="Tk9$mZ2pQw!7",
+                                       first_name="Arun", role="Chef / Kitchen")
+        rows = self.client.get("/api/hr/unpaid/").json()
+        self.assertIn(new.id, [r["id"] for r in rows])
+        self.assertIn("Arun", [r["name"] for r in rows])
+
+    def test_adding_them_to_the_roster_links_the_two_records(self):
+        new = User.objects.create_user(username="arun", password="Tk9$mZ2pQw!7",
+                                       first_name="Arun", role="Chef / Kitchen")
+        r = self.client.post("/api/hr/", {
+            "name": "Arun", "department": "Kitchen", "role": "Cook",
+            "monthly_salary": "24000", "user": new.id}, format="json")
+        self.assertEqual(r.status_code, 201, r.data)
+        emp = Employee.objects.get(name="Arun")
+        self.assertEqual(emp.user_id, new.id)
+        # …and they drop off the outstanding list.
+        rows = self.client.get("/api/hr/unpaid/").json()
+        self.assertNotIn(new.id, [r["id"] for r in rows])
+
+    def test_a_login_cannot_be_put_on_the_roster_twice(self):
+        new = User.objects.create_user(username="arun", password="Tk9$mZ2pQw!7",
+                                       role="Chef / Kitchen")
+        body = {"name": "Arun", "department": "Kitchen", "role": "Cook", "user": new.id}
+        self.assertEqual(self.client.post("/api/hr/", body, format="json").status_code, 201)
+        second = self.client.post("/api/hr/", {**body, "name": "Arun Again"}, format="json")
+        self.assertEqual(second.status_code, 400)
+        self.assertIn("already on the roster", second.data["detail"])
+
+    def test_roster_only_staff_are_untouched(self):
+        # Kitchen helpers and cleaners never get a login; they're on payroll
+        # all the same, and must not appear in this list.
+        Employee.objects.create(name="Helper", department="Kitchen", role="Cook")
+        rows = self.client.get("/api/hr/unpaid/").json()
+        self.assertNotIn("Helper", [r["name"] for r in rows])

@@ -23,4 +23,5 @@ def verify(secret: str, code: str) -> bool:
 def role_requires_mfa(role: str) -> bool:
     """Roles for which MFA is mandatory by policy. Empty in dev so demo logins work;
     set MFA_ENFORCED_ROLES in production (e.g. the privileged roles)."""
-    return role in getattr(settings, "MFA_ENFORCED_ROLES", [])
+    from .rbac import base_role
+    return base_role(role) in getattr(settings, "MFA_ENFORCED_ROLES", [])

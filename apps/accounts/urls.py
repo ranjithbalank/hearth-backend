@@ -16,13 +16,19 @@ from .views import (
     PasswordResetRequestView,
     PropertyView,
     RoleMatrixView,
+    RoleViewSet,
+    SetupChecklistView,
     SetupView,
+    StarterPackView,
     UserBranchAccessViewSet,
     UserViewSet,
 )
 
 router = DefaultRouter()
 router.register("users", UserViewSet, basename="user")
+# "roles" sits under the router but BEFORE the explicit roles/matrix/ path
+# below stays reachable — DefaultRouter only claims roles/ and roles/<pk>/.
+router.register("roles", RoleViewSet, basename="role")
 router.register("branches", BranchViewSet, basename="branch")
 router.register("branch-access", UserBranchAccessViewSet, basename="branch-access")
 
@@ -31,6 +37,8 @@ urlpatterns = [
     path("me/", MeView.as_view(), name="me"),
     path("property/", PropertyView.as_view(), name="property"),
     path("setup/", SetupView.as_view(), name="setup"),
+    path("setup/checklist/", SetupChecklistView.as_view(), name="setup-checklist"),
+    path("setup/starter-packs/", StarterPackView.as_view(), name="setup-starter-packs"),
     path("bootstrap/", BootstrapAdminView.as_view(), name="bootstrap"),
     path("entitlements/", EntitlementView.as_view(), name="entitlements"),
     path("feature-model/", FeatureModelView.as_view(), name="feature-model"),

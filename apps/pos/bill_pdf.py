@@ -2,6 +2,7 @@
 import io
 from decimal import Decimal
 
+from django.utils import timezone
 from reportlab.lib import colors
 from reportlab.lib.pagesizes import A4
 from reportlab.lib.styles import ParagraphStyle, getSampleStyleSheet
@@ -16,6 +17,7 @@ from reportlab.platypus import (
 )
 
 PINE = colors.HexColor("#1C6B57")
+INK = colors.HexColor("#16221F")
 MUTED = colors.HexColor("#8A8478")
 CREAM = colors.HexColor("#F6F2EC")
 
@@ -28,11 +30,19 @@ _ALIGN = {"left": 0, "center": 1, "right": 2}
 
 
 def build_bill_pdf(order, property_name, doc_header="", doc_header_align="center",
-                   doc_footer="", doc_footer_align="center", columns=()):
+                   doc_footer="", doc_footer_align="center", columns=(),
+                   with_gst=True, gstin=""):
     """doc_header/doc_footer/alignment come from Settings → Bill Template — POS
     (its own template, separate from the guest invoice's).
     columns: optional extra line-item columns (⊆ "rate") — additive only,
-    next to the existing Item/Qty/Amt columns."""
+    next to the existing Item/Qty/Amt columns.
+
+    The document title, bill number, date/time and GSTIN are NOT optional
+    columns. A receipt printed without a number or a date isn't a valid
+    document to hand a guest — this used to print the bill number bare, with
+    no label and no date at all — so they're part of the fixed masthead, the
+    same way the guest invoice's are.
+    """
     buf = io.BytesIO()
     # A slim receipt page.
     doc = SimpleDocTemplate(buf, pagesize=(80 * mm, 200 * mm), topMargin=8 * mm,
@@ -42,13 +52,25 @@ def build_bill_pdf(order, property_name, doc_header="", doc_header_align="center
     center = ParagraphStyle("c", parent=ss["Normal"], alignment=1)
     brand = ParagraphStyle("b", parent=center, fontSize=13, textColor=PINE, spaceAfter=2)
     small = ParagraphStyle("s", parent=center, fontSize=8, textColor=MUTED)
+    doc_style = ParagraphStyle("d", parent=center, fontSize=9, textColor=INK, spaceAfter=1)
     t = order.totals()
     where = f"Table {order.table.name}" if order.table else order.get_mode_display()
+    # Settled bills carry their allotted series number; an unsettled reprint
+    # falls back to the KOT number so the slip is still traceable.
+    bill_ref = order.bill_no or order.kot_no or f"#{order.id}"
+    issued = timezone.localtime(order.created_at) if order.created_at else None
     story = [
         Paragraph(property_name, brand),
-        Paragraph(where, small),
-        Paragraph(f"{order.bill_no or order.kot_no or ('#' + str(order.id))}", small),
+        Paragraph("TAX INVOICE" if with_gst else "BILL OF SUPPLY", doc_style),
     ]
+    if with_gst and gstin:
+        story.append(Paragraph(f"GSTIN: {gstin}", small))
+    story += [
+        Paragraph(where, small),
+        Paragraph(f"Bill No: <b>{bill_ref}</b>", small),
+    ]
+    if issued:
+        story.append(Paragraph(f"Date: {issued:%d %b %Y} &nbsp;·&nbsp; {issued:%H:%M}", small))
     header_lines = [ln.strip() for ln in (doc_header or "").splitlines() if ln.strip()]
     if header_lines:
         h_style = ParagraphStyle("bh", parent=small, alignment=_ALIGN.get(doc_header_align, 1))

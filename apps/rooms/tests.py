@@ -88,3 +88,58 @@ class RoomImportTests(TestCase):
             username="foimp", password="Tk9$mZ2pQw!7", role="Front Office"))
         # Front Office reads the live grid, but can't mass-create rooms.
         self.assertEqual(fo.get("/api/rooms/import/").status_code, 403)
+
+
+class RatePlanAndNumericFloorTests(TestCase):
+    """Aug-2026 audit F4 and F5. Rate plans were the one master in the product
+    that accepted a duplicate name, and no models.py carried a single
+    MinValueValidator — a negative price or quantity was persistable through
+    every path and propagated into billing and stock."""
+
+    def setUp(self):
+        self.client = APIClient()
+        self.mgr = User.objects.create_user(
+            username="rpmgr", password="Tk9$mZ2pQw!7", role="General Manager")
+        self.client.force_authenticate(self.mgr)
+        self.std = RoomType.objects.create(code="RPA", name="Alpha", base_rate=2000)
+        self.dlx = RoomType.objects.create(code="RPB", name="Beta", base_rate=3000)
+
+    # -- F5 ---------------------------------------------------------------
+    def test_a_rate_plan_name_cannot_repeat_on_one_room_type(self):
+        first = self.client.post("/api/rate-plans/", {
+            "name": "Room Only", "room_type": self.std.id, "rate": "2500"}, format="json")
+        self.assertEqual(first.status_code, 201)
+        second = self.client.post("/api/rate-plans/", {
+            "name": "room only", "room_type": self.std.id, "rate": "2600"}, format="json")
+        self.assertEqual(second.status_code, 400)
+
+    def test_the_same_plan_name_is_fine_on_a_different_room_type(self):
+        # Scoped, not global: "Room Only" belongs on every room type.
+        a = self.client.post("/api/rate-plans/", {
+            "name": "Room Only", "room_type": self.std.id, "rate": "2500"}, format="json")
+        b = self.client.post("/api/rate-plans/", {
+            "name": "Room Only", "room_type": self.dlx.id, "rate": "3500"}, format="json")
+        self.assertEqual((a.status_code, b.status_code), (201, 201))
+
+    def test_renaming_a_plan_to_its_own_name_is_not_a_clash(self):
+        r = self.client.post("/api/rate-plans/", {
+            "name": "Breakfast", "room_type": self.std.id, "rate": "2800"}, format="json")
+        same = self.client.patch(f"/api/rate-plans/{r.data['id']}/", {"rate": "2900"}, format="json")
+        self.assertEqual(same.status_code, 200)
+
+    # -- F4 ---------------------------------------------------------------
+    def test_a_rate_cannot_be_negative(self):
+        r = self.client.post("/api/rate-plans/", {
+            "name": "Refund Plan", "room_type": self.std.id, "rate": "-500"}, format="json")
+        self.assertEqual(r.status_code, 400)
+
+    def test_a_room_type_base_rate_cannot_be_negative(self):
+        r = self.client.post("/api/room-types/", {
+            "code": "NEG", "name": "Negative", "base_rate": "-1"}, format="json")
+        self.assertEqual(r.status_code, 400)
+
+    def test_zero_is_still_allowed(self):
+        # A complimentary rate is legitimate; only below zero is nonsense.
+        r = self.client.post("/api/rate-plans/", {
+            "name": "Complimentary", "room_type": self.std.id, "rate": "0"}, format="json")
+        self.assertEqual(r.status_code, 201)

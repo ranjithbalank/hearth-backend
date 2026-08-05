@@ -2,6 +2,7 @@ from django.db import models
 
 from apps.crm.models import Customer
 from apps.rooms.models import RatePlan, Room, RoomType
+from apps.accounts.validators import NON_NEGATIVE
 
 
 class Reservation(models.Model):
@@ -52,8 +53,8 @@ class Reservation(models.Model):
     source = models.CharField(max_length=20, choices=SOURCE_CHOICES, default=SOURCE_DIRECT)
     status = models.CharField(max_length=20, choices=STATUS_CHOICES, default=BOOKED)
     nights = models.PositiveSmallIntegerField(default=1)
-    rate = models.DecimalField(max_digits=10, decimal_places=2, default=0)
-    deposit = models.DecimalField(max_digits=10, decimal_places=2, default=0)
+    rate = models.DecimalField(max_digits=10, decimal_places=2, default=0, validators=NON_NEGATIVE)
+    deposit = models.DecimalField(max_digits=10, decimal_places=2, default=0, validators=NON_NEGATIVE)
     prepaid = models.BooleanField(default=False)
     notes = models.CharField(max_length=255, blank=True)
     # Channel/OTA of origin (e.g. "Booking.com") + its external ref, for inbound

@@ -1,9 +1,13 @@
 from rest_framework import serializers
 
+from apps.accounts.validators import CaseInsensitiveUniqueMixin
+
 from .models import RatePlan, Room, RoomType
 
 
-class RoomTypeSerializer(serializers.ModelSerializer):
+class RoomTypeSerializer(CaseInsensitiveUniqueMixin, serializers.ModelSerializer):
+    ci_unique_fields = ["name", "code"]
+
     class Meta:
         model = RoomType
         fields = ["id", "code", "name", "base_rate", "max_occupancy", "gst_slab"]
@@ -15,6 +19,29 @@ class RatePlanSerializer(serializers.ModelSerializer):
     class Meta:
         model = RatePlan
         fields = ["id", "name", "room_type", "room_type_code", "rate", "inclusions"]
+
+    def validate(self, attrs):
+        """One plan name per room type, ignoring capitals.
+
+        Scoped rather than global: "Room Only" is a perfectly good plan name on
+        both Standard and Deluxe. What isn't good is two plans a booking clerk
+        can't tell apart on the same room type — the reservation screen shows
+        the name alone, so the wrong rate gets picked and billed. Every other
+        master in Hearth already refused this; rate plans were the gap.
+        """
+        attrs = super().validate(attrs)
+        name = attrs.get("name") or getattr(self.instance, "name", "")
+        room_type = attrs.get("room_type") or getattr(self.instance, "room_type", None)
+        if not name or room_type is None:
+            return attrs
+        qs = RatePlan.objects.filter(room_type=room_type, name__iexact=name.strip())
+        if self.instance is not None:
+            qs = qs.exclude(pk=self.instance.pk)
+        if qs.exists():
+            raise serializers.ValidationError({"name": (
+                f"'{name.strip()}' is already a rate plan on this room type. Two plans with "
+                f"one name are indistinguishable when a booking is taken.")})
+        return attrs
 
 
 class RoomSerializer(serializers.ModelSerializer):

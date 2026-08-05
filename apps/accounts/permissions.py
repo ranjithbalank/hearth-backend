@@ -13,7 +13,7 @@ from rest_framework.permissions import BasePermission
 
 from .constants import entitlement_allows
 from .models import Property
-from .rbac import PROTECTED, can_access
+from .rbac import PROTECTED, base_role, can_access
 
 
 def active_entitlements():
@@ -31,7 +31,7 @@ def user_branch_ids(user):
     their existing module "*" access) or a set of Branch ids drawn from their
     active UserBranchAccess rows (respecting start_date/end_date loans).
     """
-    if getattr(user, "role", None) in PROTECTED:
+    if base_role(getattr(user, "role", "") or "") in PROTECTED:
         return "*"
     # Single-property mode: with no branches configured there is nothing to
     # scope BY — strict scoping would blank every floor screen (tables, rooms,

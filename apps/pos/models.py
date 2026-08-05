@@ -4,6 +4,7 @@ from django.db import models
 
 from apps.crm.models import Customer
 from apps.frontoffice.models import Folio
+from apps.accounts.validators import NON_NEGATIVE, PERCENT
 
 
 class Table(models.Model):
@@ -118,8 +119,8 @@ class MenuItem(models.Model):
     name = models.CharField(max_length=120)
     short_code = models.CharField(max_length=20, blank=True)
     category = models.ForeignKey(Category, on_delete=models.PROTECT, related_name="items")
-    price = models.DecimalField(max_digits=10, decimal_places=2)
-    gst_rate = models.DecimalField(max_digits=4, decimal_places=1, default=5)
+    price = models.DecimalField(max_digits=10, decimal_places=2, validators=NON_NEGATIVE)
+    gst_rate = models.DecimalField(max_digits=4, decimal_places=1, default=5, validators=PERCENT)
     diet = models.CharField(max_length=10, choices=DIET_CHOICES, default=VEG)
     station = models.CharField(max_length=20, default="kitchen", help_text="kitchen | bar")
     # The bar runs its own dedicated menu, not a filtered view of the
@@ -170,7 +171,7 @@ class ChannelPrice(models.Model):
 
     menu_item = models.ForeignKey(MenuItem, on_delete=models.CASCADE, related_name="channel_prices")
     channel = models.CharField(max_length=12, help_text="dinein | takeaway | delivery | online")
-    price = models.DecimalField(max_digits=10, decimal_places=2)
+    price = models.DecimalField(max_digits=10, decimal_places=2, validators=NON_NEGATIVE)
 
     class Meta:
         unique_together = [("menu_item", "channel")]
@@ -184,7 +185,7 @@ class Variant(models.Model):
 
     menu_item = models.ForeignKey(MenuItem, on_delete=models.CASCADE, related_name="variants")
     name = models.CharField(max_length=60)
-    price = models.DecimalField(max_digits=10, decimal_places=2)
+    price = models.DecimalField(max_digits=10, decimal_places=2, validators=NON_NEGATIVE)
     short_code = models.CharField(max_length=20, blank=True)
 
     def __str__(self):
@@ -210,7 +211,7 @@ class AddOnGroup(models.Model):
 class AddOn(models.Model):
     group = models.ForeignKey(AddOnGroup, on_delete=models.CASCADE, related_name="options")
     name = models.CharField(max_length=60)
-    price = models.DecimalField(max_digits=10, decimal_places=2, default=0)
+    price = models.DecimalField(max_digits=10, decimal_places=2, default=0, validators=NON_NEGATIVE)
 
     def __str__(self):
         return self.name
@@ -223,7 +224,7 @@ class MenuSchedule(models.Model):
     name = models.CharField(max_length=60, default="Happy hour")
     start_time = models.TimeField()
     end_time = models.TimeField()
-    price = models.DecimalField(max_digits=10, decimal_places=2)
+    price = models.DecimalField(max_digits=10, decimal_places=2, validators=NON_NEGATIVE)
 
     def active_now(self):
         from django.utils import timezone
@@ -327,7 +328,7 @@ class Order(models.Model):
     DISC_PERCENT = "percent"
     DISC_FIXED = "fixed"
     discount_kind = models.CharField(max_length=10, default=DISC_NONE)
-    discount_value = models.DecimalField(max_digits=10, decimal_places=2, default=0)
+    discount_value = models.DecimalField(max_digits=10, decimal_places=2, default=0, validators=NON_NEGATIVE)
     discount_reason = models.CharField(max_length=160, blank=True)
     coupon = models.ForeignKey(
         "pos.Coupon", on_delete=models.SET_NULL, null=True, blank=True, related_name="orders"
@@ -357,9 +358,12 @@ class Order(models.Model):
         """Idempotently assign the sequential bill number the first time this order settles."""
         if not self.bill_no:
             from apps.accounts.models import Property
-            from apps.accounts.numbering import next_document_number
+            from apps.accounts.numbering import GST_MAX_DOC_NUMBER, next_document_number
             prop = Property.objects.first()
-            self.bill_no = next_document_number(Order, "bill_no", prop.bill_prefix if prop else "BILL")
+            # A POS bill IS the restaurant's tax invoice, so it takes the same
+            # 16-character cap as the folio invoice.
+            self.bill_no = next_document_number(Order, "bill_no", prop.bill_prefix if prop else "BILL",
+                                                max_total=GST_MAX_DOC_NUMBER)
         return self.bill_no
 
     def _subtotal(self):
@@ -410,7 +414,7 @@ class TillSession(models.Model):
     CLOSED = "closed"
 
     opened_by = models.CharField(max_length=80, blank=True)
-    opening_float = models.DecimalField(max_digits=12, decimal_places=2, default=0)
+    opening_float = models.DecimalField(max_digits=12, decimal_places=2, default=0, validators=NON_NEGATIVE)
     status = models.CharField(max_length=8, default=OPEN)
     opened_at = models.DateTimeField(auto_now_add=True)
     closed_at = models.DateTimeField(null=True, blank=True)
@@ -620,7 +624,7 @@ class Coupon(models.Model):
     code = models.CharField(max_length=30, unique=True)
     kind = models.CharField(max_length=10, default="percent", help_text="percent | fixed")
     value = models.DecimalField(max_digits=10, decimal_places=2)
-    min_bill = models.DecimalField(max_digits=10, decimal_places=2, default=0)
+    min_bill = models.DecimalField(max_digits=10, decimal_places=2, default=0, validators=NON_NEGATIVE)
     usage_limit = models.PositiveIntegerField(default=0, help_text="0 = unlimited")
     used_count = models.PositiveIntegerField(default=0)
     active = models.BooleanField(default=True)
@@ -649,7 +653,7 @@ class OrderLine(models.Model):
     variant = models.ForeignKey(Variant, on_delete=models.SET_NULL, null=True, blank=True)
     addons = models.JSONField(default=list, blank=True, help_text="[{name, price}]")
     qty = models.PositiveSmallIntegerField(default=1)
-    unit_price = models.DecimalField(max_digits=10, decimal_places=2)
+    unit_price = models.DecimalField(max_digits=10, decimal_places=2, validators=NON_NEGATIVE)
     note = models.CharField(max_length=120, blank=True)
     kot_fired = models.BooleanField(default=False)
     # Which fire round this line went out on (null until fired).

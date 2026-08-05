@@ -1,5 +1,7 @@
 from rest_framework import serializers
 
+from apps.accounts.validators import CaseInsensitiveUniqueMixin
+
 from .models import (
     AddOn,
     AddOnGroup,
@@ -33,7 +35,9 @@ def captain_on_leave_today(captain_user):
     ).exists()
 
 
-class TableSerializer(serializers.ModelSerializer):
+class TableSerializer(CaseInsensitiveUniqueMixin, serializers.ModelSerializer):
+    ci_unique_fields = ['name']
+
     status_label = serializers.CharField(source="get_status_display", read_only=True)
     assigned_captain_name = serializers.CharField(source="assigned_captain.get_full_name", read_only=True, default=None)
     # Writable only through the dedicated `assign_captain` action, which is
@@ -65,7 +69,9 @@ class BarTableSerializer(serializers.ModelSerializer):
         validators = []
 
 
-class CategorySerializer(serializers.ModelSerializer):
+class CategorySerializer(CaseInsensitiveUniqueMixin, serializers.ModelSerializer):
+    ci_unique_fields = ['name']
+
     class Meta:
         model = Category
         fields = ["id", "name", "sort_order", "is_bar", "location"]
@@ -91,7 +97,9 @@ class AddOnGroupSerializer(serializers.ModelSerializer):
         fields = ["id", "name", "min_select", "max_select", "options"]
 
 
-class MenuItemSerializer(serializers.ModelSerializer):
+class MenuItemSerializer(CaseInsensitiveUniqueMixin, serializers.ModelSerializer):
+    ci_unique_fields = ['name']
+
     category_name = serializers.CharField(source="category.name", read_only=True)
     variants = VariantSerializer(many=True, read_only=True)
     addon_groups = AddOnGroupSerializer(many=True, read_only=True)

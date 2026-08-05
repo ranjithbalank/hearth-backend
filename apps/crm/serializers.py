@@ -1,9 +1,13 @@
 from rest_framework import serializers
 
+from apps.accounts.validators import CaseInsensitiveUniqueMixin
+
 from .models import Customer, LoyaltyLedger, LoyaltyReward, LoyaltyTier
 
 
-class LoyaltyTierSerializer(serializers.ModelSerializer):
+class LoyaltyTierSerializer(CaseInsensitiveUniqueMixin, serializers.ModelSerializer):
+    ci_unique_fields = ['name']
+
     class Meta:
         model = LoyaltyTier
         fields = ["id", "name", "min_lifetime_points", "earn_multiplier", "active"]
@@ -54,6 +58,18 @@ class CustomerSerializer(serializers.ModelSerializer):
         n = getattr(obj, "order_count", None)
         return obj.orders.count() if n is None else n
 
+    def validate_mobile(self, value):
+        # The guest's number is the key the whole product matches on — POS
+        # get_or_create, reservations, QR ordering and loyalty all look a guest
+        # up by it. Until now it accepted any string, so "9876543210",
+        # "98765 43210" and "+91 98765 43210" were three different guests.
+        from apps.accounts.validators import validate_phone
+        return validate_phone(value, field="Mobile")
+
+    def validate_email(self, value):
+        from apps.accounts.validators import normalize_email
+        return normalize_email(value)
+
     class Meta:
         model = Customer
         fields = [
@@ -64,3 +80,10 @@ class CustomerSerializer(serializers.ModelSerializer):
             "marketing_consent", "tags", "created_at",
             "stay_count", "order_count",
         ]
+        # These three are ledger balances, moved only by the flows that own
+        # them — outstanding by city-ledger posting and settle_ar, the points
+        # pair by LoyaltyLedger entries. Writable, they let anyone with CRM
+        # access clear a company's debt or mint loyalty points through an
+        # ordinary PATCH, leaving the ledger that explains the balance behind.
+        # (Aug-2026 field-coverage sweep.)
+        read_only_fields = ["outstanding", "loyalty_points", "lifetime_points"]

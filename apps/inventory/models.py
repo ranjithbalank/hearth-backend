@@ -1,6 +1,7 @@
 from decimal import Decimal
 
 from django.db import models
+from apps.accounts.validators import NON_NEGATIVE
 
 
 # Raw-material categories and base consumption units from the
@@ -67,9 +68,11 @@ class Ingredient(models.Model):
     category = models.CharField(max_length=80, blank=True)
     current_stock = models.DecimalField(max_digits=12, decimal_places=3, default=0)
     min_stock_level = models.DecimalField(max_digits=12, decimal_places=3, default=0,
+                                          validators=NON_NEGATIVE,
                                           help_text="hard floor — running out stops prep")
-    reorder_level = models.DecimalField(max_digits=12, decimal_places=3, default=0)
+    reorder_level = models.DecimalField(max_digits=12, decimal_places=3, default=0, validators=NON_NEGATIVE)
     unit_cost = models.DecimalField(max_digits=10, decimal_places=2, default=0,
+                                    validators=NON_NEGATIVE,
                                     help_text="purchase rate per base unit")
     storage_location = models.CharField(max_length=80, blank=True, default="",
                                         help_text="storage location / warehouse")

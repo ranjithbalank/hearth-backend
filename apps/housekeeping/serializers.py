@@ -1,6 +1,8 @@
 from django.utils import timezone
 from rest_framework import serializers
 
+from apps.accounts.validators import CaseInsensitiveUniqueMixin
+
 from .models import ChecklistItem, HousekeepingTask, LinenItem, WorkOrder
 
 
@@ -16,13 +18,17 @@ class WorkOrderSerializer(serializers.ModelSerializer):
         ]
 
 
-class ChecklistItemSerializer(serializers.ModelSerializer):
+class ChecklistItemSerializer(CaseInsensitiveUniqueMixin, serializers.ModelSerializer):
+    ci_unique_fields = ['label']
+
     class Meta:
         model = ChecklistItem
         fields = ["id", "label", "sort_order", "active"]
 
 
-class LinenItemSerializer(serializers.ModelSerializer):
+class LinenItemSerializer(CaseInsensitiveUniqueMixin, serializers.ModelSerializer):
+    ci_unique_fields = ['name']
+
     class Meta:
         model = LinenItem
         fields = ["id", "name", "par_per_room", "active"]

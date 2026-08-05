@@ -3,18 +3,53 @@ from rest_framework.response import Response
 from rest_framework.views import APIView
 
 from apps.accounts.constants import entitlement_allows, role_can_access
-from apps.accounts.permissions import ModulePermission, active_entitlements
+from apps.accounts.permissions import (
+    ModulePermission, active_entitlements, visible_branch_ids,
+)
+from apps.accounts.rbac import acting_role
 
 
-def _build_alerts():
+def _scope(qs, branches, field="location_id"):
+    """Same three-shaped branch narrowing the reports use: "*" is the group,
+    a set is those branches, an empty set is nothing at all. See
+    apps.reports.views._scope for why this can't key off
+    resolve_active_branch() alone."""
+    if branches == "*":
+        return qs
+    if not branches:
+        return qs.none()
+    return qs.filter(**{f"{field}__in": branches})
+
+
+def _scope_shared(qs, branches, field="location_id"):
+    """For a model where a blank location means "shared by every branch"
+    rather than "unassigned" — Ingredient works this way: no location is one
+    central stock count that every branch draws on, and a location makes the
+    item that branch's own with its own separate count.
+
+    So a branch sees its exclusives plus the shared pool, never another
+    branch's exclusives. Filtering these like Room would hide the central
+    stock from everybody, which is most of it.
+    """
+    from django.db.models import Q
+    if branches == "*":
+        return qs
+    return qs.filter(Q(**{f"{field}__isnull": True})
+                     | Q(**{f"{field}__in": branches or []}))
+
+
+def _build_alerts(branches="*"):
     """Derive operational alerts from current state (BRD 5.24 / FR-NOT-003).
 
-    Each alert carries the module it deep-links to, so the caller can RBAC-filter.
+    Each alert carries the module it deep-links to, so the caller can
+    RBAC-filter. Room-derived alerts are narrowed to `branches`, so the bell
+    and the dashboard's alert list agree with the branch switcher instead of
+    reporting every property's exceptions to one of them.
     """
     alerts = []
 
     from apps.inventory.models import Ingredient
-    low = [i for i in Ingredient.objects.all() if i.below_par]
+    low = [i for i in _scope_shared(Ingredient.objects.all(), branches) if i.below_par]
     for i in low:
         # At (or below) zero the kitchen can't plate the dish at all —
         # that's an outage, not a reorder reminder.
@@ -26,7 +61,8 @@ def _build_alerts():
         })
 
     from apps.rooms.models import Room
-    ooo = Room.objects.filter(status=Room.OOO)
+    rooms = _scope(Room.objects.all(), branches)
+    ooo = rooms.filter(status=Room.OOO)
     for r in ooo:
         alerts.append({
             "severity": "warning", "module": "engineering",
@@ -36,7 +72,7 @@ def _build_alerts():
 
     # Housekeeping: rooms a guest has just vacated need servicing. This fires
     # automatically on check-out (which sets the room to vacant/dirty).
-    dirty = list(Room.objects.filter(status=Room.VACANT_DIRTY)
+    dirty = list(rooms.filter(status=Room.VACANT_DIRTY)
                  .order_by("number").values_list("number", flat=True))
     if dirty:
         alerts.append({
@@ -45,7 +81,7 @@ def _build_alerts():
             "detail": "Vacated — ready to service: " + ", ".join(dirty),
         })
     # Front-desk cleaning requests (incl. occupied make-up-room) — urgent.
-    requested = list(Room.objects.filter(cleaning_requested=True)
+    requested = list(rooms.filter(cleaning_requested=True)
                      .order_by("number").values_list("number", flat=True))
     if requested:
         alerts.append({
@@ -53,7 +89,7 @@ def _build_alerts():
             "title": f"{len(requested)} cleaning request(s) from front desk",
             "detail": "Guest-requested service: room " + ", ".join(requested),
         })
-    cleaning = Room.objects.filter(status=Room.CLEANING).count()
+    cleaning = rooms.filter(status=Room.CLEANING).count()
     if cleaning:
         alerts.append({
             "severity": "info", "module": "housekeeping",
@@ -62,7 +98,7 @@ def _build_alerts():
         })
 
     # Front desk: rooms cleaned & inspected are ready to assign to arrivals.
-    ready = list(Room.objects.filter(status__in=list(Room.SELLABLE))
+    ready = list(rooms.filter(status__in=list(Room.SELLABLE))
                  .order_by("number").values_list("number", flat=True))
     if ready:
         alerts.append({
@@ -163,6 +199,26 @@ def _build_alerts():
             "roles": sorted(INDENT_ISSUER_ROLES),
         })
 
+    # Admin creates the login → HR finishes the person: department, designation
+    # and what they're paid. Two records, two desks, and nothing used to carry
+    # the handover between them — the new joiner simply never turned up in a
+    # payroll run. "roles" keeps this off Admin's bell: they've done their half.
+    from apps.accounts.constants import PAYROLL_MANAGER_ROLES
+    from apps.accounts.models import User
+    from apps.hr.models import Employee
+    on_roster = set(Employee.objects.exclude(user__isnull=True).values_list("user_id", flat=True))
+    awaiting = list(User.objects.filter(is_active=True).exclude(id__in=on_roster)
+                    .values_list("first_name", "username")[:10])
+    if awaiting:
+        who = ", ".join(first or username for first, username in awaiting)
+        alerts.append({
+            "severity": "warning", "module": "hr",
+            "title": f"{len(awaiting)} new login(s) need pay set up",
+            "detail": f"{who} — no department or pay yet, so they won't appear "
+                      f"in attendance or payroll",
+            "roles": sorted(PAYROLL_MANAGER_ROLES),
+        })
+
     from apps.banquets.models import Event
     tentative = Event.objects.filter(status=Event.TENTATIVE).count()
     if tentative:
@@ -214,7 +270,7 @@ class ApprovalInboxView(APIView):
             leave_approvers_for,
         )
         from apps.accounts.permissions import shared_or_visible
-        role = getattr(request.user, "role", "")
+        role = acting_role(request)
         username = request.user.username
         sections = []
 
@@ -305,8 +361,33 @@ class ApprovalInboxView(APIView):
                          "sections": sections})
 
 
+# Which side of the business each alert's module belongs to. Anything absent
+# is shared — purchasing, indents, payroll and the audit trail serve both, so
+# they show on every tab rather than being arbitrarily assigned to one.
+HOTEL_MODULES = {"housekeeping", "engineering", "livegrid", "frontdesk", "channel"}
+RESTAURANT_MODULES = {"inventory", "recipes", "barpos", "pos", "kds"}
+
+
+def alerts_for_sector(alerts, sector):
+    """Drop the alerts that belong to the other half of the property.
+
+    Without this the Hotel dashboard lists "Low stock: Butter" and the
+    Restaurant dashboard lists "Room 101 out of order" — each tab reporting
+    the exceptions of the business it isn't showing.
+    """
+    if sector == "hotel":
+        return [a for a in alerts if a["module"] not in RESTAURANT_MODULES]
+    if sector == "restaurant":
+        return [a for a in alerts if a["module"] not in HOTEL_MODULES]
+    return alerts
+
+
 class NotificationView(APIView):
-    """Alert center, scoped to what the signed-in user may actually see."""
+    """Alert center, scoped to what the signed-in user may actually see.
+
+    `?view=hotel|restaurant` narrows to one side of the property, so the
+    dashboard's sector tabs and its alert list agree.
+    """
 
     permission_classes = [IsAuthenticated]
 
@@ -314,13 +395,14 @@ class NotificationView(APIView):
         ent = active_entitlements()
         role = request.user.role
         visible = [
-            a for a in _build_alerts()
+            a for a in _build_alerts(visible_branch_ids(request))
             if role_can_access(role, a["module"]) and entitlement_allows(ent, a["module"])
             # Some alerts narrow further than the module gate — e.g. every
             # role can open Material Requests now, but "ready to issue" is
             # only useful to whoever actually does the issuing.
             and ("roles" not in a or role in a["roles"])
         ]
+        visible = alerts_for_sector(visible, request.query_params.get("view", ""))
         order = {"critical": 0, "warning": 1, "info": 2}
         visible.sort(key=lambda a: order.get(a["severity"], 3))
         return Response({"count": len(visible), "alerts": visible})
