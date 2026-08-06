@@ -4,6 +4,7 @@ Frontend input filters (lib/inputs.ts) keep bad characters out at the source;
 these are the server-side backstop so a direct API call can't slip through
 letters in a phone number or digits in a guest's name (BRD data-quality)."""
 import re
+import unicodedata
 from decimal import Decimal
 
 from django.core.validators import MaxValueValidator, MinValueValidator
@@ -27,8 +28,24 @@ NON_NEGATIVE = [MinValueValidator(Decimal("0"))]
 #: A percentage: 0-100 inclusive.
 PERCENT = [MinValueValidator(Decimal("0")), MaxValueValidator(Decimal("100"))]
 
-# Letters (any script), spaces, and the punctuation real names use.
-_NAME_RE = re.compile(r"^[^\W\d_]+(?:[\s.'-][^\W\d_]+)*[.']?$", re.UNICODE)
+# The punctuation real names use, between the letters.
+_NAME_SEPARATORS = " .'-"
+
+
+def _is_name_letter(ch: str) -> bool:
+    """A letter, or a combining mark belonging to one.
+
+    The mark half is not an edge case: in Devanagari, Tamil and most Indic
+    scripts the vowel signs ARE marks (Unicode category Mn/Mc), not letters. A
+    letters-only rule therefore rejected "मीरा" outright — a guest whose name is
+    written in the local script could not be saved at all, on a product built
+    for Indian properties. It went unnoticed because Latin accents are single
+    precomposed codepoints and sailed through.
+
+    Asking unicodedata for the category, rather than listing ranges, keeps this
+    correct for every script with no table to maintain.
+    """
+    return ch.isalpha() or unicodedata.category(ch).startswith("M")
 
 
 def validate_person_name(value: str) -> str:
@@ -37,7 +54,16 @@ def validate_person_name(value: str) -> str:
     v = (value or "").strip()
     if not v:
         return v
-    if any(ch.isdigit() for ch in v) or not _NAME_RE.match(v):
+    bad = (
+        any(ch.isdigit() for ch in v)
+        or any(not (_is_name_letter(ch) or ch in _NAME_SEPARATORS) for ch in v)
+        # No leading separator, and no two in a row ("Mary--Jane", "a  b").
+        or v[0] in _NAME_SEPARATORS
+        or any(a in _NAME_SEPARATORS and b in _NAME_SEPARATORS for a, b in zip(v, v[1:]))
+        # A trailing "." or "'" is fine ("Jr.", "O'"), a space or hyphen is not.
+        or v[-1] in " -"
+    )
+    if bad:
         raise serializers.ValidationError(
             "Name may contain only letters, spaces, hyphens and apostrophes.")
     return v

@@ -34,15 +34,51 @@ class MockPaymentProvider(BasePaymentProvider):
 class BaseMessagingProvider:
     name = "base"
 
-    def send(self, channel: str, to: str, body: str) -> dict:
+    def send(self, channel: str, to: str, body: str, subject: str | None = None) -> dict:
         raise NotImplementedError
 
 
 class MockMessagingProvider(BaseMessagingProvider):
     name = "mock"
 
-    def send(self, channel, to, body):
+    def send(self, channel, to, body, subject=None):
         return {"status": "sent", "id": f"MSG-{abs(hash((to, body))) % 10_000_000:07d}"}
+
+
+class EmailMessagingProvider(BaseMessagingProvider):
+    """Sends the `email` channel for real, through Django's configured mail
+    backend (SMTP in prod, console in dev — see EMAIL_BACKEND).
+
+    The default MockMessagingProvider returns a fabricated id and transmits
+    nothing, which is right for tests and demos and wrong the moment a real
+    person clicks "forgot password" — the reset link is generated, logged and
+    then dropped on the floor.
+
+    SMS and WhatsApp are deliberately NOT faked here. A mail backend cannot
+    send them, and returning "sent" for a message that was never transmitted is
+    the failure this class exists to remove — so they are recorded as
+    `unsupported` and the SentMessage row tells the truth. Point
+    MESSAGING_PROVIDER at a gateway adapter when you need those channels.
+    """
+
+    name = "email"
+
+    def send(self, channel, to, body, subject=None):
+        if channel != "email":
+            return {"status": "unsupported", "id": ""}
+        from django.conf import settings
+        from django.core.mail import EmailMessage
+
+        msg = EmailMessage(
+            subject=subject or "Hearth notification",
+            body=body,
+            from_email=getattr(settings, "DEFAULT_FROM_EMAIL", None) or None,
+            to=[to],
+        )
+        # fail_silently=False: a bounced SMTP connection must surface, not be
+        # swallowed into a SentMessage row that claims success.
+        sent = msg.send(fail_silently=False)
+        return {"status": "sent" if sent else "failed", "id": ""}
 
 
 def _load(path, default):

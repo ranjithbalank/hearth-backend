@@ -55,6 +55,25 @@ def _scope(qs, branches, field="location_id"):
     return qs.filter(**{f"{field}__in": branches})
 
 
+def _scope_shared(qs, branches, field="location_id"):
+    """Branch narrowing for a model where a blank location means "shared by
+    every branch" rather than "unassigned".
+
+    Ingredient, MenuItem and Category all work this way: no branch is one
+    central record every branch draws on, and setting a branch makes it that
+    branch's exclusive. Filtering these the way Room is filtered would hide the
+    shared record from everybody — which is most of them.
+
+    Mirrors apps.notifications.views._scope_shared; the two apps keep their own
+    copies for the same reason they keep their own _scope.
+    """
+    from django.db.models import Q
+    if branches == "*":
+        return qs
+    return qs.filter(Q(**{f"{field}__isnull": True})
+                     | Q(**{f"{field}__in": branches or []}))
+
+
 def _between(qs, field, f, t, date_field=False):
     """Filter a queryset's datetime (or date) field to the [f, t] day window."""
     suffix = "" if date_field else "__date"
@@ -1045,7 +1064,7 @@ def _report_rows(report, role, f=None, t=None, branches="*"):
         return ("Guest Report", ["Guest", "Room", "ID type", "ID number", "Check-in"], rows)
     if report == "aggregator":
         # Reuse the viewer's records (already carry gross/commission/net).
-        data = _restaurant_report(report, f, t)
+        data = _restaurant_report(report, f, t, branches)
         return ("Aggregator Order Records (Gross / Commission / Net)",
                 data["records"]["columns"], data["records"]["rows"])
     operational = _operational_report(report, f, t)
@@ -1054,7 +1073,7 @@ def _report_rows(report, role, f=None, t=None, branches="*"):
         # audit run / bill) — the useful thing to open in a spreadsheet.
         return (operational["title"], operational["records"]["columns"],
                 operational["records"]["rows"])
-    restaurant = _restaurant_report(report, f, t)
+    restaurant = _restaurant_report(report, f, t, branches)
     if restaurant:
         # §7 exports reuse the viewer payload: KPI rows then the series.
         rows = [[k["label"], k["value"]] for k in restaurant["kpis"]]
@@ -1133,13 +1152,14 @@ class DayEndView(ModuleAPIView):
         return Response({"tenders": tenders, "total": str(total), "tips": str(tips)})
 
 
-def _item_sales(f=None, t=None):
+def _item_sales(f=None, t=None, branches="*"):
     """Per-menu-item sold qty and revenue across settled/posted orders."""
     from apps.pos.models import OrderLine
     rows = {}
-    lines = _between(OrderLine.objects
-                     .filter(order__status__in=[Order.SETTLED, Order.POSTED_TO_ROOM]),
-                     "order__created_at", f, t).select_related("menu_item")
+    lines = _scope(
+        OrderLine.objects.filter(order__status__in=[Order.SETTLED, Order.POSTED_TO_ROOM]),
+        branches, "order__location_id")
+    lines = _between(lines, "order__created_at", f, t).select_related("menu_item")
     for l in lines:
         r = rows.setdefault(l.menu_item_id, {
             "item": l.menu_item, "qty": 0, "revenue": Decimal("0")})
@@ -1148,13 +1168,17 @@ def _item_sales(f=None, t=None):
     return rows
 
 
-def _consumption_cost(days=None, f=None, t=None):
+def _consumption_cost(days=None, f=None, t=None, branches="*"):
     """Total recipe-consumption cost, and per-day / per-ingredient splits (spec §7).
     An explicit from/to window replaces the rolling `days` default."""
     from django.utils import timezone
     from datetime import timedelta
     from apps.inventory.models import StockMovement
     qs = StockMovement.objects.filter(kind=StockMovement.CONSUMPTION).select_related("ingredient")
+    # A movement has no branch of its own; it inherits the one on its
+    # ingredient — and an ingredient with no branch is the shared central
+    # stock every branch draws on, so this is the shared-or-mine rule.
+    qs = _scope_shared(qs, branches, "ingredient__location_id")
     if f or t:
         qs = _between(qs, "created_at", f, t)
     elif days:
@@ -1170,13 +1194,21 @@ def _consumption_cost(days=None, f=None, t=None):
     return total, by_day, by_ingredient
 
 
-def _restaurant_report(report, f=None, t=None):
-    """§7 restaurant analytics: returns the viewer payload, or None if not ours."""
+def _restaurant_report(report, f=None, t=None, branches="*"):
+    """§7 restaurant analytics: returns the viewer payload, or None if not ours.
+
+    `branches` is what visible_branch_ids(request) returned, and every queryset
+    below goes through it. Without that these six reports were the one place in
+    the product that ignored the branch switcher entirely: a Restaurant Manager
+    assigned to a single outlet read the whole group's sales, consumption and
+    aggregator revenue, and a branch-restricted login saw figures it is not
+    entitled to at all.
+    """
     from apps.inventory.models import StockMovement
     from apps.recipes.models import Recipe
 
     if report == "recipe_consumption":
-        sales = _item_sales(f, t)
+        sales = _item_sales(f, t, branches)
         rows = []
         for r in Recipe.objects.select_related("menu_item").prefetch_related("lines__ingredient"):
             sold = sales.get(r.menu_item_id, {"qty": 0})["qty"]
@@ -1199,9 +1231,11 @@ def _restaurant_report(report, f=None, t=None):
         from datetime import datetime, timedelta
         from django.utils import timezone
         ranged = bool(f or t)
-        _, by_day, _ = _consumption_cost(days=None if ranged else 14, f=f, t=t)
+        _, by_day, _ = _consumption_cost(days=None if ranged else 14, f=f, t=t,
+                                         branches=branches)
         sales_by_day = {}
-        orders = Order.objects.filter(status__in=[Order.SETTLED, Order.POSTED_TO_ROOM])
+        orders = _scope(
+            Order.objects.filter(status__in=[Order.SETTLED, Order.POSTED_TO_ROOM]), branches)
         if ranged:
             orders = _between(orders, "created_at", f, t)
         else:
@@ -1230,9 +1264,11 @@ def _restaurant_report(report, f=None, t=None):
         from apps.inventory.models import Ingredient
         purchased = consumed = Decimal("0")
         by_ing = {}
-        for m in _between(StockMovement.objects
-                          .filter(kind__in=[StockMovement.RECEIPT, StockMovement.CONSUMPTION]),
-                          "created_at", f, t).select_related("ingredient"):
+        movements = _scope_shared(
+            StockMovement.objects.filter(
+                kind__in=[StockMovement.RECEIPT, StockMovement.CONSUMPTION]),
+            branches, "ingredient__location_id")
+        for m in _between(movements, "created_at", f, t).select_related("ingredient"):
             value = abs(m.qty) * (m.ingredient.unit_cost or Decimal("0"))
             if m.kind == StockMovement.RECEIPT:
                 purchased += value
@@ -1252,8 +1288,8 @@ def _restaurant_report(report, f=None, t=None):
         }
 
     if report == "food_cost":
-        total_cons, _, by_ingredient = _consumption_cost(f=f, t=t)
-        fnb = Decimal(_fnb_kpis(f, t)["fnb_sales"])
+        total_cons, _, by_ingredient = _consumption_cost(f=f, t=t, branches=branches)
+        fnb = Decimal(_fnb_kpis(f, t, branches)["fnb_sales"])
         pct = round(float(total_cons / fnb * 100), 1) if fnb else 0
         bars = sorted(({"name": k, "value": float(v)} for k, v in by_ingredient.items()),
                       key=lambda x: -x["value"])[:12]
@@ -1278,7 +1314,7 @@ def _restaurant_report(report, f=None, t=None):
             "swiggy": prop.swiggy_commission_pct or Decimal("0"),
             "website": Decimal("0"), "qr": Decimal("0"),
         }
-        qs = _between(Order.objects.filter(source_platform__in=labels),
+        qs = _between(_scope(Order.objects.filter(source_platform__in=labels), branches),
                       "created_at", f, t).prefetch_related("lines__menu_item")
         received = 0
         settled_total = Decimal("0")
@@ -1326,7 +1362,7 @@ def _restaurant_report(report, f=None, t=None):
 
     if report == "item_profitability":
         from apps.recipes.models import Recipe
-        sales = _item_sales(f, t)
+        sales = _item_sales(f, t, branches)
         recipes = {r.menu_item_id: r for r in
                    Recipe.objects.select_related("menu_item").prefetch_related("lines__ingredient")}
         rows, gross = [], Decimal("0")
@@ -1360,7 +1396,7 @@ class ReportView(ModuleAPIView):
         if not role_can_view_report(role, report):
             return Response({"detail": f"not authorized for the '{report}' report"}, status=403)
         f, t = _parse_range(request)
-        restaurant = _restaurant_report(report, f, t)
+        restaurant = _restaurant_report(report, f, t, visible_branch_ids(request))
         if restaurant:
             return Response(restaurant)
         operational = _operational_report(report, f, t)

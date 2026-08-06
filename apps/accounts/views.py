@@ -404,13 +404,22 @@ class PasswordResetRequestView(APIView):
     def post(self, request):
         from apps.integrations.services import notify
 
+        from django.conf import settings
+
         username = (request.data.get("username") or "").strip()
         user = User.objects.filter(username=username).first() if username else None
         if user and user.email:
             reset = PasswordReset.issue(user)
-            link = f"/reset-password?t={reset.token}"
+            # Absolute, not a bare "/reset-password?t=…" path. This goes into an
+            # email, where a path is not a link — there is no page for the mail
+            # client to resolve it against, so the one thing the message exists
+            # to deliver was unclickable. FRONTEND_BASE_URL is the same setting
+            # the bill PDF already uses for its feedback/order-status links.
+            base = getattr(settings, "FRONTEND_BASE_URL", "").rstrip("/")
+            link = f"{base}/reset-password?t={reset.token}"
             notify("email", user.email,
-                   f"Reset your Hearth password: {link} (expires in 30 minutes)")
+                   f"Reset your Hearth password: {link} (expires in 30 minutes)",
+                   subject="Reset your Hearth password")
             log_action(user, "password_reset_requested", entity="User", entity_id=user.id)
         return Response({"detail": self.GENERIC_MESSAGE})
 

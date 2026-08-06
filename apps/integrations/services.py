@@ -8,11 +8,16 @@ def charge_card(amount, token, reference=""):
     return payment_provider().charge(amount, token, reference)
 
 
-def notify(channel, to, body):
-    """Send a notification and log it."""
+def notify(channel, to, body, subject=None):
+    """Send a notification and log it.
+
+    `subject` is optional and only meaningful to channels that have one (email).
+    SMS/WhatsApp providers ignore it, which is why it is a keyword with a
+    default rather than a positional — every existing caller is unaffected.
+    """
     if not to:
         return None
-    result = messaging_provider().send(channel, to, body)
+    result = messaging_provider().send(channel, to, body, subject=subject)
     return SentMessage.objects.create(
         channel=channel, to=to, body=body,
         status=result.get("status", "sent"), provider_id=result.get("id", ""),

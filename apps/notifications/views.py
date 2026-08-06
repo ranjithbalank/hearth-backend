@@ -8,6 +8,8 @@ from apps.accounts.permissions import (
 )
 from apps.accounts.rbac import acting_role
 
+from .models import AlertSeen, alert_key
+
 
 def _scope(qs, branches, field="location_id"):
     """Same three-shaped branch narrowing the reports use: "*" is the group,
@@ -161,7 +163,11 @@ def _build_alerts(branches="*"):
     pending = PurchaseOrder.objects.filter(status=PurchaseOrder.PENDING).count()
     if pending:
         alerts.append({
-            "severity": "info", "module": "procurement",
+            # A queue somebody works, not a status line — approving these is a
+            # job with a person waiting at the end of it. As "info" it sat with
+            # the ambient readouts and dropped out of the badge, which is the
+            # one place a pending approval needs to be seen.
+            "severity": "warning", "module": "procurement",
             "title": f"{pending} purchase order(s) pending approval",
             "detail": "Awaiting manager approval",
         })
@@ -387,11 +393,14 @@ class NotificationView(APIView):
 
     `?view=hotel|restaurant` narrows to one side of the property, so the
     dashboard's sector tabs and its alert list agree.
+
+    POST marks everything currently visible as seen — that is what the badge
+    counts down.
     """
 
     permission_classes = [IsAuthenticated]
 
-    def get(self, request):
+    def _visible(self, request):
         ent = active_entitlements()
         role = request.user.role
         visible = [
@@ -405,4 +414,35 @@ class NotificationView(APIView):
         visible = alerts_for_sector(visible, request.query_params.get("view", ""))
         order = {"critical": 0, "warning": 1, "info": 2}
         visible.sort(key=lambda a: order.get(a["severity"], 3))
-        return Response({"count": len(visible), "alerts": visible})
+        return visible
+
+    def get(self, request):
+        visible = self._visible(request)
+        live = {alert_key(a) for a in visible}
+        # An acknowledgement only means anything while its condition holds. Drop
+        # the rest, so a problem that clears and returns alerts afresh instead
+        # of staying silent because someone read about it last week.
+        AlertSeen.purge_stale(request.user, live)
+        seen = AlertSeen.seen_keys(request.user)
+        # The badge counts what is BOTH actionable and unacknowledged.
+        #
+        # It used to be len(everything), which is why it never moved: five of
+        # the alert types are ambient readouts that cannot clear — a property
+        # with rooms ready to sell, an open maintenance backlog and a tentative
+        # enquiry on the books is a property working normally, not one with
+        # three problems. Those stay in the list, where they are useful, and
+        # out of the number, which is a call to action.
+        actionable = [a for a in visible
+                      if a["severity"] != "info" and alert_key(a) not in seen]
+        return Response({
+            "count": len(actionable),
+            "alerts": visible,
+            # So the client can show which rows are the unread ones.
+            "unseen": [alert_key(a) for a in actionable],
+        })
+
+    def post(self, request):
+        """Acknowledge everything on screen — called when the panel is opened."""
+        visible = self._visible(request)
+        AlertSeen.mark(request.user, visible)
+        return Response({"count": 0, "seen": len(visible)})

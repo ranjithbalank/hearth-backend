@@ -196,3 +196,86 @@ class NewJoinerHandoverTests(TestCase):
         Employee.objects.create(name="Arun", department="Kitchen", role="Cook", user=arun)
         Employee.objects.create(name="HR", department="Admin", role="Manager", user=hr)
         self.assertEqual(self._hr_titles(), [])
+
+
+class BadgeCountTests(TestCase):
+    """The bell's number is a call to action, so it has to be able to reach
+    zero. It used to be len(every alert), which included ambient readouts that
+    cannot clear — so it never moved whatever anyone did."""
+
+    def setUp(self):
+        self.client = APIClient()
+        self.user = User.objects.create_user(
+            username="badge_gm", password="Tk9$mZ2pQw!7", role="General Manager")
+        self.client.force_authenticate(self.user)
+        # One actionable alert (below par → warning) …
+        Ingredient.objects.create(name="Butter", unit="kg", current_stock=Decimal("1"),
+                                  reorder_level=Decimal("5"))
+
+    def _get(self):
+        return self.client.get("/api/notifications/").data
+
+    def test_info_alerts_are_listed_but_never_counted(self):
+        from apps.rooms.models import Room, RoomType
+        rt = RoomType.objects.create(code="STD", name="Standard", base_rate=Decimal("1000"))
+        # "N room(s) ready to sell" is info — a hotel with sellable rooms is a
+        # hotel working correctly, not one with a problem.
+        Room.objects.create(number="101", room_type=rt, status=Room.VACANT_CLEAN)
+
+        body = self._get()
+        titles = [a["title"] for a in body["alerts"]]
+        self.assertTrue(any("ready to sell" in t for t in titles))
+        # Listed …
+        self.assertTrue(any(a["severity"] == "info" for a in body["alerts"]))
+        # … but every counted alert is actionable.
+        self.assertTrue(body["count"] >= 1)
+        counted_severities = {a["severity"] for a in body["alerts"]
+                              if a["title"] in titles and a["severity"] != "info"}
+        self.assertNotIn("info", counted_severities)
+        self.assertEqual(body["count"], len([a for a in body["alerts"] if a["severity"] != "info"]))
+
+    def test_opening_the_panel_clears_the_badge(self):
+        self.assertGreater(self._get()["count"], 0)
+        self.client.post("/api/notifications/")
+        body = self._get()
+        self.assertEqual(body["count"], 0)
+        # The alerts themselves stay on screen — acknowledged, not resolved.
+        self.assertTrue(body["alerts"])
+
+    def test_a_condition_that_clears_and_returns_alerts_again(self):
+        """Acknowledgement is scoped to the condition, not to the user forever.
+        Restocking and running out again has to reach the person who fixed it
+        the first time."""
+        self.client.post("/api/notifications/")
+        self.assertEqual(self._get()["count"], 0)
+
+        butter = Ingredient.objects.get(name="Butter")
+        butter.current_stock = Decimal("50")   # restocked — alert clears
+        butter.save()
+        self.assertEqual(self._get()["count"], 0)
+
+        butter.current_stock = Decimal("1")    # and runs out again
+        butter.save()
+        self.assertGreater(self._get()["count"], 0, "a recurring problem must re-alert")
+
+    def test_seen_state_is_per_user(self):
+        self.client.post("/api/notifications/")
+        self.assertEqual(self._get()["count"], 0)
+
+        other = APIClient()
+        other.force_authenticate(User.objects.create_user(
+            username="badge_gm2", password="Tk9$mZ2pQw!7", role="General Manager"))
+        self.assertGreater(other.get("/api/notifications/").data["count"], 0)
+
+    def test_count_ignores_a_changing_quantity_in_the_same_alert(self):
+        """"11 room(s) awaiting cleaning" and "10 …" are the same condition.
+        Cleaning one room must not resurrect an acknowledged alert."""
+        from apps.rooms.models import Room, RoomType
+        rt = RoomType.objects.create(code="STD", name="Standard", base_rate=Decimal("1000"))
+        for n in ("201", "202", "203"):
+            Room.objects.create(number=n, room_type=rt, status=Room.VACANT_DIRTY)
+        self.client.post("/api/notifications/")
+        self.assertEqual(self._get()["count"], 0)
+
+        Room.objects.filter(number="201").update(status=Room.VACANT_CLEAN)
+        self.assertEqual(self._get()["count"], 0, "count changing is not a new alert")

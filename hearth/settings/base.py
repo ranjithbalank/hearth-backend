@@ -19,6 +19,25 @@ ALLOWED_HOSTS = env.list("ALLOWED_HOSTS", default=["127.0.0.1", "localhost"])
 # Public base URL of the frontend — printed on bills (feedback QR/link, order status).
 FRONTEND_BASE_URL = env("FRONTEND_BASE_URL", default="http://localhost:5173")
 
+# Outbound mail — carries the password-reset link, so it is the difference
+# between "forgot password" working and silently doing nothing.
+#
+# Dev prints the message to the console: a developer can copy the reset link
+# straight out of the runserver output, and nothing is transmitted by accident.
+# Prod overrides EMAIL_BACKEND to SMTP (see prod.py). MESSAGING_PROVIDER is the
+# separate switch that decides whether notify() reaches Django's mail layer at
+# all — it defaults to the mock, which sends nothing on any channel.
+EMAIL_BACKEND = env("EMAIL_BACKEND", default="django.core.mail.backends.console.EmailBackend")
+EMAIL_HOST = env("EMAIL_HOST", default="")
+EMAIL_PORT = env.int("EMAIL_PORT", default=587)
+EMAIL_HOST_USER = env("EMAIL_HOST_USER", default="")
+EMAIL_HOST_PASSWORD = env("EMAIL_HOST_PASSWORD", default="")
+EMAIL_USE_TLS = env.bool("EMAIL_USE_TLS", default=True)
+DEFAULT_FROM_EMAIL = env("DEFAULT_FROM_EMAIL", default="Hearth <no-reply@hearth.local>")
+# Which adapter notify() sends through. Mock = nothing leaves the machine.
+MESSAGING_PROVIDER = env(
+    "MESSAGING_PROVIDER", default="apps.integrations.providers.MockMessagingProvider")
+
 # Encrypts aggregator (Swiggy/Zomato) webhook secrets at rest (apps.pos.crypto).
 # Dev derives a stable key from SECRET_KEY (so stored secrets survive a dev
 # server restart); prod MUST set its own AGGREGATOR_SECRET_KEY env var —

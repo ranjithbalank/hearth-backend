@@ -569,3 +569,111 @@ class ReportsRbacTests(TestCase):
         self.assertIn("Rooms", groups)
         self.assertNotIn("Guests", groups)
         self.assertNotIn("Restaurant Inventory", groups)
+
+
+class RestaurantReportBranchScopingTests(TestCase):
+    """The §7 restaurant reports used to ignore the branch switcher entirely —
+    no `branches` argument, no `_scope()` call anywhere in the function. A
+    Restaurant Manager assigned to one outlet read the whole group's sales,
+    consumption and aggregator revenue."""
+
+    def setUp(self):
+        from apps.accounts.models import Branch, Property, UserBranchAccess
+        from apps.inventory.models import Ingredient, StockMovement
+
+        prop = Property.objects.first() or Property.objects.create(name="P")
+        self.north = Branch.objects.create(property=prop, code="NTH", name="North",
+                                           restaurant=True)
+        self.south = Branch.objects.create(property=prop, code="STH", name="South",
+                                           restaurant=True)
+        cat = Category.objects.create(name="Main")
+        self.item = MenuItem.objects.create(name="Biryani", category=cat,
+                                            price=Decimal("300"), gst_rate=Decimal("0"))
+
+        # One settled order per branch: 2 plates North, 1 plate South.
+        for br, qty in ((self.north, 2), (self.south, 1)):
+            o = Order.objects.create(mode=Order.TAKEAWAY, status=Order.SETTLED, location=br)
+            OrderLine.objects.create(order=o, menu_item=self.item, qty=qty,
+                                     unit_price=Decimal("300"), kot_fired=True)
+
+        # Branch-exclusive stock, consumed in its own branch.
+        for br, name in ((self.north, "North Rice"), (self.south, "South Rice")):
+            ing = Ingredient.objects.create(name=name, unit="kg", location=br,
+                                            current_stock=Decimal("10"),
+                                            unit_cost=Decimal("100"))
+            StockMovement.objects.create(ingredient=ing, kind=StockMovement.CONSUMPTION,
+                                         qty=Decimal("-1"), balance=Decimal("9"))
+
+        self.boss = User.objects.create_user(
+            username="rs_gm", password="Tk9$mZ2pQw!7", role="General Manager")
+        self.local = User.objects.create_user(
+            username="rs_north", password="Tk9$mZ2pQw!7", role="Restaurant Manager")
+        UserBranchAccess.objects.create(user=self.local, branch=self.north,
+                                        role=self.local.role)
+
+    def _view(self, user, report):
+        client = APIClient()
+        client.force_authenticate(user)
+        r = client.get(f"/api/reports/view/?report={report}")
+        self.assertEqual(r.status_code, 200, report)
+        return {k["label"]: k["value"] for k in r.data["kpis"]}
+
+    def test_sales_reports_show_only_the_user_s_own_branch(self):
+        # Group: 3 plates x 300 = 900. North alone: 2 x 300 = 600.
+        self.assertEqual(
+            Decimal(self._view(self.boss, "sales_vs_consumption")["F&B sales (14d)"]),
+            Decimal("900"))
+        self.assertEqual(
+            Decimal(self._view(self.local, "sales_vs_consumption")["F&B sales (14d)"]),
+            Decimal("600"))
+
+    def test_consumption_cost_is_scoped_to_the_branch_s_own_stock(self):
+        # Group consumes 2 kg at 100; North's own ingredient accounts for 1.
+        self.assertEqual(
+            Decimal(self._view(self.boss, "food_cost")["Ingredient cost"]), Decimal("200"))
+        self.assertEqual(
+            Decimal(self._view(self.local, "food_cost")["Ingredient cost"]), Decimal("100"))
+
+    def test_purchase_vs_consumption_is_scoped(self):
+        self.assertEqual(
+            Decimal(self._view(self.boss, "purchase_vs_consumption")["Consumed value"]),
+            Decimal("200"))
+        self.assertEqual(
+            Decimal(self._view(self.local, "purchase_vs_consumption")["Consumed value"]),
+            Decimal("100"))
+
+    def test_aggregator_revenue_is_scoped(self):
+        for br, ref in ((self.north, "Z-N"), (self.south, "Z-S")):
+            o = Order.objects.create(mode=Order.DELIVERY, status=Order.SETTLED,
+                                     source_platform="zomato", external_ref=ref, location=br)
+            OrderLine.objects.create(order=o, menu_item=self.item, qty=1,
+                                     unit_price=Decimal("300"), kot_fired=True)
+        self.assertEqual(
+            Decimal(self._view(self.boss, "aggregator")["Gross sales (settled)"]),
+            Decimal("600"))
+        self.assertEqual(
+            Decimal(self._view(self.local, "aggregator")["Gross sales (settled)"]),
+            Decimal("300"))
+
+    def test_shared_central_stock_stays_visible_to_every_branch(self):
+        """An ingredient with no branch is the shared store every outlet draws
+        on. Filtering it the way an order is filtered would hide most of the
+        inventory from everybody — the opposite failure."""
+        from apps.inventory.models import Ingredient, StockMovement
+        shared = Ingredient.objects.create(name="Shared Oil", unit="l",
+                                           current_stock=Decimal("10"),
+                                           unit_cost=Decimal("50"))
+        StockMovement.objects.create(ingredient=shared, kind=StockMovement.CONSUMPTION,
+                                     qty=Decimal("-2"), balance=Decimal("8"))
+        # North: its own 100 + the shared 100.
+        self.assertEqual(
+            Decimal(self._view(self.local, "food_cost")["Ingredient cost"]), Decimal("200"))
+
+    def test_the_csv_export_is_scoped_exactly_like_the_viewer(self):
+        """The export is the copy that leaves the building — it must not be the
+        one place the branch filter is skipped."""
+        client = APIClient()
+        client.force_authenticate(self.local)
+        body = client.get("/api/reports/export/?report=food_cost&fmt=csv").content.decode()
+        self.assertIn("100", body)
+        self.assertNotIn("200", body)

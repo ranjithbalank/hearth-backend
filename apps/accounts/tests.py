@@ -370,6 +370,46 @@ class PasswordResetTests(TestCase):
         self.assertEqual(PasswordReset.objects.filter(user=self.user).count(), 1)
         self.assertEqual(PasswordReset.objects.count(), 1)  # nothing created for the fake username
 
+    def test_reset_email_carries_an_absolute_clickable_link(self):
+        """The mail is the whole delivery mechanism, so the link in it has to be
+        a URL. It used to be the bare path "/reset-password?t=…", which a mail
+        client has nothing to resolve against — the message arrived and the one
+        thing it existed to carry was unusable."""
+        from django.conf import settings
+
+        from apps.integrations.models import SentMessage
+
+        self.client.post("/api/auth/password-reset/request/",
+                         {"username": "qa_reset_user"}, format="json")
+        msg = SentMessage.objects.filter(channel="email").latest("id")
+        reset = PasswordReset.objects.get(user=self.user)
+        base = settings.FRONTEND_BASE_URL.rstrip("/")
+        self.assertIn(f"{base}/reset-password?t={reset.token}", msg.body)
+        self.assertEqual(msg.to, self.user.email)
+
+    def test_real_email_provider_sends_and_refuses_to_fake_sms(self):
+        """The default provider is a mock that returns "sent" and transmits
+        nothing. The email adapter actually hands off to Django's mail layer —
+        and reports non-email channels as unsupported rather than claiming a
+        success it cannot deliver."""
+        from django.core import mail
+
+        from apps.integrations.providers import EmailMessagingProvider
+
+        p = EmailMessagingProvider()
+        with self.settings(EMAIL_BACKEND="django.core.mail.backends.locmem.EmailBackend"):
+            result = p.send("email", "someone@hearth.example", "body text", subject="Subject line")
+            self.assertEqual(result["status"], "sent")
+            self.assertEqual(len(mail.outbox), 1)
+            self.assertEqual(mail.outbox[0].subject, "Subject line")
+            self.assertEqual(mail.outbox[0].to, ["someone@hearth.example"])
+
+            # An SMTP backend cannot send an SMS. Saying "sent" here is exactly
+            # the silent-failure this adapter exists to remove.
+            sms = p.send("sms", "+919876543210", "code 1234")
+            self.assertEqual(sms["status"], "unsupported")
+            self.assertEqual(len(mail.outbox), 1)
+
     def test_token_is_single_use(self):
         self.client.post("/api/auth/password-reset/request/", {"username": "qa_reset_user"}, format="json")
         reset = PasswordReset.objects.get(user=self.user)
@@ -835,3 +875,55 @@ class SharedInputRuleTests(TestCase):
     def test_a_blank_phone_still_passes(self):
         from .validators import validate_phone
         self.assertEqual(validate_phone(""), "")
+
+
+class PersonNameValidatorTests(TestCase):
+    """The server-side backstop for human-name fields — guest names, employee
+    names. It is the last gate before a name is stored, so what it rejects is
+    a guest who cannot be checked in."""
+
+    def _ok(self, name):
+        from apps.accounts.validators import validate_person_name
+        self.assertEqual(validate_person_name(name), name)
+
+    def _rejected(self, name):
+        from rest_framework import serializers
+
+        from apps.accounts.validators import validate_person_name
+        with self.assertRaises(serializers.ValidationError, msg=f"{name!r} should be rejected"):
+            validate_person_name(name)
+
+    def test_accepts_names_in_indian_scripts(self):
+        """Indic vowel signs are combining MARKS, not letters. The letters-only
+        rule this replaces rejected them outright — a guest whose name is
+        written in the local script could not be saved at all, on a product
+        built for Indian properties."""
+        self._ok("मीरा राव")        # Meera Rao, Devanagari
+        self._ok("ரவி குமார்")  # Ravi Kumar, Tamil
+        self._ok("আরিফ")                            # Arif, Bengali
+
+    def test_accepts_the_shapes_real_latin_names_take(self):
+        self._ok("Ravi Kumar")
+        self._ok("Mary-Jane")
+        self._ok("O'Neil")
+        self._ok("Jr.")
+        self._ok("José Álvarez")
+
+    def test_still_rejects_what_it_always_did(self):
+        self._rejected("Rav1 Kumar")      # digits
+        self._rejected("Ravi @Kumar")     # symbols
+        self._rejected("-Ravi")           # leading separator
+        self._rejected("Ravi-")           # trailing hyphen
+        self._rejected("Mary--Jane")      # doubled separator
+        self._rejected("Ravi  Kumar")     # doubled space
+
+    def test_surrounding_whitespace_is_trimmed_not_rejected(self):
+        """Someone pasting a name from a booking email brings the spaces with
+        it. That is not a data-quality problem, it is a paste."""
+        from apps.accounts.validators import validate_person_name
+        self.assertEqual(validate_person_name("  Ravi Kumar  "), "Ravi Kumar")
+
+    def test_blank_passes_because_required_is_the_field_s_decision(self):
+        from apps.accounts.validators import validate_person_name
+        self.assertEqual(validate_person_name(""), "")
+        self.assertEqual(validate_person_name(None), "")
